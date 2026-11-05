@@ -1,6 +1,8 @@
 # Nova — Design
 
-> **Status:** design phase, no code yet. Organism design (Section 6), the world lifecycle (Section 4, via 4.4a) resources plus signals (Section 5, via 5.1) technical direction (Section 7, via 7.1) and the build plan (Section 9, via 9.1) were settled on 2026-11-05. **The design is complete** apart from metrics and starting parameters, which get tuned in Phases 1a–1b. Next: Phase 0 (9.1).
+> **Status:** Phase 0 (the skeleton and determinism gate) and Phase 1a (the interpreter on one node; semantics in 6.5) are built. Next: Phase 1b, the abiogenesis test (9.1).
+>
+> The design itself was settled on 2026-11-05: organism design (Section 6), the world lifecycle (Section 4, via 4.4a), resources plus signals (Section 5, via 5.1), technical direction (Section 7, via 7.1) and the build plan (Section 9, via 9.1). **The design is complete** apart from metrics and starting parameters, which get tuned in Phases 1a–1b.
 >
 > **Source:** design discussion between Damian and Claude chat, handed to Claude Code over claude-bridge on 2026-11-05 (messages #13 and #14; Section 4.5 came from the #14 addendum).
 
@@ -392,6 +394,117 @@ These close the remaining small open items from 6.1–6.3 and 4.5.
 25. Deferred: spark rate, grant size and body-length range are tuned during the abiogenesis test.
 26. The Tierra clone (seeded, open membrane) exists only as an engine-validation mode. *Narrowed in 9.1 to a light Tierra mode: Ray's instruction set as a codon table plus an open-membrane flag, checked against his published 839/813 replication cost. No reaper or slicer is built.*
 
+### 6.5 Interpreter semantics v1 (Phase 1a) [decided — built 2026-11-05 from the Phase 1a plan Damian approved, with its eight open points settled as recommended, marked (A)–(H)]
+
+The exact rules the interpreter implements, so this document stays the source of truth. Code: `core/src/interp.cpp` (instructions), `core/src/soup.cpp` (ownership, ledger, tick), `core/src/isa.cpp` (codon tables).
+
+**Memory and ownership**
+- A node's soup is six-bit codons. Each codon is owned by a *block* or is waste. A block is a contiguous range claimed in one go (a spark, an ALLOC) and belongs to one body. A body's first block is its own code, and that block's leading NOPs are its surface.
+- *Private code* (the default): a CPU executes and writes only codons its body owns, and reads its own body or waste. With `isa.membrane = open` (the light Tierra mode) it may read, search and execute anywhere; writes stay within its own body, which is Tierra's rule too.
+- *Wrap (6.4 #14, generalised — (B))*: the IP and both heads wrap at the end of the block they are in. In waste, and in open mode, they wrap at the soup's end. Blocks never wrap the soup's end.
+- Executing a codon the body doesn't own fails, and the IP moves on.
+
+**CPU.** Registers AX, BX and CX (plus DX, used only by Tierra opcodes); an 8-deep stack (`isa.stack_depth`); the IP; read and write heads; an error flag saying whether the last instruction failed; and a count of consecutive errors.
+- Registers are 32-bit. Arithmetic wraps; IFLT and DIV compare and divide signed.
+- A new CPU starts with registers at zero and its IP and both heads at its block's start.
+
+**Templates** (Tierra's V3+ conventions — the ones that reproduce Ray's documented 827/809, below):
+- A template is the run of NOPs after an instruction, at most `isa.max_template` (8).
+- The search looks for the complement, outward from the instruction and forward first at each distance, up to `isa.search_limit` (400). Forward windows start right after the template; backward windows end right before the instruction. Under private code a match must lie in the searcher's own body.
+- *Success:* a jump lands on the instruction after the match, wrapping within that block.
+- *Failure, or no template at all:* the error flag is set and the IP skips the instruction and its template (zero means nothing).
+- Template instructions that don't jump (FIND, a DJNZ or JZ that falls through) skip their template. CALL pushes the address after its template.
+
+**Instructions (table v1)**
+
+| Instruction | Effect | Fails when |
+|---|---|---|
+| NOP0, NOP1 | nothing (template bits) | — |
+| JMP | template jump | no template, no match |
+| IFZ / IFLT / IFNE / IFERR | skip the next instruction unless CX = 0 / AX < BX / AX ≠ BX / the previous instruction failed | — |
+| INC, DEC, ZERO | CX + 1, CX − 1, CX = 0 | — |
+| ROT / ROTB | AX → BX → CX → AX / the reverse | — |
+| PUSH / POP | CX onto / off the stack | stack full / empty |
+| COPY | [write head] ← [read head], with the copy-error chance; both heads advance | read or write not allowed, or a hot page refuses the write (heads stay) |
+| FIND | AX = address after the match | as JMP |
+| SENSE | CX ← reading BX (below) | other BX |
+| ALLOC | BX 0: claim CX codons of waste as a new block, the nearest free run outward from my block (forward on a tie); the write head moves to its start. BX 1: claim CX millicores, chosen at random from the pool and capped by it. CX ≤ 0 does nothing. | no room; empty pool; BX 2 (GPU), 3 (disk) or other |
+| DIVIDE | the latest allocated block becomes the daughter, with one CPU at its start; she gets floor(holding × CX / 64) of each non-memory holding, with CX clamped to 0–64 | no fresh block; BX ≠ 0 (dispersal comes in Phase 3, and a node without that edge will fail the same way — (G)) |
+| CALL / RET | push the address after the template, then jump / pop the IP | no match or stack full / empty stack |
+| DJNZ / JZ | CX − 1, then jump unless CX = 0 / jump if CX = 0 | as JMP, when it jumps |
+| ADD, SUB, MUL, DIV, AND, OR, XOR | CX = AX op BX | DIV by zero |
+| NOT, SHL, SHR, NEG | act on CX | — |
+| RAND | CX = a random value in [0, soup size) | — |
+| SWAP | AX ↔ BX | — |
+| SETH / GETH | head BX (0 = read, 1 = write) ← AX / AX ← head BX | BX > 1; SETH with AX outside the soup |
+| READ / WRITE | CX ← [read head], then it advances / [write head] ← CX & 63, then it advances | not allowed; a hot page refuses the write |
+| ENGULF, INJECT | contact (below) | no target in range, or the contest is lost |
+| EMIT, LISTEN, DISK, GPU | off in Phase 1a | always |
+| YIELD | the CPU idles for the rest of this tick (and so cools) | — |
+| RELEASE | BX 0: the last CX codons of the latest block (all of it if CX ≥ its length). BX 1: CX millicores, oldest first, keeping their heat. | no latest block; no millicores; other BX |
+
+SENSE readings, nearest to self first (6.3):
+0. my block's size;
+1. memory I own;
+2. my millicores;
+3. the mean heat of my millicores;
+4. the heat of the page I run in;
+5. free millicores on the node;
+6. waste codons on the node;
+7. my CPU count.
+
+**Scheduler (6.4 #16).**
+- Each tick a body executes Σ speed(unit heat) × `cpu.instr_per_core` / 1000 instructions. Fractions carry over, and so does overdraft from attack costs, as debt.
+- The budget splits equally among its running CPUs, and the remainder rotates by tick.
+- Bodies run their whole budgets in creation order, starting from a body picked each tick by the node RNG (7.1 D). Bodies born during a tick first run the next tick.
+
+**Death (6.4 #1, (A)).**
+- A body dies in the sweep at the end of the tick if it has no un-halted CPU, *or owns no millicore*. So a daughter given CX = 0 dies the tick she is born, and so does a body whose CPU all overheated away.
+- Its blocks become waste, with their contents kept for scavengers. Its millicores return to the pool with their heat.
+- A CPU halts after `cpu.halt_after` (8) consecutive errors.
+
+**Sparks (6.3).**
+- `spark.initial` sparks fire at tick 0, then `spark.rate` per tick, which is a live knob.
+- A spark turns a random stretch of waste, `spark.min_len`–`spark.max_len` codons long, into a body with one CPU and `spark.grant` millicores drawn at random from the pool.
+- There is no spark while the pool is empty.
+
+**Heat (4.5, 6.4 #2, #17, #18, (C)).**
+- Every millicore and every 64-codon memory page has a heat.
+- *Inputs:* a body's millicores each gain `heat.cpu_gain` × its utilisation per tick (instructions charged ÷ its nominal share). A page gains `heat.fetch_gain` per instruction fetched from it and `heat.write_gain` per codon written into it.
+- *Cooling:* everything loses `heat.cool` of its heat per tick.
+- *Curves, per resource:* the error multiplier rises from `warm` to `err_max` at `max`, and speed falls from `hot` to `speed_min` at `max`. Past `max` the unit is freed with its heat; a freed page's codons become waste. A page above `hot` accepts a write only with probability speed(h).
+- *Defaults:* CPU warm 40, hot 60, max 100. Memory 40, 70, 100. Cooling 0.1. `heat.cpu_gain` 6, which settles a flat-out body at 60, exactly the throttle onset.
+
+**Hazards (6.3, 6.4 #22).** Ray's baselines, each multiplied by the heat error multiplier:
+- *Copy errors:* 5 × 10⁻⁴ per codon copied, flipping one random bit.
+- *Execution flaws:* 10⁻⁴ per instruction; one of AX, BX or CX comes out off by ±1.
+- *Bit rot:* per codon per tick, scaled by its page's multiplier. The default equals Ray's one flip per 10,000 instructions at full load.
+
+**Contact (6.4 #3, #6–9, (D)–(F)).**
+- ENGULF and INJECT read the template after them. Every other body whose surface starts within `contact.range` (256) codons of the IP is a candidate.
+- The best candidate scores highest on matches / max(n, m), where n is the template length, m the surface length, and a match is a complementary bit; 0/0 counts as 1. Ties go to the nearest, then the oldest. The attack succeeds with probability equal to the score.
+- *Cost:* 1 + `contact.cost_base` (8) instructions per attempt, plus `contact.cost_per_codon` (1) per codon moved on success. Overdraft is carried as debt, and the whole cost heats the attacker's millicores.
+- *ENGULF* moves all of the prey's blocks, its CPUs (which keep running, now as the eater's) and its millicores (with their heat).
+- *INJECT* overwrites up to CX codons of the victim's first block from the read head, starting at that block's start + AX and wrapping within the block. CX ≤ 0 does nothing.
+
+**Light Tierra mode (9.1).** `isa.table = tierra0` and `isa.membrane = open` select Ray's instruction set 0 with the semantics his V3+ releases document:
+- *adr, adrb, adrf:* AX = the address after the match, CX = the template size; the IP skips the template.
+- *call* pushes the address after its template; *ret* pops; *ifz* skips one instruction; *mal* claims CX codons and puts their address in AX.
+- *divide* hands the daughter `tierra.divide_share`/64 of the CPU (default 32), because Ray's divide has no amount operand.
+- Every instruction costs 1.
+
+*Result:* Ray's ancestor 0080aaa replicates in **827 instructions for its first copy and 809 for each after**, and breeds true.
+
+*839/813:* Ray's 1991 and 1992 papers give 839/813. Those figures came from his original 1990 simulator, which is lost. Every later release of Ray's — V3.0 (1991) through V5.0 on tomray.me — lists the byte-identical genome at 827/809 under the semantics above. The 12- and 4-instruction gaps are exactly the template NOPs after adrb, adrf and call. Reaching 839/813 needs two behaviours no Ray source documents: adr stepping by one, so its template NOPs execute, and call returning onto its own template. As the brief asked, this is reported, not tuned to.
+
+**Findings while building (for Phase 1b).**
+1. *A heat cliff.* Under uniform load a body's millicores share one heat history, so if they cross `max` they are freed in the same tick and the body dies.
+   - Throttling keeps the default gain below `max`; in practice only attack debt pushes units over.
+   - At `heat.cpu_gain` 45, flat-out bodies lost everything within about 3 ticks and a test world collapsed.
+   - A rule of "release at most one unit per body per tick" would remove the cliff, if wanted.
+2. *Blind predation.* Most ENGULFs in random code are blind (no NOP follows them), and most bodies have no surface. With 0/0 = 1, random code eats nearby surfaceless bodies with certainty. Watch for this in the abiogenesis test.
+3. *The sketch's lineage is bounded by its initial grant.* Each generation gets 1/64 of the previous one's CPU, and the zero-share generation dies. Sustained replication needs CPU claims or sparks. The sketch also replicates more than once only because heads wrap (B).
+
 ## 7. Technical direction [decided via 7.1]
 
 - C++ (or Rust) core; Python only for analysis. *Superseded by 7.1 A and B: C++20, no STL, no third-party, no Python.*
@@ -410,7 +523,8 @@ Context from memory:
 - His personal C++ projects, ScratchML and itracker, go further: no C++ STL and no third-party libraries. Thin C-runtime headers (cstdint, cstdio, cmath, …) and platform headers are allowed.
 - Hardware: i7-12700H (14 cores: 6 performance + 8 efficiency; 20 threads), 40 GB RAM, RTX 3050 Ti Mobile (~4 GB).
 
-- **A. Language and toolchain.** C++20 with MSVC (VS2022 Community), CMake + Ninja, x64: the same stack as itracker, including a `verify.ps1` build-and-test loop and a hand-rolled test harness. Drop Rust.
+- **A. Language and toolchain.** C++20 with MSVC (Visual Studio 2026 Community, v18), CMake + Ninja, x64: the same stack as itracker, including a `verify.ps1` build-and-test loop and a hand-rolled test harness. Drop Rust.
+  - *Updated in Phase 1a:* this line said VS2022 until then. VS 2026 is the only Visual Studio on the machine, and `verify.ps1` finds it through vswhere. It ships without the Clang component, so verify's advisory clang-format step is skipped (and says so).
 - **B. Dependencies [decided — Damian: same rules as ScratchML and itracker].** Nova is written with **no C++ STL** (no `std::` containers, algorithms, strings or iostreams) and **no third-party libraries**. Thin C-runtime headers (`cstdint`, `cstddef`, `cstdio`, `cstdlib`, `cmath`) and platform headers (`windows.h`, intrinsics) are allowed: the line is no-STL, not no-C-runtime. Data structures, RNG, hashing, config parsing, the compressor estimate and the test harness are all hand-rolled. Any exception gets discussed with Damian first. In addition:
   - *SQLite is dropped* in favour of Nova's own versioned binary snapshots plus CSV stats, so there's no library to discuss.
   - *No Python for analysis* **[decided — Damian]**. Analysis lives in Nova's own tooling. Until the UI exists (K below), stats export as CSV, which opens in Excel with no new tool.
@@ -454,6 +568,18 @@ Context from memory:
   - Lineage recorded genotype-to-genotype.
   - The compressibility measure (6.4 #24) uses a hand-rolled LZ-style estimate, so there's no zlib.
 - **I. Performance target.** A lean switch-dispatch interpreter should manage roughly 10^8 instructions per second per core (an estimate, to be benchmarked), or about 10^9 per second across the machine. Benchmark this early: the abiogenesis test's waiting time depends on it.
+  - *Measured in Phase 1a (2026-11-05)* with `tools\bench.ps1`: a Release build on the i7-12700H, 5 s per measurement, and nodes of 4,000 millicores at 25,000 instructions per core per tick. Millions of instructions per second:
+
+    | workload | 1 thread | 20 threads (40 nodes) |
+    |---|---:|---:|
+    | tierra — Ray's ancestor, open membrane, no heat or hazards | 53 | 449 |
+    | sketch — the 6.2 replicator under Nova's rules, heat and baseline hazards | 12–16 | 127 |
+    | random — a sparks-only random soup, Nova's rules (the Phase 1b workload) | 38 | 223 |
+
+  - **The Phase 1b budget should start from about 3.5 × 10⁷ instructions per second on one core and about 2 × 10⁸ across the machine** for the random-soup workload. That is roughly a third of the per-core estimate and a fifth of the machine-wide one.
+  - *Where the time goes:* template searches dominate Tierra-style code (one search per 10 instructions in the ancestor's copy loop). Free-run scans for ALLOC once dominated crowded soups; they are now word-at-a-time with an exact failure cache.
+  - *Scaling:* 20 threads give about 6–8× one thread. The machine has 6 P-cores with hyperthreads plus 8 E-cores, and with only two nodes per thread the slowest node sets each tick's pace. The tick barrier itself is not a factor at these task sizes (a tick is milliseconds), so the spin-then-block barrier Phase 0 flagged is not needed.
+  - *Noise:* single-thread figures vary by about ±20% between runs, depending on whether Windows places the thread on a P-core or an E-core.
 - **J. Island model:** kept. Occasional migration between worlds is fine; picking a "best" world stays banned (6.4 #5). Isolated controls stay.
 - **K. Analysis UI [decided direction — Damian; built later].** The goal is Nova's own UI with visualizations and knobs to tweak settings. The "fancy stuff" comes after the core works.
   - *Tech:* a native Win32 window drawn with GDI meets the no-STL, no-third-party rule.
@@ -494,6 +620,11 @@ The original steps above predate today's decisions. Principles carried over: bui
 - The ownership ledger (millicores, memory), heat (per-unit, throttle-then-release, error-rate curves) and hazards (bit rot, copy errors, execution flaws).
 - ALLOC/DIVIDE mechanics, ENGULF/INJECT with the surface contest, the death sweep, and sparks.
 - *Gates:* the light Tierra mode matches Ray's 839/813; the hand-written 8-instruction sketch replicator works under Nova's rules (seeded, as a smoke test only); benchmark instructions per second per core.
+- *Built 2026-11-05.* Exact semantics are in 6.5.
+  - *Gate 1:* the ancestor replicates in 827 instructions, then 809 per copy, breeding true. These are Ray's documented figures; 839/813 is not reproducible from his documentation (6.5).
+  - *Gate 2:* the sketch makes exact copies in every generation that receives CPU, and the zero-share generation dies.
+  - *Gate 3:* the benchmark results are in 7.1 I.
+  - *Gate 4 (Phase 0's, kept):* a busy soup world gives identical hashes at 1, 4 and 20 threads, and under reversed and shuffled dispatch. Phase 0's demo world (kept as `world.model = demo`, (H)) still hashes to bcaf7639570ecb07.
 
 **Phase 1b — The abiogenesis test (proof of concept).**
 - One node, sparks-only start, Nova rules, GPU off.

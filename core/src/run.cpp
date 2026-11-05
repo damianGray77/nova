@@ -109,7 +109,7 @@ void Run::run_until(u64 tick) {
 }
 
 bool Run::open_stats(const char* path, u32 window, TextBuf* err) {
-    if (!stats_.open(path, window)) {
+    if (!stats_.open(path, window, world_.model())) {
         err->append("cannot open stats file '");
         err->append(path);
         err->append("' (or stats window is 0)");

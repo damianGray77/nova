@@ -1,5 +1,7 @@
 // The Phase 0 gate (design.md 9.1): the same seed gives an identical
-// world-state hash at 1, 4 and 20 threads.
+// world-state hash at 1, 4 and 20 threads. Phase 1a runs it twice: on the
+// Phase 0 demo world (whose hash must not move) and on a busy soup world with
+// the interpreter, heat, hazards and contact all running.
 //
 // Beyond the three required thread counts, the gate also runs 20 threads with
 // the shared queue's dispatch order reversed and shuffled. A clean timing run
@@ -25,6 +27,7 @@ struct Trace {
     u64 hash[kPoints] = {};
     u64 refused = 0;
     u64 bounced = 0;
+    SoupTally soup = {}; // summed over the run (soup model)
     bool ok = false;
 };
 
@@ -43,6 +46,10 @@ Trace trace(const char* cfg, u32 threads, const u32* order) {
         run.step();
         t.refused += run.world().last_tick().parcels_refused;
         t.bounced += run.world().last_tick().units_bounced;
+        u64* sum = reinterpret_cast<u64*>(&t.soup);
+        const u64* add = reinterpret_cast<const u64*>(&run.world().last_soup_tick());
+        for (usize i = 0; i < sizeof(SoupTally) / sizeof(u64); ++i)
+            sum[i] += add[i];
     }
     t.ok = true;
     return t;
@@ -66,11 +73,7 @@ bool same(const Trace& a, const Trace& b, const char* label) {
     return true;
 }
 
-} // namespace
-
-void suite_gate() {
-    const u32 nodes = 200; // must match kBusyWorld
-    u32 reversed[nodes], shuffled[nodes];
+void make_orders(u32 nodes, u32* reversed, u32* shuffled) {
     for (u32 i = 0; i < nodes; ++i) {
         reversed[i] = nodes - 1 - i;
         shuffled[i] = i;
@@ -82,6 +85,49 @@ void suite_gate() {
         shuffled[i] = shuffled[j];
         shuffled[j] = tmp;
     }
+}
+
+void soup_gate() {
+    const u32 nodes = 96; // must match kSoupWorld
+    u32 reversed[nodes], shuffled[nodes];
+    make_orders(nodes, reversed, shuffled);
+
+    Trace t1 = trace(kSoupWorld, 1, nullptr);
+    Trace t4 = trace(kSoupWorld, 4, nullptr);
+    Trace t20 = trace(kSoupWorld, 20, nullptr);
+    Trace t20_rev = trace(kSoupWorld, 20, reversed);
+    Trace t20_shuf = trace(kSoupWorld, 20, shuffled);
+    Trace t1_shuf = trace(kSoupWorld, 1, shuffled);
+
+    CHECK(same(t1, t4, "soup: 1 vs 4 threads"));
+    CHECK(same(t1, t20, "soup: 1 vs 20 threads"));
+    CHECK(same(t1, t20_rev, "soup: 1 thread vs 20 threads reversed dispatch"));
+    CHECK(same(t1, t20_shuf, "soup: 1 thread vs 20 threads shuffled dispatch"));
+    CHECK(same(t1, t1_shuf, "soup: 1 thread vs 1 thread shuffled dispatch"));
+
+    // Not vacuous: every mechanism ran.
+    const SoupTally& s = t1.soup;
+    CHECK(s.instructions > 0 && s.births > 0 && s.deaths > 0 && s.sparks > 0 && s.halts > 0);
+    CHECK(s.copy_errors > 0 && s.flaws > 0 && s.rot_flips > 0);
+    CHECK(s.cpu_released > 0 && s.mem_released > 0);
+    CHECK(s.engulf_tries > 0 && s.inject_tries > 0 && s.engulfs > 0 && s.injects > 0);
+    CHECK(t1.hash[0] != t1.hash[kPoints - 1]);
+
+    printf("  gate: soup world, %u nodes, %llu ticks: hash %016llx at 1/4/20 threads "
+           "(%llu instructions, %llu births, %llu deaths, %llu engulfs, %llu injects)\n",
+           nodes, static_cast<unsigned long long>(kTicks),
+           static_cast<unsigned long long>(t1.hash[kPoints - 1]),
+           static_cast<unsigned long long>(s.instructions),
+           static_cast<unsigned long long>(s.births), static_cast<unsigned long long>(s.deaths),
+           static_cast<unsigned long long>(s.engulfs), static_cast<unsigned long long>(s.injects));
+}
+
+} // namespace
+
+void suite_gate() {
+    const u32 nodes = 200; // must match kBusyWorld
+    u32 reversed[nodes], shuffled[nodes];
+    make_orders(nodes, reversed, shuffled);
 
     Trace t1 = trace(kBusyWorld, 1, nullptr);
     Trace t4 = trace(kBusyWorld, 4, nullptr);
@@ -116,4 +162,9 @@ void suite_gate() {
            static_cast<unsigned long long>(t1.hash[kPoints - 1]),
            static_cast<unsigned long long>(t1.refused),
            static_cast<unsigned long long>(t1.bounced));
+
+    // The demo world's hash is pinned: Phase 1a must not have moved it.
+    CHECK_EQ_U64(t1.hash[kPoints - 1], 0xbcaf7639570ecb07ull);
+
+    soup_gate();
 }

@@ -10,7 +10,7 @@ namespace nova {
 namespace {
 
 // The live knobs. Everything else World::init reads is structural.
-enum class Knob { none, send_rate, sends_per_tick, mutations_per_tick, max_parcel };
+enum class Knob { none, send_rate, sends_per_tick, mutations_per_tick, max_parcel, spark_rate };
 
 struct KnobValue {
     Knob knob = Knob::none;
@@ -18,7 +18,9 @@ struct KnobValue {
     u32 u = 0;
 };
 
-Knob knob_of(Str key) {
+Knob knob_of(Str key, Model model) {
+    if (model == Model::soup)
+        return key.eq("spark.rate") ? Knob::spark_rate : Knob::none;
     if (key.eq("demo.send_rate"))
         return Knob::send_rate;
     if (key.eq("demo.sends_per_tick"))
@@ -31,7 +33,14 @@ Knob knob_of(Str key) {
 }
 
 bool is_structural(Str key) {
-    return key.eq("seed") || key.starts_with("world.");
+    const char* const prefixes[] = {"world.",   "isa.",    "cpu.",   "heat.", "hazard.",
+                                    "contact.", "tierra.", "spark.", "seed."};
+    if (key.eq("seed"))
+        return true;
+    for (const char* p : prefixes)
+        if (key.starts_with(p))
+            return true;
+    return false;
 }
 
 bool parse_u32_in(Str v, u32 lo, u32 hi, u32* out) {
@@ -42,8 +51,8 @@ bool parse_u32_in(Str v, u32 lo, u32 hi, u32* out) {
     return true;
 }
 
-KnobResult parse_knob(Str key, Str v, KnobValue* out) {
-    out->knob = knob_of(key);
+KnobResult parse_knob(Str key, Str v, Model model, KnobValue* out) {
+    out->knob = knob_of(key, model);
     switch (out->knob) {
     case Knob::none:
         return is_structural(key) ? KnobResult::not_live : KnobResult::unknown_key;
@@ -57,6 +66,10 @@ KnobResult parse_knob(Str key, Str v, KnobValue* out) {
         return parse_u32_in(v, 0, 1000000, &out->u) ? KnobResult::ok : KnobResult::bad_value;
     case Knob::max_parcel:
         return parse_u32_in(v, 1, 1000000000, &out->u) ? KnobResult::ok : KnobResult::bad_value;
+    case Knob::spark_rate:
+        if (!parse_f64(v, &out->f) || !(out->f >= 0.0 && out->f <= 1e6))
+            return KnobResult::bad_value;
+        return KnobResult::ok;
     }
     return KnobResult::unknown_key;
 }
@@ -99,16 +112,30 @@ bool World::init(Config& cfg) {
     nodes_ = get_u32_in(cfg, "world.nodes", 64, 1, 1000000);
     u32 chords = get_u32_in(cfg, "world.chords", nodes_ / 2, 0, 10000000);
     soup_size_ = get_u32_in(cfg, "world.soup_size", 256, 1, 1u << 24);
-    pool_capacity_ = get_u32_in(cfg, "world.pool_capacity", 1000, 1, 1000000000);
-    u32 pool_initial = get_u32_in(cfg, "world.pool_initial", pool_capacity_ / 2, 0, pool_capacity_);
+    Str model = cfg.get_str("world.model", "demo");
+    if (model.eq("demo"))
+        model_ = Model::demo;
+    else if (model.eq("soup"))
+        model_ = Model::soup;
+    else
+        cfg.fail("world.model", "must be demo or soup");
+    u32 pool_initial = 0;
+    if (model_ == Model::demo) {
+        pool_capacity_ = get_u32_in(cfg, "world.pool_capacity", 1000, 1, 1000000000);
+        pool_initial = get_u32_in(cfg, "world.pool_initial", pool_capacity_ / 2, 0, pool_capacity_);
+    }
     outbox_capacity_ = get_u32_in(cfg, "world.outbox_capacity", 2, 1, 1024);
 
-    for (usize i = 0; i < sizeof kKnobKeys / sizeof kKnobKeys[0]; ++i) {
-        Str key = kKnobKeys[i];
-        Str v = cfg.get_str(key, kKnobDefaults[i]);
-        KnobResult r = set_knob(key, v);
-        if (r != KnobResult::ok)
-            cfg.fail(key, describe(r));
+    if (model_ == Model::demo) {
+        for (usize i = 0; i < sizeof kKnobKeys / sizeof kKnobKeys[0]; ++i) {
+            Str key = kKnobKeys[i];
+            Str v = cfg.get_str(key, kKnobDefaults[i]);
+            KnobResult r = set_knob(key, v);
+            if (r != KnobResult::ok)
+                cfg.fail(key, describe(r));
+        }
+    } else {
+        soup_params_from_config(cfg, soup_size_, &soup_params_);
     }
     if (!cfg.ok())
         return false;
@@ -142,6 +169,15 @@ bool World::init(Config& cfg) {
 
     // --- node state ---------------------------------------------------------
     tick_ = 0;
+    last_ = {};
+    soup_last_ = {};
+    if (model_ == Model::soup) {
+        delete[] soups_;
+        soups_ = new Soup[nodes_];
+        for (u32 n = 0; n < nodes_; ++n)
+            soups_[n].init(&soup_params_, seed_, n);
+        return true;
+    }
     soup_.resize(static_cast<usize>(nodes_) * soup_size_);
     pool_.resize(nodes_);
     rng_counter_.resize(nodes_);
@@ -200,12 +236,12 @@ bool World::build_edges(const u64* keys, usize n) {
 
 KnobResult World::check_knob(Str key, Str value) const {
     KnobValue kv;
-    return parse_knob(key, value, &kv);
+    return parse_knob(key, value, model_, &kv);
 }
 
 KnobResult World::set_knob(Str key, Str value) {
     KnobValue kv;
-    KnobResult r = parse_knob(key, value, &kv);
+    KnobResult r = parse_knob(key, value, model_, &kv);
     if (r != KnobResult::ok)
         return r;
     switch (kv.knob) {
@@ -221,6 +257,9 @@ KnobResult World::set_knob(Str key, Str value) {
     case Knob::max_parcel:
         max_parcel_ = kv.u;
         break;
+    case Knob::spark_rate:
+        soup_params_.spark_rate = kv.f;
+        break;
     case Knob::none:
         break;
     }
@@ -228,7 +267,11 @@ KnobResult World::set_knob(Str key, Str value) {
 }
 
 void World::update_task(void* ctx, u32 node) {
-    static_cast<World*>(ctx)->update_node(node);
+    World* w = static_cast<World*>(ctx);
+    if (w->model_ == Model::soup)
+        w->soups_[node].tick(w->tick_);
+    else
+        w->update_node(node);
 }
 
 void World::update_node(u32 n) {
@@ -308,7 +351,20 @@ void World::deliver() {
 
 void World::step(ThreadPool& pool) {
     pool.run(nodes_, &World::update_task, this);
-    deliver();
+    if (model_ == Model::soup) {
+        // Nothing crosses edges yet (dispersal is Phase 3): just sum the
+        // tallies, in node order.
+        static_assert(sizeof(SoupTally) % sizeof(u64) == 0, "SoupTally is all u64");
+        soup_last_ = {};
+        u64* sum = reinterpret_cast<u64*>(&soup_last_);
+        for (u32 n = 0; n < nodes_; ++n) {
+            const u64* t = reinterpret_cast<const u64*>(&soups_[n].tally());
+            for (usize i = 0; i < sizeof(SoupTally) / sizeof(u64); ++i)
+                sum[i] += t[i];
+        }
+    } else {
+        deliver();
+    }
     ++tick_;
 }
 
@@ -320,6 +376,19 @@ u64 World::total_units() const {
 }
 
 u64 World::hash() const {
+    if (model_ == Model::soup) {
+        Hasher h(0x6E6F76612D736F75ull); // "nova-sou"
+        h.word(seed_);
+        h.word(tick_);
+        h.word(nodes_);
+        h.word(soup_size_);
+        h.word(edge_src_.size());
+        for (usize e = 0; e < edge_src_.size(); ++e)
+            h.word((static_cast<u64>(edge_src_[e]) << 32) | edge_dst_[e]);
+        for (u32 n = 0; n < nodes_; ++n)
+            soups_[n].hash_into(h);
+        return h.finish();
+    }
     Hasher h(0x6E6F76612D776F72ull); // "nova-wor"
     h.word(seed_);
     h.word(tick_);
@@ -342,6 +411,11 @@ void World::save_state(ByteWriter& w) const {
     for (usize e = 0; e < edge_src_.size(); ++e) {
         w.put_u32(edge_src_[e]);
         w.put_u32(edge_dst_[e]);
+    }
+    if (model_ == Model::soup) {
+        for (u32 n = 0; n < nodes_; ++n)
+            soups_[n].save(w);
+        return;
     }
     for (u32 n = 0; n < nodes_; ++n)
         w.put_u32(pool_[n]);
@@ -374,6 +448,18 @@ bool World::load_state(ByteReader& r, TextBuf* err) {
         r.get_u32(&src);
         r.get_u32(&dst);
         keys[e] = (static_cast<u64>(src) << 32) | dst;
+    }
+    if (model_ == Model::soup) {
+        if (!r.ok() || !build_edges(keys.data(), keys.size())) {
+            err->append("snapshot: invalid edge list");
+            return false;
+        }
+        for (u32 n = 0; n < nodes_; ++n)
+            if (!soups_[n].load(r, err))
+                return false;
+        tick_ = tick;
+        soup_last_ = {};
+        return true;
     }
     Array<u32> pools;
     pools.resize(nodes);

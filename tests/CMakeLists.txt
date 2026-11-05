@@ -16,6 +16,12 @@ add_executable(nova_tests
     test_stats.cpp
     test_replay.cpp
     test_stubs.cpp
+    test_isa.cpp
+    test_interp.cpp
+    test_tierra.cpp
+    test_soup.cpp
+    test_heat.cpp
+    test_contact.cpp
 )
 target_link_libraries(nova_tests PRIVATE nova::core)
 target_compile_features(nova_tests PRIVATE cxx_std_20)
@@ -25,7 +31,8 @@ endif()
 
 # One CTest entry per suite; verify.ps1 runs them all via ctest. Tests that write
 # files do so in the build tree (the CTest working directory).
-set(NOVA_SUITES containers str rng config pool world gate snapshot stats replay stubs)
+set(NOVA_SUITES containers str rng config pool world gate snapshot stats replay stubs
+    isa interp tierra soup heat contact)
 foreach(suite IN LISTS NOVA_SUITES)
     add_test(NAME ${suite} COMMAND nova_tests ${suite})
     set_tests_properties(${suite} PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})

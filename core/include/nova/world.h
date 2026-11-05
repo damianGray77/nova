@@ -25,10 +25,19 @@
 //
 // Units are conserved: they move between pools and never appear or vanish.
 // Capacity limits arrivals only; a bounce can leave a sender above capacity.
+//
+// Phase 1a adds a second node model, selected by `world.model`:
+//
+//   demo  (default) the parcel model above, kept byte-identical so the Phase 0
+//         gate hash, replay logs and snapshots stay valid.
+//   soup  every node is a Soup of organisms (soup.h). The update phase runs one
+//         Soup::tick per node; nothing crosses edges until dispersal (Phase 3),
+//         so delivery only sums the per-node tallies.
 #include "nova/array.h"
 #include "nova/config.h"
 #include "nova/io.h"
 #include "nova/pool.h"
+#include "nova/soup.h"
 #include "nova/types.h"
 
 namespace nova {
@@ -50,25 +59,39 @@ struct TickStats {
 };
 
 enum class KnobResult { ok, unknown_key, not_live, bad_value };
+enum class Model : u8 { demo, soup };
 const char* describe(KnobResult r);
 
 class World {
   public:
-    // Builds the world from config keys: seed, world.* (structural) and demo.*
-    // (live knobs). On a bad value returns false; the reason is in
-    // cfg.value_error(). Keys read here are marked used.
+    World() = default;
+    ~World() { delete[] soups_; }
+    World(const World&) = delete;
+    World& operator=(const World&) = delete;
+
+    // Builds the world from config keys: seed, world.* (structural), and either
+    // demo.* or the soup keys (soup.h). On a bad value returns false; the reason
+    // is in cfg.value_error(). Keys read here are marked used.
     bool init(Config& cfg);
 
     // One tick: parallel update over all nodes, barrier, serial delivery.
     void step(ThreadPool& pool);
 
-    // Live knobs (demo.*) may change between ticks; structural keys (seed,
-    // world.*) may not. check_knob validates without applying.
+    // Live knobs (demo.* in the demo model, spark.rate in the soup model) may
+    // change between ticks; structural keys may not. check_knob validates
+    // without applying.
     KnobResult check_knob(Str key, Str value) const;
     KnobResult set_knob(Str key, Str value);
 
     // Fingerprint of the full world state: seed, tick, graph, pools, soups.
     u64 hash() const;
+
+    Model model() const { return model_; }
+    // Soup model only.
+    const Soup& node_soup(u32 node) const { return soups_[node]; }
+    Soup& node_soup(u32 node) { return soups_[node]; }
+    const SoupParams& soup_params() const { return soup_params_; }
+    const SoupTally& last_soup_tick() const { return soup_last_; }
 
     u64 seed() const { return seed_; }
     u64 tick() const { return tick_; }
@@ -135,6 +158,12 @@ class World {
     Array<u32> outbox_count_;
 
     TickStats last_ = {};
+
+    // soup model
+    Model model_ = Model::demo;
+    SoupParams soup_params_;
+    Soup* soups_ = nullptr; // nodes_ soups (new[]: Soup holds Arrays)
+    SoupTally soup_last_ = {};
 };
 
 } // namespace nova

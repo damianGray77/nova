@@ -11,6 +11,9 @@ add_library(nova_core STATIC
     src/run.cpp
     src/genebank.cpp
     src/compress.cpp
+    src/isa.cpp
+    src/soup.cpp
+    src/interp.cpp
 )
 add_library(nova::core ALIAS nova_core)
 

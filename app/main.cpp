@@ -1,4 +1,4 @@
-// nova -- command line front end for the Phase 0 engine.
+// nova -- command line front end for the engine.
 //
 //   nova run <config> [--threads N] [--ticks N]
 //       Runs the config. Reads run.ticks, run.threads, stats.window,
@@ -7,6 +7,10 @@
 //
 //   nova replay <log> [--threads N]
 //       Re-runs a replay log and checks every logged hash.
+//
+//   nova bench <seconds> [--threads N]
+//       Interpreter throughput on three workloads (bench.cpp), single-threaded
+//       and on N threads. Build in Release first: tools/bench.ps1.
 //
 // Any config key that nothing reads is an error (typo protection).
 #define WIN32_LEAN_AND_MEAN
@@ -23,12 +27,15 @@
 
 using namespace nova;
 
+int cmd_bench(double seconds, u32 threads); // bench.cpp
+
 namespace {
 
 int usage() {
     fprintf(stderr, "usage:\n"
                     "  nova run <config> [--threads N] [--ticks N]\n"
                     "  nova replay <log> [--threads N]\n"
+                    "  nova bench <seconds per measurement> [--threads N]\n"
                     "  (threads 0 = all hardware threads)\n");
     return 2;
 }
@@ -160,6 +167,15 @@ int cmd_run(const Args& a) {
             return 1;
         }
     }
+    if (w.model() == Model::soup) {
+        u64 bodies = 0;
+        for (u32 n = 0; n < w.node_count(); ++n)
+            bodies += w.node_soup(n).body_count();
+        printf("nova: tick %llu  hash %016llx  bodies %llu  (%.1f ms)\n",
+               static_cast<unsigned long long>(w.tick()), static_cast<unsigned long long>(w.hash()),
+               static_cast<unsigned long long>(bodies), ms);
+        return 0;
+    }
     printf("nova: tick %llu  hash %016llx  units %llu  (%.1f ms)\n",
            static_cast<unsigned long long>(w.tick()), static_cast<unsigned long long>(w.hash()),
            static_cast<unsigned long long>(w.total_units()), ms);
@@ -198,5 +214,11 @@ int main(int argc, char** argv) {
         return cmd_run(a);
     if (strcmp(a.mode, "replay") == 0)
         return cmd_replay(a);
+    if (strcmp(a.mode, "bench") == 0) {
+        double seconds = 0;
+        if (!parse_f64(a.path, &seconds) || !(seconds > 0 && seconds <= 3600))
+            return usage();
+        return cmd_bench(seconds, a.has_threads ? static_cast<u32>(a.threads) : 0);
+    }
     return usage();
 }

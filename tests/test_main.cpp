@@ -15,6 +15,12 @@ void suite_snapshot();
 void suite_stats();
 void suite_replay();
 void suite_stubs();
+void suite_isa();
+void suite_interp();
+void suite_tierra();
+void suite_soup();
+void suite_heat();
+void suite_contact();
 
 namespace {
 
@@ -35,6 +41,12 @@ const Suite kSuites[] = {
     {"stats", suite_stats},
     {"replay", suite_replay},
     {"stubs", suite_stubs},
+    {"isa", suite_isa},
+    {"interp", suite_interp},
+    {"tierra", suite_tierra},
+    {"soup", suite_soup},
+    {"heat", suite_heat},
+    {"contact", suite_contact},
 };
 
 } // namespace
