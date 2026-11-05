@@ -1,0 +1,36 @@
+# Build output
+/build/
+/out/
+build*/
+
+# Run outputs (the demo config writes CSV / replay / snapshot files here)
+/runs/
+
+# CMake artifacts (in case of an in-source slip)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+
+# Visual Studio / IDE
+.vs/
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+CMakeSettings.json
+
+# Compiled / debug artifacts
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.lib
+
+# Local-only Claude settings (per-developer, not shared)
+.claude/settings.local.json
+
+# OS cruft
+Thumbs.db
+Desktop.ini
+.DS_Store

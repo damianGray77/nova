@@ -1,0 +1,26 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "ninja-debug",
+      "displayName": "Ninja Debug (MSVC)",
+      "description": "Single-config Ninja build using the MSVC toolchain.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "ninja-debug", "configurePreset": "ninja-debug" }
+  ],
+  "testPresets": [
+    {
+      "name": "ninja-debug",
+      "configurePreset": "ninja-debug",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

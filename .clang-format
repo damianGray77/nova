@@ -1,0 +1,11 @@
+# Formatting baseline for Nova (same as itracker). Apply with: clang-format -i <file>
+BasedOnStyle: LLVM
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 100
+PointerAlignment: Left
+ReferenceAlignment: Left
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+SpaceBeforeParens: ControlStatements
