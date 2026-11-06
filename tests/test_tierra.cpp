@@ -27,12 +27,14 @@ const u8 kAncestor[80] = {
     0x01, 0x12, 0x11, 0x10, 0x17, 0x01, 0x01, 0x01, 0x00, 0x05,
 };
 
+// Tierra has no memory upkeep, so the light Tierra mode runs without it.
 const char* const kTierraMode = "isa.table = tierra0\n"
                                 "isa.membrane = open\n"
                                 "heat.enabled = false\n"
                                 "hazard.copy = 0\n"
                                 "hazard.flaw = 0\n"
-                                "hazard.rot = 0\n";
+                                "hazard.rot = 0\n"
+                                "mem.upkeep = 0\n";
 
 struct Counts {
     u32 per_divide[3] = {};
@@ -113,7 +115,7 @@ void membrane_matters() {
     CHECK(make_params(&open, kTierraMode, 4096));
     CHECK(make_params(&priv,
                       "isa.table = tierra0\nheat.enabled = false\nhazard.copy = 0\n"
-                      "hazard.flaw = 0\nhazard.rot = 0\n",
+                      "hazard.flaw = 0\nhazard.rot = 0\nmem.upkeep = 0\n",
                       4096));
     // A parasite-like probe: movii reads [BX] from someone else's body.
     for (int mode = 0; mode < 2; ++mode) {

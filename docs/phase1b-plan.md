@@ -1,6 +1,8 @@
 # Phase 1b plan: the abiogenesis test
 
-> **DRAFT, revision 3, awaiting Damian's approval. Nothing in it is implemented.** The engine on this branch is still Phase 1a (`2ef4571`).
+> **Revision 3, APPROVED by Damian as recommended (2026-11-05, home rig) and BUILT.** What the engine does is in `docs/design.md` 6.6, with the first findings. D10 is built as knobs, with the abiogenesis defaults set from a sweep (design.md 6.6). The first smoke runs met the gate within seconds through INJECT-based copying, which the D2 detector sees only indirectly; that extension is the open call. The paired experiment has not run yet.
+>
+> The text below is the plan as approved, kept as the record of how each call was reached.
 >
 > - **Source of truth:** `docs/design.md`. Phase 1b's scope and gate are in 9.1.
 > - **This file holds:** the plan, the nine design calls (D1–D9) with recommendations and where each stands after Damian's feedback, one new open call (D10), and the pilot findings that shaped them.

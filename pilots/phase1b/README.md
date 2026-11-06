@@ -1,5 +1,7 @@
 # Phase 1b pilots (THROWAWAY)
 
+> **Superseded (2026-11-05):** the rules these pilots tried are now real config keys in `core/` (`mem.upkeep`, `mem.upkeep_exp`, `cpu.wear`, `spark.timing`; design.md 6.6), and `nova run configs/abio.cfg --set ...` reproduces the same experiments with replay logs. Kept only until Damian decides to delete the folder. `build.ps1` needs `git` (it applies `proto.patch` with `git apply`).
+
 Exploratory code behind the pilot findings in [`docs/phase1b-plan.md`](../../docs/phase1b-plan.md), section 1.
 
 It exists only so those numbers can be reproduced, for example on another machine. **It is not part of the engine:**

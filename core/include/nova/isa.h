@@ -5,13 +5,18 @@
 // The interpreter executes Ops. A CodonTable maps each of the 64 six-bit codons
 // to an Op, and the table is chosen by config, so the same engine runs:
 //
-//   nova_v1   codon table v1 with the doubled core (design.md 6.2): 16 core
-//             instructions on two codons each (0-31), 32 rich ones on one each.
-//   tierra0   Ray's original 32-opcode instruction set 0, for the light Tierra
-//             validation mode (design.md 9.1). Codons 32-63 repeat 0-31, since
-//             Tierra opcodes are 5 bits.
-//   custom    any 64 Op names from config (isa.codons), e.g. INJECT and ENGULF
-//             doubled, for the Phase 1b paired experiments.
+//   nova_v1        codon table v1 with the doubled core (design.md 6.2): 16 core
+//                  instructions on two codons each (0-31), 32 rich ones on one each.
+//   nova_v1_plain  the plain-64 control (Phase 1b D7): codon 2k is core k as in
+//                  nova_v1, codon 2k+1 is the k-th of NOPX JMPF JMPB IFEQ IFGT MOD
+//                  MIN MAX DUP DROP INCA DECA INCB DECB ZEROA ZEROB; 32-63 unchanged.
+//   nova_v1_inv2   nova_v1 with ENGULF and INJECT doubled (Phase 1b D8): codons 58
+//                  and 59 (EMIT and LISTEN, off until Phase 4) become ENGULF and
+//                  INJECT, one bit-1 flip from 56 and 57.
+//   tierra0        Ray's original 32-opcode instruction set 0, for the light Tierra
+//                  validation mode (design.md 9.1). Codons 32-63 repeat 0-31, since
+//                  Tierra opcodes are 5 bits.
+//   custom         any 64 Op names from config (isa.codons).
 //
 // Op names are case-sensitive: Nova's are upper case ("COPY"), Tierra's use the
 // Tierra 4.1+ gb0 spelling ("movii", "subCAB"). Tierra's nop0/nop1 are the same
@@ -35,6 +40,9 @@ enum class Op : u8 {
     t_decc, t_incc, t_pushax, t_pushbx, t_pushcx, t_pushdx, t_popax, t_popbx,
     t_popcx, t_popdx, t_jmpo, t_jmpb, t_call, t_ret, t_movdc, t_movba,
     t_movii, t_adro, t_adrb, t_adrf, t_mal, t_divide,
+    // --- Phase 1b plain-64 additions (design.md 6.6, D7) ----------------------
+    nopx, jmpf, jmpb, ifeq, ifgt, mod, min_, max_,
+    dup, drop, inca, deca, incb, decb, zeroa, zerob,
     count
 };
 
@@ -50,7 +58,7 @@ bool op_from_name(Str name, Op* out);
 
 struct CodonTable {
     Op op[64];
-    char name[16]; // "nova_v1", "tierra0" or "custom"
+    char name[16]; // "nova_v1", "nova_v1_plain", "nova_v1_inv2", "tierra0" or "custom"
 };
 
 // Built-in tables by name; false for an unknown name.

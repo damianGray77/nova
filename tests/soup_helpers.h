@@ -6,11 +6,13 @@
 
 #include "nova/soup.h"
 
-// Heat and every hazard off: the deterministic baseline most unit tests use.
+// Heat, every hazard and memory upkeep off: the deterministic Phase 1a
+// baseline most unit tests use (Phase 1b rules have their own tests).
 inline const char* const kQuiet = "heat.enabled = false\n"
                                   "hazard.copy = 0\n"
                                   "hazard.flaw = 0\n"
-                                  "hazard.rot = 0\n";
+                                  "hazard.rot = 0\n"
+                                  "mem.upkeep = 0\n";
 
 // Builds soup params from config text for a soup of `size` codons. Fails (and
 // says why) on a bad value or a key nobody read.

@@ -14,13 +14,33 @@ void suite_gate();
 void suite_snapshot();
 void suite_stats();
 void suite_replay();
-void suite_stubs();
+void suite_genebank();
 void suite_isa();
 void suite_interp();
 void suite_tierra();
 void suite_soup();
 void suite_heat();
 void suite_contact();
+void suite_rules();
+void suite_tables();
+void suite_detect();
+void suite_gpu();
+void suite_npu();
+void suite_dispersal();
+void suite_leak();
+void suite_edges();
+void suite_disk();
+void suite_salvage();
+void suite_signals();
+void suite_lifecycle();
+void suite_async();
+void suite_devices();
+void suite_view();
+void suite_viewer();
+void suite_landscape();
+void suite_budget();
+void suite_warp();
+void suite_costs();
 
 namespace {
 
@@ -40,13 +60,33 @@ const Suite kSuites[] = {
     {"snapshot", suite_snapshot},
     {"stats", suite_stats},
     {"replay", suite_replay},
-    {"stubs", suite_stubs},
+    {"genebank", suite_genebank},
     {"isa", suite_isa},
     {"interp", suite_interp},
     {"tierra", suite_tierra},
     {"soup", suite_soup},
     {"heat", suite_heat},
     {"contact", suite_contact},
+    {"rules", suite_rules},
+    {"tables", suite_tables},
+    {"detect", suite_detect},
+    {"gpu", suite_gpu},
+    {"npu", suite_npu},
+    {"dispersal", suite_dispersal},
+    {"leak", suite_leak},
+    {"edges", suite_edges},
+    {"disk", suite_disk},
+    {"salvage", suite_salvage},
+    {"signals", suite_signals},
+    {"lifecycle", suite_lifecycle},
+    {"async", suite_async},
+    {"devices", suite_devices},
+    {"view", suite_view},
+    {"viewer", suite_viewer},
+    {"landscape", suite_landscape},
+    {"budget", suite_budget},
+    {"warp", suite_warp},
+    {"costs", suite_costs},
 };
 
 } // namespace

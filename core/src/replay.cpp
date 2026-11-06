@@ -82,6 +82,17 @@ void ReplayWriter::knob(u64 tick, Str key, Str value) {
     file_.flush();
 }
 
+void ReplayWriter::event(u64 tick, Str text) {
+    TextBuf out;
+    out.append("event ");
+    out.append_u64(tick);
+    out.append_char(' ');
+    out.append(text);
+    out.append_char('\n');
+    file_.write(out.view());
+    file_.flush();
+}
+
 void ReplayWriter::tick_hash(const char* kind, u64 tick, u64 hash) {
     TextBuf out;
     out.append(kind);
@@ -111,10 +122,16 @@ Str ReplayLog::knob_value(usize i) const {
     return Str(arena_.data() + knobs_[i].val_off, knobs_[i].val_len);
 }
 
+Str ReplayLog::event_text(usize i) const {
+    return Str(arena_.data() + events_[i].off, events_[i].len);
+}
+
 bool ReplayLog::parse(Str text, TextBuf* err) {
     config_.clear();
     arena_.clear();
     knobs_.clear();
+    events_.clear();
+    version_ = 0;
     checkpoints_.clear();
     has_end_ = false;
     end_ = {};
@@ -141,11 +158,12 @@ bool ReplayLog::parse(Str text, TextBuf* err) {
                 line_error(err, line, "not a Nova replay log (expected 'nova-replay <version>')");
                 return false;
             }
-            if (version != kReplayVersion) {
+            if (version < 1 || version > kReplayVersion) {
                 line_error(err, line, "unsupported replay version ");
                 err->append_u64(version);
                 return false;
             }
+            version_ = static_cast<u32>(version);
             header = true;
             continue;
         }
@@ -185,6 +203,24 @@ bool ReplayLog::parse(Str text, TextBuf* err) {
             kn.val_len = static_cast<u32>(v.n);
             arena_.append(v.p, v.n);
             knobs_.push(kn);
+        } else if (kind.eq("event") && version_ >= 2) {
+            Str tick_s, body;
+            u64 tick = 0;
+            split_word(rest, &tick_s, &body);
+            if (!parse_u64(tick_s, &tick) || body.empty()) {
+                line_error(err, line, "malformed event record");
+                return false;
+            }
+            if (!events_.empty() && tick < events_.back().tick) {
+                line_error(err, line, "event records out of tick order");
+                return false;
+            }
+            Event ev;
+            ev.tick = tick;
+            ev.off = static_cast<u32>(arena_.size());
+            ev.len = static_cast<u32>(body.n);
+            arena_.append(body.p, body.n);
+            events_.push(ev);
         } else if (kind.eq("hash") || kind.eq("end")) {
             Str tick_s, hex;
             ReplayCheckpoint cp;

@@ -108,8 +108,19 @@ void test_parse_errors() {
     err.clear();
     CHECK(!log.parse("not a log\n", &err));
     err.clear();
-    CHECK(!log.parse("nova-replay 2\n", &err));
-    CHECK(strstr(err.c_str(), "unsupported replay version 2") != nullptr);
+    CHECK(!log.parse("nova-replay 3\n", &err));
+    CHECK(strstr(err.c_str(), "unsupported replay version 3") != nullptr);
+    err.clear();
+    // Events exist from version 2; v1 logs still load without them.
+    CHECK(!log.parse("nova-replay 1\nevent 5 replicator node=0\n", &err));
+    err.clear();
+    CHECK(log.parse("nova-replay 2\nevent 5 replicator node=0 x=1\nevent 5 b\nevent 7 c\n", &err));
+    CHECK(log.version() == 2 && log.event_count() == 3 && log.event_tick(2) == 7);
+    CHECK(log.event_text(0).eq("replicator node=0 x=1"));
+    err.clear();
+    CHECK(!log.parse("nova-replay 2\nevent 7 a\nevent 5 b\n", &err)); // out of order
+    err.clear();
+    CHECK(!log.parse("nova-replay 2\nevent 7\n", &err)); // no text
     err.clear();
     CHECK(!log.parse("nova-replay 1\nbogus 1 2\n", &err));
     CHECK(strstr(err.c_str(), "line 2") != nullptr);

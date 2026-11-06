@@ -8,6 +8,15 @@
 
 namespace nova {
 
+double clock_seconds() {
+    static LARGE_INTEGER freq = {};
+    if (freq.QuadPart == 0)
+        QueryPerformanceFrequency(&freq);
+    LARGE_INTEGER c;
+    QueryPerformanceCounter(&c);
+    return static_cast<double>(c.QuadPart) / static_cast<double>(freq.QuadPart);
+}
+
 namespace {
 
 struct PoolImpl {
@@ -130,10 +139,13 @@ void ThreadPool::run(u32 count, TaskFn fn, void* ctx) {
     if (count == 0)
         return;
     NOVA_ASSERT(count <= 0x7FFFFFFFu);
+    // The test order is a permutation of [0, order_count_): runs of another
+    // length (Phase 8's copying a job at a time) go in order.
+    const u32* order = count == order_count_ ? order_ : nullptr;
     PoolImpl* p = static_cast<PoolImpl*>(impl_);
     if (!p) {
         for (u32 k = 0; k < count; ++k)
-            fn(ctx, order_ ? order_[k] : k);
+            fn(ctx, order ? order[k] : k);
         return;
     }
 
@@ -141,14 +153,14 @@ void ThreadPool::run(u32 count, TaskFn fn, void* ctx) {
     p->fn = fn;
     p->ctx = ctx;
     p->count = count;
-    p->order = order_;
+    p->order = order;
     p->next = 0;
     p->busy = p->workers;
     ++p->generation;
     ReleaseSRWLockExclusive(&p->lock);
     WakeAllConditionVariable(&p->wake);
 
-    drain(p, fn, ctx, count, order_); // the caller is one of the threads
+    drain(p, fn, ctx, count, order); // the caller is one of the threads
 
     // Barrier: wait until every worker has finished this generation. The lock
     // hand-off also makes all task writes visible to the caller.

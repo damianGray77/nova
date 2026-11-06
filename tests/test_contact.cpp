@@ -15,7 +15,7 @@ struct Fix {
     Soup s;
     bool init(const char* extra = "", bool heat = false) {
         TextBuf cfg;
-        cfg.append(heat ? "hazard.copy = 0\nhazard.flaw = 0\nhazard.rot = 0\n" : kQuiet);
+        cfg.append(heat ? "hazard.copy = 0\nhazard.flaw = 0\nhazard.rot = 0\nmem.upkeep = 0\n" : kQuiet);
         cfg.append("world.millicores = 2000\n");
         cfg.append(extra);
         if (!make_params(&p, cfg.c_str(), 1024))

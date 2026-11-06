@@ -10,8 +10,8 @@ using namespace nova;
 
 namespace {
 
-// Heat on, hazards off unless a test turns one on.
-const char* const kHeat = "hazard.copy = 0\nhazard.flaw = 0\nhazard.rot = 0\n";
+// Heat on, hazards off unless a test turns one on; Phase 1a rules (no upkeep).
+const char* const kHeat = "hazard.copy = 0\nhazard.flaw = 0\nhazard.rot = 0\nmem.upkeep = 0\n";
 
 struct Fix {
     SoupParams p;

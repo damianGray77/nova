@@ -140,7 +140,7 @@ void sketch_generations() {
 void sketch_world() {
     Run run;
     CHECK(make_run(run, "seed = 7\nworld.model = soup\nworld.nodes = 1\nworld.soup_size = 4096\n"
-                        "world.millicores = 8192\ncpu.instr_per_core = 100\n"
+                        "world.millicores = 8192\ncpu.instr_per_core = 100\nmem.upkeep = 0\n"
                         "heat.enabled = false\nhazard.copy = 0\nhazard.flaw = 0\nhazard.rot = 0\n"
                         "seed.genome = SENSE ALLOC NOP1 COPY DJNZ NOP0 INC DIVIDE\n"
                         "seed.at = 2000\nseed.millicores = 8192\n",
@@ -176,7 +176,7 @@ void sketch_world() {
 void sketch_with_hazards() {
     Run run;
     CHECK(make_run(run, "seed = 11\nworld.model = soup\nworld.nodes = 1\nworld.soup_size = 8192\n"
-                        "world.millicores = 8192\ncpu.instr_per_core = 100\n"
+                        "world.millicores = 8192\ncpu.instr_per_core = 100\nmem.upkeep = 0\n"
                         "seed.genome = SENSE ALLOC NOP1 COPY DJNZ NOP0 INC DIVIDE\n"
                         "seed.at = 4000\nseed.millicores = 8192\n",
                    1));

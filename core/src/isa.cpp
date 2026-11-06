@@ -4,7 +4,7 @@ namespace nova {
 
 namespace {
 
-const char* const kNames[kOpCount] = {
+const char* const kNames[] = {
     // Nova core
     "NOP0", "NOP1", "JMP", "IFZ", "INC", "DEC", "ZERO", "ROT",
     "PUSH", "POP", "COPY", "FIND", "IFLT", "SENSE", "ALLOC", "DIVIDE",
@@ -18,6 +18,16 @@ const char* const kNames[kOpCount] = {
     "decC", "incC", "pushA", "pushB", "pushC", "pushD", "popA", "popB",
     "popC", "popD", "jmpo", "jmpb", "call", "ret", "movDC", "movBA",
     "movii", "adro", "adrb", "adrf", "mal", "divide",
+    // Phase 1b plain-64 additions
+    "NOPX", "JMPF", "JMPB", "IFEQ", "IFGT", "MOD", "MIN", "MAX",
+    "DUP", "DROP", "INCA", "DECA", "INCB", "DECB", "ZEROA", "ZEROB",
+};
+static_assert(sizeof kNames / sizeof kNames[0] == kOpCount, "one name per Op");
+
+// The plain-64 partners, in codon order 1, 3, 5, ... 31 (design.md 6.6, D7).
+const Op kPlainPartners[16] = {
+    Op::nopx, Op::jmpf, Op::jmpb, Op::ifeq, Op::ifgt,  Op::mod,  Op::min_,  Op::max_,
+    Op::dup,  Op::drop, Op::inca, Op::deca, Op::incb, Op::decb, Op::zeroa, Op::zerob,
 };
 
 // Ray's set 0 in opcode order 0x00-0x1f (design.md 9.1; the hex codes of the
@@ -69,7 +79,8 @@ bool op_from_name(Str name, Op* out) {
 }
 
 bool builtin_table(Str name, CodonTable* out) {
-    if (name.eq("nova_v1")) {
+    const bool plain = name.eq("nova_v1_plain"), inv2 = name.eq("nova_v1_inv2");
+    if (name.eq("nova_v1") || plain || inv2) {
         // Core: codons 2k and 2k+1 both decode to core instruction k, so bit 0 is
         // synonymous and bit 1 flips to the listed partner (design.md 6.2).
         for (u32 c = 0; c < 32; ++c)
@@ -77,7 +88,14 @@ bool builtin_table(Str name, CodonTable* out) {
         // Rich: one codon each, partners differing in bit 0.
         for (u32 c = 32; c < 64; ++c)
             out->op[c] = static_cast<Op>(static_cast<u32>(Op::call) + (c - 32));
-        set_name(out, "nova_v1");
+        if (plain) // every instruction on one codon: 2k+1 gets a new partner
+            for (u32 k = 0; k < 16; ++k)
+                out->op[2 * k + 1] = kPlainPartners[k];
+        if (inv2) { // the EMIT/LISTEN slots, always failing until Phase 4
+            out->op[58] = Op::engulf;
+            out->op[59] = Op::inject;
+        }
+        set_name(out, plain ? "nova_v1_plain" : (inv2 ? "nova_v1_inv2" : "nova_v1"));
         return true;
     }
     if (name.eq("tierra0")) {

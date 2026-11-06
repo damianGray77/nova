@@ -72,17 +72,20 @@ void test_dispatch_order() {
     u32 order[6] = {5, 3, 1, 0, 2, 4};
     ThreadPool pool;
     pool.start(1); // inline: the visit order is observable
-    pool.set_dispatch_order(order);
+    pool.set_dispatch_order(order, 6);
     Recorder r;
     pool.run(6, record, &r);
     bool same = r.seen.size() == 6;
     for (u32 k = 0; same && k < 6; ++k)
         same = r.seen[k] == order[k];
     CHECK(same);
+    Recorder r3; // a run of another length goes in order
+    pool.run(3, record, &r3);
+    CHECK(r3.seen.size() == 3 && r3.seen[0] == 0 && r3.seen[1] == 1 && r3.seen[2] == 2);
 
     ThreadPool wide;
     wide.start(20);
-    wide.set_dispatch_order(order);
+    wide.set_dispatch_order(order, 6);
     Array<u32> c;
     c.resize(6);
     wide.run(6, bump, c.data());

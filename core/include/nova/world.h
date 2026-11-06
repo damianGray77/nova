@@ -33,9 +33,40 @@
 //   soup  every node is a Soup of organisms (soup.h). The update phase runs one
 //         Soup::tick per node; nothing crosses edges until dispersal (Phase 3),
 //         so delivery only sums the per-node tallies.
+//
+// Phase 1b adds the replicator detector (lineage.h): one Lineages per soup when
+// detect.enabled (the default), watching but never touching the world.
+//
+// Phase 3 (design.md 6.9) adds the world proper, in the soup model:
+//
+//   world.graph = ring (default: a ring plus random chords, as before) or
+//   procedural (graph.h: a hidden 2D space, proximity links, ruggedness, long
+//   links). Every node has its own SoupParams; in a procedural world the
+//   vary.* knobs spread them over noise fields (node value = mean x (1 + f x
+//   noise), noise -1..1).
+//
+//   Dispersal (world.dispersal, default on only in procedural worlds): DIVIDE
+//   to neighbour k (1 = nearest) queues a departure on the node during its
+//   update. At the barrier the world moves each node's departures, in node
+//   order, onto its out-edges as cargo (a global send sequence number), then
+//   delivers every cargo due at this tick in the fixed order: destination id,
+//   then source id, then send order. A cargo of L codons sent during tick t is
+//   due at t + ceil(L / bandwidth) + latency: placed at the barrier that ends
+//   that tick, she runs from the next. An edge carries at most edge.capacity
+//   cargoes at once. Cargo is world state (hashed, snapshotted); the lineage
+//   tag it carries is detector data and is in neither.
+//
+//   world.origins = all (a soup with sparks everywhere) or one (only node 0
+//   gets sparks; the rest are lifeless random waste until colonised).
+//   seed.node = all, or k for one seeded founder on node k.
+#include "nova/accel.h"
+#include "nova/accelop.h"
 #include "nova/array.h"
 #include "nova/config.h"
+#include "nova/graph.h"
 #include "nova/io.h"
+#include "nova/landscape.h"
+#include "nova/lineage.h"
 #include "nova/pool.h"
 #include "nova/soup.h"
 #include "nova/types.h"
@@ -58,6 +89,29 @@ struct TickStats {
     u64 mutations;
 };
 
+// A world event at the barrier (Phase 4 lifecycle): a node collapsed, or a
+// site became a node (again). The run logs them as replay events.
+struct WorldEvent {
+    u64 tick;
+    u32 kind; // 0 collapse, 1 recovered
+    u32 node;
+    u32 life; // the node's lives so far
+    u32 pad;
+};
+
+// Where a tick's time goes (Phase 7, `nova run --profile`): seconds summed over
+// the ticks profiled. The update is the parallel part; the rest is the
+// barrier, which runs on one thread, and the run's work after the tick.
+struct StepProfile {
+    u64 ticks = 0;
+    double update = 0, accel = 0, signals = 0, departures = 0, delivery = 0, links = 0, lifecycle = 0, tally = 0,
+           ports = 0, after = 0;
+    // Phase 8, warps on the GPU: the parallel pack / unpack / host passes, and
+    // the device's round (upload, the kernel, download) -- both outside update.
+    double warp_cpu = 0, warp_gpu = 0;
+    double warp_pack = 0, warp_host = 0; // the two halves of warp_cpu
+};
+
 enum class KnobResult { ok, unknown_key, not_live, bad_value };
 enum class Model : u8 { demo, soup };
 const char* describe(KnobResult r);
@@ -65,7 +119,12 @@ const char* describe(KnobResult r);
 class World {
   public:
     World() = default;
-    ~World() { delete[] soups_; }
+    ~World() {
+        delete[] lineages_;
+        delete[] soups_; // closes (and deletes) any disk files
+        if (disk_folder_.size())
+            remove_folder(disk_folder_.c_str());
+    }
     World(const World&) = delete;
     World& operator=(const World&) = delete;
 
@@ -76,12 +135,22 @@ class World {
 
     // One tick: parallel update over all nodes, barrier, serial delivery.
     void step(ThreadPool& pool);
+    // Times each part of every step into *p (nullptr = off).
+    void set_profile(StepProfile* p) { prof_ = p; }
+    StepProfile* profile() const { return prof_; }
 
-    // Live knobs (demo.* in the demo model, spark.rate in the soup model) may
-    // change between ticks; structural keys may not. check_knob validates
-    // without applying.
+    // Live knobs (demo.* in the demo model; spark.rate, spark.grant,
+    // spark.min_len, spark.max_len, and from Phase 6 cpu.wear, heat.ambient
+    // and, with dispersal, edge.corruption in the soup model) may change
+    // between ticks; structural keys may not. check_knob validates without
+    // applying.
     KnobResult check_knob(Str key, Str value) const;
     KnobResult set_knob(Str key, Str value);
+    // The soup model's live knobs, for a knobs panel: their keys and current
+    // (mean) values.
+    u32 knob_count() const;
+    Str knob_key(u32 i) const;
+    double knob_now(u32 i) const;
 
     // Fingerprint of the full world state: seed, tick, graph, pools, soups.
     u64 hash() const;
@@ -90,8 +159,14 @@ class World {
     // Soup model only.
     const Soup& node_soup(u32 node) const { return soups_[node]; }
     Soup& node_soup(u32 node) { return soups_[node]; }
+    // The mean (configured) parameters, and node n's own (Phase 3).
     const SoupParams& soup_params() const { return soup_params_; }
+    const SoupParams& node_params(u32 node) const { return node_params_[node]; }
     const SoupTally& last_soup_tick() const { return soup_last_; }
+    // The node's replicator detector, or nullptr when detection is off.
+    const Lineages* node_lineages(u32 node) const { return lineages_ ? &lineages_[node] : nullptr; }
+    Lineages* node_lineages(u32 node) { return lineages_ ? &lineages_[node] : nullptr; }
+    const DetectParams& detect_params() const { return detect_; }
 
     u64 seed() const { return seed_; }
     u64 tick() const { return tick_; }
@@ -112,6 +187,115 @@ class World {
     u32 in_count(u32 node) const { return in_begin_[node + 1] - in_begin_[node]; }
     u32 in_edge(u32 node, u32 k) const { return in_list_[in_begin_[node] + k]; }
 
+    // Phase 3. Hidden positions (procedural and landscape worlds; 0 otherwise).
+    bool procedural() const { return procedural_; }
+    bool dispersal() const { return dispersal_; }
+    double node_x(u32 node) const { return spatial_ ? node_x_[node] : 0.0; }
+    double node_y(u32 node) const { return spatial_ ? node_y_[node] : 0.0; }
+    // Phase 7: a landscape (landscape.h): the world is world_width() x 1, with
+    // its land raster, landmasses, and bridges that open on a schedule.
+    bool landscape() const { return landscape_; }
+    bool spatial() const { return spatial_; }
+    const Landscape& land() const { return ls_; }
+    const LandParams& land_params() const { return lp_; }
+    double world_width() const { return landscape_ ? ls_.width : 1.0; }
+    u32 node_mass(u32 node) const { return landscape_ ? ls_.mass[node] : 0; }
+    bool edge_bridge(u32 e) const { return landscape_ && edge_bridge_[e]; }
+    bool edge_shut(u32 e) const; // a bridge, shut this tick
+    u32 edge_phase(u32 e) const { return landscape_ ? edge_phase_[e] : 0; }
+    // Node n's out-edge to its neighbour number k + 1 (nearest first).
+    u32 degree(u32 node) const { return out_end(node) - out_begin(node); }
+    u32 port(u32 node, u32 k) const { return port_list_[out_begin_[node] + k]; }
+    // Per directed edge (dispersal worlds).
+    u32 edge_latency(u32 e) const { return edge_latency_[e]; }
+    u32 edge_bandwidth(u32 e) const { return edge_bandwidth_[e]; }
+    double edge_distance(u32 e) const { return spatial_ ? edge_dist_[e] : 0.0; }
+    u32 edge_capacity() const { return edge_capacity_; }
+    u32 edge_in_flight(u32 e) const { return in_flight_[e]; }
+    u64 in_flight() const { return cargo_.size(); } // cargoes in transit now
+    // Cargo i in transit (send order): its edge, the tick it is due, and its
+    // transit time in ticks (so it left at the barrier ending due - ticks).
+    u32 cargo_edge(usize i) const { return cargo_[i].edge; }
+    u64 cargo_due(usize i) const { return cargo_[i].due; }
+    u32 cargo_ticks(usize i) const { return cargo_[i].ticks; }
+    u32 cargo_len(usize i) const { return cargo_[i].len; }
+    u32 links_cut() const { return links_cut_; }
+    u32 long_links() const { return long_added_; }
+    // Phase 4: links down now (undirected), and whether edge e is down.
+    u64 links_down() const;
+    bool edge_down(u32 e) const { return e < link_down_.size() && link_down_[e]; }
+    u64 edge_down_until(u32 e) const { return e < down_until_.size() ? down_until_[e] : 0; }
+    // Live nodes (Phase 4 lifecycle; every node otherwise).
+    u64 live_nodes() const;
+    bool lifecycle() const { return lifecycle_; }
+    bool live(u32 n) const { return live_.empty() || live_[n]; }
+    u32 life(u32 n) const { return life_.empty() ? 0 : life_[n]; }
+    u64 born(u32 n) const { return born_.empty() ? 0 : born_[n]; }
+    u64 collapses_total() const { return collapses_total_; }
+    u64 recoveries_total() const { return recoveries_total_; }
+    const Array<WorldEvent>& world_events() const { return wevents_; }
+    void clear_world_events() { wevents_.clear(); }
+    // Phase 7b: the folder holding the disk tier's files ("" = in RAM).
+    Str disk_folder() const { return disk_folder_.view(); }
+    // Phase 5: asynchronous accelerator ops in flight.
+    bool accel_async() const { return accel_async_; }
+    u64 accel_in_flight() const { return acc_ops_.size(); }
+    // Where they run (accel.gpu, accel.npu): a device's name, or "cpu" for the
+    // CPU reference. Never changes a result. Ops completed on a device and by
+    // the reference; ops checked against the reference (accel.verify) and how
+    // many differed (the reference's answer is used). Notes: a device that
+    // failed to start or failed mid-run, and the first difference found.
+    const char* accel_gpu_name() const;
+    const char* accel_npu_name() const;
+    u64 accel_device_ops() const { return acc_device_ops_; } // of which on the NPU:
+    u64 accel_npu_ops() const { return acc_npu_ops_; }
+    u64 accel_reference_ops() const { return acc_reference_ops_; }
+    u64 accel_verified() const { return acc_verified_; }
+    u64 accel_mismatches() const { return acc_mismatches_; }
+    Str accel_notes() const { return acc_notes_.view(); }
+    // Phase 8: warps (design.md 6.14). Where they run (warp.device): the
+    // GPU's name, or "cpu" for the reference. Never changes a result. Rounds
+    // run on the device and by the reference; rounds checked against the
+    // reference (warp.verify) and how many differed (the reference's result
+    // is kept). Notes: a device that failed to start or failed mid-run.
+    bool warps() const { return model_ == Model::soup && soup_params_.warps; }
+    const char* warp_device_name() const { return warp_gpu_.is_open() ? warp_gpu_.name() : "cpu"; }
+    u64 warp_gpu_rounds() const { return warp_gpu_rounds_; }
+    u64 warp_ref_rounds() const { return warp_ref_rounds_; }
+    u64 warp_verified() const { return warp_verified_; }
+    u64 warp_mismatches() const { return warp_mismatches_; }
+    Str warp_notes() const { return warp_notes_.view(); }
+    double warp_compile_ms() const { return warp_compile_ms_; }
+    const WarpGpuStats& warp_gpu_stats() const { return warp_gpu_.stats(); }
+    // warp.device = auto: the GPU and the CPU reference each take a share of
+    // the nodes every round, at once. A node goes to the CPU when its
+    // longest body ran more than warp_limit() steps last round (the GPU runs
+    // a body's steps one after another); the limit is searched for, round by
+    // round, as the one that makes a round quickest per warp step. Node-rounds
+    // run on each so far. Auto also times whole
+    // ticks run so against ticks without the GPU at all (the plain reference,
+    // as warp.device = cpu), and runs the quicker; warp_plain_ticks() counts
+    // the ticks it ran without the GPU.
+    bool warp_auto() const { return warp_auto_; }
+    u32 warp_limit() const { return warp_limit_; }
+    u64 warp_gpu_nodes() const { return warp_gpu_nodes_; }
+    u64 warp_ref_nodes() const { return warp_ref_nodes_; }
+    u64 warp_plain_ticks() const { return warp_plain_ticks_; }
+    u64 warp_split_ticks() const { return warp_auto_ticks_ - warp_plain_ticks_; }
+    // The GPU failed while it held warps' lanes: the world stopped (it can't
+    // go on exactly); resume from a snapshot.
+    bool warp_failed() const { return warp_failed_; }
+    // Every warp's lanes back from the GPU (kNone: on every node), so the host
+    // can read them. hash() and save_state() do it themselves.
+    void warp_sync(u32 node = kNone);
+    // Signals (Phase 4): channels, and node n's signal paths (sources it
+    // reaches: target, hops, delay).
+    u32 channels() const { return channels_; }
+    u32 route_count(u32 n) const { return route_begin_.size() ? route_begin_[n + 1] - route_begin_[n] : 0; }
+    u32 route_target(u32 n, u32 i) const { return route_tgt_[route_begin_[n] + i]; }
+    u32 route_hops(u32 n, u32 i) const { return route_hops_[route_begin_[n] + i]; }
+    u32 route_delay(u32 n, u32 i) const { return route_delay_[route_begin_[n] + i]; }
+
     // Snapshot support. Call load_state() on a world freshly init()ed from the
     // snapshot's config; it replaces tick, graph, pools and soups.
     void save_state(ByteWriter& w) const;
@@ -122,10 +306,56 @@ class World {
         u32 sent, refused, mutations, pad;
     };
 
+    // A daughter in transit (Phase 3). Raw-hashable except the tag.
+    struct Cargo {
+        u64 due;   // delivered at the barrier ending this tick
+        u64 seq;   // world send order
+        CargoTag tag; // detector data: not hashed, not snapshotted
+        u32 edge, len, codon_off;
+        u32 millicores, gpus, npus;
+        u32 ticks; // in transit (Phase 4: corruption exposure); derived from the edge
+        u32 disk;  // disk codons she claims on arrival (Phase 4)
+        u32 form;  // kFormCpu or kFormGpu (Phase 8)
+        u32 pad;
+    };
+
     bool build_edges(const u64* keys, usize n); // keys: (src << 32 | dst), strictly increasing
     void update_node(u32 node);
     void deliver();
     static void update_task(void* ctx, u32 node);
+    // Phase 3
+    // Per-node SoupParams: vary.* factors (by NoiseField), world.origins = one,
+    // seed.node (kNone = all).
+    void init_nodes(const double* vary, bool one_origin, u32 seed_node);
+    void init_ports();               // neighbour numbering and each soup's ports
+    void take_departures();          // the barrier: departures onto edges
+    void deliver_cargo();            // the barrier: due cargoes, in the fixed order
+    void apply_spark_rate(double rate);
+    // Phase 4
+    void corrupt(Cargo& c);          // transit corruption of one cargo, at delivery
+    void links_update();             // the barrier: links failing and coming back
+    // Removes every cargo on an edge with drop[edge] set, counting them lost.
+    void drop_cargo(const u8* drop);
+    void compute_routes();           // signal paths over the links that are up
+    void signal_field(u32 node);     // the update phase: the field node hears this tick
+    void scatter_signals();          // the barrier: this tick's emissions, onto their paths
+    // The lifecycle: property fields at a tick (drifting when world.drift > 0),
+    // one node's params from them (first = its first life), the land mask at a
+    // tick, the barrier's collapses and recoveries, and rebuilding the graph
+    // among live sites (cargo and link state carried across).
+    void fields_at(u64 tick, Array<double>* z);
+    void derive_node(u32 n, const Array<double>* z, bool first);
+    void land_at(u64 tick, Array<u8>* mask);
+    void lifecycle_update();
+    void rebuild_graph();
+    // Phase 5: the barrier's asynchronous accelerator ops: gather this tick's,
+    // then complete those due. The devices: opening them (init), sending the
+    // newly gathered ops from `first` on, and completing ops [lo, hi) that are
+    // due (true if any were).
+    void accel_barrier();
+    void accel_open(Config& cfg);
+    void accel_submit(usize first);
+    bool accel_complete_range(usize lo, usize hi);
 
     // structural
     u64 seed_ = 0;
@@ -161,9 +391,155 @@ class World {
 
     // soup model
     Model model_ = Model::demo;
-    SoupParams soup_params_;
+    SoupParams soup_params_;        // the configured (mean) parameters
+    Array<SoupParams> node_params_; // each node's own; soups point into it
+    Array<double> spark_factor_;    // per node: its spark.rate multiplier
     Soup* soups_ = nullptr; // nodes_ soups (new[]: Soup holds Arrays)
     SoupTally soup_last_ = {};
+    DetectParams detect_;
+    Lineages* lineages_ = nullptr; // nodes_ detectors, or nullptr
+
+    StepProfile* prof_ = nullptr;
+    TextBuf disk_folder_; // Phase 7b: this run's disk files, or empty (RAM)
+    // Phase 7: a landscape (generated once; the ports derive from it each tick)
+    bool landscape_ = false, spatial_ = false;
+    LandParams lp_;
+    Landscape ls_;
+    Array<u8> edge_bridge_;       // per edge: a bridge
+    Array<u32> edge_phase_;       // per edge: a bridge's schedule phase
+    Array<u32> bridge_list_;      // the bridges' edges
+    Array<u8> shut_;              // per edge: a bridge shut this tick
+    Array<u8> port_down_;         // per edge: refuses departures (failed, shut, fallow end)
+    bool ports_dirty_ = false;
+    Spread spreads_[6];           // spark, then res.memory, cpu, gpu, npu, disk
+    Array<u32> share_mem_, share_cpu_, share_gpu_, share_npu_, share_disk_;
+    Array<double> spark_w_;
+    void read_land_params(Config& cfg);
+    void read_spreads(Config& cfg);
+    static bool resource_field(u32 f);
+    void spread_resources();
+    void refresh_ports();
+    void bridges_update();
+    // Phase 3: the world (graph structure derives from the config)
+    bool procedural_ = false;
+    bool dispersal_ = false;
+    Array<double> node_x_, node_y_;
+    Array<u32> edge_latency_, edge_bandwidth_;
+    Array<double> edge_dist_;
+    Array<u32> port_list_; // per node (offsets out_begin_): out-edges nearest first
+    u32 edge_capacity_ = 0;
+    u32 links_cut_ = 0, long_added_ = 0;
+    // transit (world state)
+    Array<Cargo> cargo_;      // in send order
+    Array<u8> cargo_codons_;
+    Array<u32> in_flight_;    // per edge, derived from cargo_
+    u64 next_seq_ = 0;
+    Array<u32> due_scratch_;
+    Array<u64> order_scratch_;
+
+    // Phase 4: edges (corruption, link failures)
+    double edge_corruption_ = 0, edge_failure_ = 0, edge_downtime_ = 1000;
+    Array<u32> edge_rev_;        // the opposite direction of each edge
+    Array<u64> down_until_;      // per edge: down until this tick (0 = up); world state
+    Array<u8> link_down_;        // per edge: 1 while down (ports read it)
+    u64 world_corrupted_ = 0, world_transit_lost_ = 0; // this tick, added to the tally
+    Array<u8> drop_scratch_;
+    // Phase 4: the lifecycle (empty when off: every node is live)
+    Array<u8> live_;
+    bool lifecycle_ = false;
+    double land_ = 1.0, drift_ = 0.0;
+    u32 budget_ = 0, recover_every_ = 100;
+    u64 fallow_min_ = 2000;
+    double vary_[kFieldCount] = {};
+    bool one_origin_ = false;
+    u32 seed_node_ = 0xFFFFFFFFu;
+    GraphParams gp_;
+    ProcGraph pg_;            // the generation: sites, ruggedness, long pairs
+    Array<u64> born_;         // per site: the tick it last became a node (0 = at the start)
+    Array<u64> fallow_since_; // per site: when it went fallow (0 = sea from the start)
+    Array<u32> life_;         // per site: lives after the first
+    Array<u8> lived_;         // per site: has been a node
+    u64 collapses_total_ = 0, recoveries_total_ = 0, world_collapses_ = 0, world_recoveries_ = 0;
+    Array<WorldEvent> wevents_;
+    // Phase 4: signals
+    u32 channels_ = 0;
+    double attenuation_ = 0.25;
+    u32 reach_ = 8;
+    double latency_scale_ = 0;
+    u32 sig_slots_ = 0;      // the pending ring: longer than any path's delay
+    Array<double> pending_;  // [slot][node][channel]: what each node will hear; world state
+    Array<double> att_pow_;  // attenuation^hops
+    Array<u32> route_begin_; // per source node (nodes + 1 offsets)
+    Array<u32> route_tgt_, route_hops_, route_delay_;
+    Array<u32> bfs_dist_, bfs_delay_, bfs_queue_;
+    // Phase 5: asynchronous accelerator ops in flight (world state), in gather
+    // order: their inputs (read at gather) and write-back addresses.
+    bool accel_async_ = false;
+    Array<AccelOp> acc_ops_;
+    Array<u8> acc_in_;
+    Array<u32> acc_addr_;
+    Array<u8> acc_out_; // scratch: one op's output codons
+    // Phase 5: the devices. Not world state: never hashed or saved, so the
+    // world is the same whichever device (or none) computed it.
+    struct AccelJob { // one batch on a device: GPU tickets first, then the NPU's
+        Array<u8> codons;              // its outputs, op after op
+        Array<u32> scalars, out_off;   // per op in the batch
+        bool ready = false, ok = false, verify = false;
+    };
+    GpuBackend gpu_;
+    NpuBackend npu_;
+    bool npu_on_gpu_ = false;     // NPU ops may go to the GPU kernel (no NPU, or it failed)
+    u32 verify_every_ = 0;        // accel.verify
+    u64 acc_batches_ = 0, acc_device_ops_ = 0, acc_npu_ops_ = 0, acc_reference_ops_ = 0, acc_verified_ = 0,
+        acc_mismatches_ = 0;
+    TextBuf acc_notes_;
+    Array<i32> acc_job_;  // per op in acc_ops_: its batch's ticket, or -1 (the reference)
+    Array<u32> acc_slot_; // per op: its place in that batch
+    Array<u32> acc_pick_; // scratch
+    AccelJob acc_jobs_[2 * kAccelSlots];
+    void accel_take_job(u32 job); // after a submit: the picked ops belong to batch `job`
+
+    // Phase 8: warps on the GPU. Not world state, like the devices above.
+    WarpGpu warp_gpu_;
+    bool warp_auto_ = false;   // warp.device = auto: the GPU and the CPU share each round
+    bool warp_mixed_ = false;  // warp.device = mixed: a test, nodes split at random every round
+    u32 warp_limit_ = 1000000000u; // auto: nodes whose longest body ran more steps go to the CPU
+    int warp_dir_ = 1;         // auto's search for the limit: its direction, stride (2^stride a round),
+    double warp_stride_ = 1.0; //   and the last round's cost (seconds a warp step) and tick
+    double warp_cost_ = 0;
+    u64 warp_cost_tick_ = 0;
+    u64 warp_auto_ticks_ = 0;  // auto: ticks decided so far, and how many ran without the GPU
+    u64 warp_plain_ticks_ = 0;
+    double warp_tick_s_[2] = {0, 0}; // auto: recent seconds a tick, [0] with the GPU, [1] without
+    u32 warp_last_plain_ = 2;        // auto: how the last tick ran (2: none yet)
+    bool warp_go_plain();            // auto: this tick without the GPU?
+    bool warp_failed_ = false;
+    bool warp_verifying_ = false; // this round also runs on the reference (warp.verify)
+    u32 warp_verify_ = 0;
+    u32 warp_round_ = 0;
+    double warp_compile_ms_ = 0;
+    u64 warp_gpu_rounds_ = 0, warp_ref_rounds_ = 0, warp_verified_ = 0, warp_mismatches_ = 0;
+    u64 warp_gpu_nodes_ = 0, warp_ref_nodes_ = 0;
+    TextBuf warp_notes_;
+    Array<u8> warp_active_;      // per node: still has warps to run this tick
+    Array<u8> warp_on_gpu_;      // per node: the GPU runs its round
+    Array<WarpJob> warp_jobs_;
+    Array<u32> warp_job_node_;
+    Array<u32> warp_send_;       // the jobs' lanes to send (warp slots)
+    Array<WarpFetch> warp_fetch_;
+    Array<u32> warp_fetch_node_;
+    Array<u32> warp_save_img_, warp_save_lanes_; // warp.verify: the packed round, before the GPU ran it
+    Array<u64> warp_save_off_;   // per job: where its image and lanes start in those
+    void warp_open(Config& cfg);
+    void warp_step(ThreadPool& pool);
+    void warp_fail(Str why);
+    bool warp_fetch(Array<WarpFetch>& list, Array<u32>& nodes);
+    static void warp_first_task(void* ctx, u32 node);
+    static void warp_pack_task(void* ctx, u32 node);
+    static void warp_ref_task(void* ctx, u32 node);
+    static void warp_unpack_task(void* ctx, u32 node);
+    static void warp_host_task(void* ctx, u32 node);
+    static void warp_second_task(void* ctx, u32 node);
 };
 
 } // namespace nova

@@ -16,6 +16,13 @@ set(allowed
     cmath     # (reserved for heat curves etc.)
     windows.h # threads, SRWLOCK, CONDITION_VARIABLE
     intrin.h  # _umul128, _Interlocked*
+    # The real GPU and NPU (Phase 5; approved by Damian, 2026-11-06): Windows'
+    # own Direct3D 12, DXCore and DirectML, used only by core/src/accel_dx.cpp.
+    initguid.h
+    d3d12.h
+    d3dcompiler.h
+    DirectML.h
+    dxcore.h
 )
 
 if(NOT ROOT)

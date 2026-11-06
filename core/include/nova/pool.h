@@ -21,6 +21,9 @@
 
 namespace nova {
 
+// A monotonic clock in seconds (QueryPerformanceCounter), for profiling.
+double clock_seconds();
+
 class ThreadPool {
   public:
     using TaskFn = void (*)(void* ctx, u32 index);
@@ -38,10 +41,14 @@ class ThreadPool {
     u32 threads() const { return threads_; }
     void run(u32 count, TaskFn fn, void* ctx);
 
-    // Test hook: slot k of the shared queue runs task order[k] instead of k.
-    // order must be a permutation of [0, count) for every later run() and must
-    // outlive them; nullptr restores the identity order.
-    void set_dispatch_order(const u32* order) { order_ = order; }
+    // Test hook: slot k of the shared queue runs task order[k] instead of k,
+    // in every later run() of `count` tasks (runs of other lengths go in
+    // order). order must be a permutation of [0, count) and outlive those
+    // runs; nullptr restores the identity order.
+    void set_dispatch_order(const u32* order, u32 count) {
+        order_ = order;
+        order_count_ = order ? count : 0;
+    }
 
     static u32 hardware_threads();
 
@@ -49,6 +56,7 @@ class ThreadPool {
     void* impl_ = nullptr; // PoolImpl, defined in pool.cpp
     u32 threads_ = 0;
     const u32* order_ = nullptr;
+    u32 order_count_ = 0;
 };
 
 } // namespace nova
