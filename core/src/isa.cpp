@@ -21,6 +21,8 @@ const char* const kNames[] = {
     // Phase 1b plain-64 additions
     "NOPX", "JMPF", "JMPB", "IFEQ", "IFGT", "MOD", "MIN", "MAX",
     "DUP", "DROP", "INCA", "DECA", "INCB", "DECB", "ZEROA", "ZEROB",
+    // Phase 10
+    "INERT",
 };
 static_assert(sizeof kNames / sizeof kNames[0] == kOpCount, "one name per Op");
 
@@ -79,8 +81,8 @@ bool op_from_name(Str name, Op* out) {
 }
 
 bool builtin_table(Str name, CodonTable* out) {
-    const bool plain = name.eq("nova_v1_plain"), inv2 = name.eq("nova_v1_inv2");
-    if (name.eq("nova_v1") || plain || inv2) {
+    const bool plain = name.eq("nova_v1_plain"), inv2 = name.eq("nova_v1_inv2"), v2 = name.eq("nova_v2");
+    if (name.eq("nova_v1") || plain || inv2 || v2) {
         // Core: codons 2k and 2k+1 both decode to core instruction k, so bit 0 is
         // synonymous and bit 1 flips to the listed partner (design.md 6.2).
         for (u32 c = 0; c < 32; ++c)
@@ -95,7 +97,9 @@ bool builtin_table(Str name, CodonTable* out) {
             out->op[58] = Op::engulf;
             out->op[59] = Op::inject;
         }
-        set_name(out, plain ? "nova_v1_plain" : (inv2 ? "nova_v1_inv2" : "nova_v1"));
+        if (v2) // Phase 10: codon 0 is what dead matter decays to
+            out->op[0] = Op::inert;
+        set_name(out, plain ? "nova_v1_plain" : (inv2 ? "nova_v1_inv2" : (v2 ? "nova_v2" : "nova_v1")));
         return true;
     }
     if (name.eq("tierra0")) {

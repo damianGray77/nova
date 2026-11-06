@@ -35,12 +35,15 @@ const char* const kColumns[kStatsColumns] = {
     "actions_started", "actions_landed", "actions_failed", "actions_defended",
     // Phase 9c: threads and E millicores (two sums, then a gauge)
     "threads_started", "e_work", "e_held",
+    // Phase 10: vents, decay, bites and death (sums)
+    "vent_codons",  "decayed",      "bites_waste",   "bites_body",   "codons_bitten", "threads_ended",
+    "died_halted",  "died_frozen",  "died_worn",
     "compress",     "ambient"};
 // The first 39 tally fields fill columns 3-41; Phase 8's five go after
 // live_nodes, then Phase 9's four after the warp gauges, then Phase 9c's two
-// and its gauge.
-inline constexpr u32 kTallyEarly = 39, kTallyWarp = 5, kTallyAction = 4, kTallyThread = 2;
-static_assert(sizeof(SoupTally) / sizeof(u64) == kTallyEarly + kTallyWarp + kTallyAction + kTallyThread,
+// and its gauge, then Phase 10's nine.
+inline constexpr u32 kTallyEarly = 39, kTallyWarp = 5, kTallyAction = 4, kTallyThread = 2, kTallyLife = 9;
+static_assert(sizeof(SoupTally) / sizeof(u64) == kTallyEarly + kTallyWarp + kTallyAction + kTallyThread + kTallyLife,
               "a SoupTally field was added: update kColumns");
 
 } // namespace
@@ -111,7 +114,8 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
                         max_depth,       lineages,    top,        top_genos, colonised,    w.links_down(),
                         disk_held,       w.live_nodes()};
     const usize nt = sizeof tail / sizeof tail[0];
-    static_assert(3 + kTallyEarly + sizeof tail / sizeof tail[0] + kTallyWarp + 2 + kTallyAction + kTallyThread + 1 ==
+    static_assert(3 + kTallyEarly + sizeof tail / sizeof tail[0] + kTallyWarp + 2 + kTallyAction + kTallyThread + 1 +
+                          kTallyLife ==
                       kStatsIntColumns,
                   "stats row shape");
     for (usize i = 0; i < nt; ++i)
@@ -125,6 +129,9 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
     for (usize i = 0; i < kTallyThread; ++i) // Phase 9c
         v[42 + nt + kTallyWarp + 2 + kTallyAction + i] = t[kTallyEarly + kTallyWarp + kTallyAction + i];
     v[42 + nt + kTallyWarp + 2 + kTallyAction + kTallyThread] = e_held;
+    for (usize i = 0; i < kTallyLife; ++i) // Phase 10
+        v[42 + nt + kTallyWarp + 2 + kTallyAction + kTallyThread + 1 + i] =
+            t[kTallyEarly + kTallyWarp + kTallyAction + kTallyThread + i];
     marks->links = links;
     marks->inject = inject;
     marks->gpu = gpu;

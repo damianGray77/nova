@@ -35,6 +35,16 @@ float HeatCurve::err_mult(float h) const {
 
 namespace {
 
+// Phase 10 (design.md 6.16): a codon with one random set bit cleared, as dead
+// matter decays toward codon 0 (INERT in nova_v2). v must not be 0.
+u8 fade_bit(u8 v, Rng& rng) {
+    u32 bits[6], n = 0;
+    for (u32 b = 0; b < 6; ++b)
+        if (v & (1u << b))
+            bits[n++] = b;
+    return static_cast<u8>(v & ~(1u << bits[rng.below(n)]));
+}
+
 u32 get_u32(Config& cfg, Str key, u64 def, u64 lo, u64 hi) {
     u64 v = cfg.get_u64(key, def);
     if (v < lo || v > hi) {
@@ -180,19 +190,19 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     // with a high-volume profile by default (Damian: GPUs are built for
     // volume, so expensive per op and nearly free per element). Instant mode
     // is exactly Phase 4.
-    Str mode = cfg.get_str("accel.mode", "instant");
+    Str mode = cfg.get_str("accel.mode", "async"); // Phase 10: every feature on by default
     p->accel_async = mode.eq("async");
     if (!p->accel_async && !mode.eq("instant"))
         cfg.fail("accel.mode", "must be instant or async");
     p->accel_latency = get_u32(cfg, "accel.latency", 2, 1, 64);
     const bool hv = p->accel_async;
-    p->gpus = get_u32(cfg, "world.gpus", 0, 0, 10000000);
+    p->gpus = get_u32(cfg, "world.gpus", 400, 0, 10000000);
     p->gpu_elements = get_u32(cfg, "gpu.elements", hv ? 4096 : 32, 1, 100000000);
     p->gpu_setup = get_u32(cfg, "gpu.setup", hv ? 32 : 4, 0, 1000000);
     p->gpu_cpu_per_element = get_f64(cfg, "gpu.cpu_per_element", hv ? 1.0 / 1024.0 : 0.0625, 0, 1e6);
     p->gpu_wear = get_f64(cfg, "gpu.wear", 0.0, 0, 1);
     // The in-world NPU (Phase 2b, design.md 6.8), the same way.
-    p->npus = get_u32(cfg, "world.npus", 0, 0, 10000000);
+    p->npus = get_u32(cfg, "world.npus", 200, 0, 10000000);
     p->npu_macs = get_u32(cfg, "npu.macs", hv ? 65536 : 256, 1, 1000000000);
     p->npu_cpu_per_mac = get_f64(cfg, "npu.cpu_per_mac", hv ? 1.0 / 16384.0 : 1.0 / 64.0, 0, 1e6);
     p->npu_max_matvec = hv ? 256 : 64;
@@ -202,7 +212,7 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     // Phase 1b rules (design.md 6.6). mem.upkeep = 0 is exactly Phase 1a.
     p->upkeep = get_f64(cfg, "mem.upkeep", 2.0, 0, 1e9);
     p->upkeep_exp = get_f64(cfg, "mem.upkeep_exp", 4.0 / 3.0, 0.5, 4.0);
-    p->cpu_wear = get_f64(cfg, "cpu.wear", 0.0, 0, 1);
+    p->cpu_wear = get_f64(cfg, "cpu.wear", 0.001, 0, 1);
     Str timing = cfg.get_str("spark.timing", "first");
     if (timing.eq("first"))
         p->spark_late = false;
@@ -211,14 +221,14 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     else
         cfg.fail("spark.timing", "must be first or last");
 
-    Str table = cfg.get_str("isa.table", "nova_v1");
+    Str table = cfg.get_str("isa.table", "nova_v2");
     if (table.eq("custom")) {
         Str codons = cfg.get_str("isa.codons", "");
         TextBuf err;
         if (!parse_table(codons, &p->table, &err))
             cfg.fail("isa.codons", err.c_str());
     } else if (!builtin_table(table, &p->table)) {
-        cfg.fail("isa.table", "must be nova_v1, nova_v1_plain, nova_v1_inv2, tierra0 or custom");
+        cfg.fail("isa.table", "must be nova_v1, nova_v1_plain, nova_v1_inv2, nova_v2, tierra0 or custom");
     }
 
     // Selector numbering (D6): nearest-to-self, or a per-run shuffle drawn from
@@ -232,31 +242,31 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     p->dispersal = cfg.get_bool("world.dispersal", spatial);
     // The disk tier and volatility (Phase 4): no disk = everything disk fails,
     // as before; no volatility = no wipes.
-    p->disk = get_u32(cfg, "world.disk", 0, 0, 1u << 24);
+    p->disk = get_u32(cfg, "world.disk", 4096, 0, 1u << 24);
     p->disk_cost_base = get_u32(cfg, "disk.cost_base", 4, 0, 1000000);
     p->disk_cost_per_codon = get_f64(cfg, "disk.cost_per_codon", 0.25, 0, 1e6);
-    p->disk_rot = get_f64(cfg, "disk.rot", p->disk ? 1e-6 : 0.0, 0, 1);
-    p->volatility = get_f64(cfg, "mem.volatility", 0.0, 0, 1);
+    p->disk_rot = get_f64(cfg, "disk.rot", p->disk ? (p->table.op[0] == Op::inert ? 1e-8 : 1e-6) : 0.0, 0, 1); // Phase 10: rarer with decay
+    p->volatility = get_f64(cfg, "mem.volatility", 0.00001, 0, 1);
     p->wipe_pages = get_u32(cfg, "mem.wipe_pages", 4, 1, 1u << 18);
     // Remnants and salvage (Phase 4, Damian): 0 = off, every read as before.
-    p->salvage_ratio = get_f64(cfg, "salvage.ratio", 0.0, 0, 1e6);
+    p->salvage_ratio = get_f64(cfg, "salvage.ratio", 4.0, 0, 1e6);
     // The signal channel (Phase 4): 0 channels = EMIT and LISTEN fail.
-    p->signal_channels = get_u32(cfg, "signal.channels", 0, 0, 256);
+    p->signal_channels = get_u32(cfg, "signal.channels", 16, 0, 256);
     p->signal_cost_base = get_u32(cfg, "signal.cost_base", 2, 0, 1000000);
     p->signal_cost_per_amp = get_f64(cfg, "signal.cost_per_amp", 1.0 / 32.0, 0, 1e6);
     p->signal_floor = get_f64(cfg, "signal.floor", 1.0, 0, 1e9);
     // The node lifecycle (Phase 4): endurance 0 and starve_ticks 0 = off.
-    p->endurance = get_f64(cfg, "node.endurance", 0.0, 0, 1e18);
+    p->endurance = get_f64(cfg, "node.endurance", spatial ? 1e9 : 0.0, 0, 1e18); // (the lifecycle needs a map)
     p->decline = get_f64(cfg, "node.decline", 4.0, 0, 1e6);
     p->starve_below = get_f64(cfg, "node.starve_below", 0.002, 0, 1);
-    p->starve_ticks = get_u32(cfg, "node.starve_ticks", 0, 0, 1000000000);
+    p->starve_ticks = get_u32(cfg, "node.starve_ticks", spatial ? 2000 : 0, 0, 1000000000);
     // The meter ebbs like heat (Damian): constantly starving it settles at
     // 1 / ebb, so it reaches starve_ticks only if the node starves more than
     // starve_ticks x ebb of the time (half, at the defaults).
     p->starve_ebb = get_f64(cfg, "node.starve_ebb", 0.00025, 0, 1);
 
     // Measured costs (Phase 9, design.md 6.15): classic = exactly Phase 8.
-    const Str ct = cfg.get_str("cost.table", "classic");
+    const Str ct = cfg.get_str("cost.table", "home_v1");
     if (!builtin_costs(ct, &p->cost)) {
         cfg.fail("cost.table", "must be classic or home_v1");
         builtin_costs("classic", &p->cost);
@@ -265,7 +275,7 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
         p->ecost = p->cost;
     p->plain = p->cost.timed ? static_cast<double>(p->cost.alu) : 1.0;
     p->tick_units = static_cast<double>(p->instr_per_core) * p->plain;
-    p->engulf_cpt = get_u32(cfg, "engulf.codons_per_tick", 16, 1, 1u << 24);
+    p->engulf_cpt = get_u32(cfg, "engulf.codons_per_tick", 8, 1, 1u << 24); // Phase 10: halved, so prey can react
     p->inject_cpt = get_u32(cfg, "inject.codons_per_tick", 16, 1, 1u << 24);
 
     SelectorMap& m = p->sel;
@@ -287,14 +297,14 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
         sense_n = kSenseReadingsAsync; // + my last accelerator result, my ops pending
 
     // Warps (Phase 8, design.md 6.14): off = everything exactly as Phase 7.
-    p->warps = cfg.get_bool("gpu.warps", false);
+    p->warps = cfg.get_bool("gpu.warps", true);
     p->warp_lanes = get_u32(cfg, "warp.lanes", 32, 1, kMaxLanes);
     p->warp_max = get_u32(cfg, "warp.max", 4, 1, 64);
     p->warp_capacity = get_u32(cfg, "warp.capacity", 256, 1, 100000000);
     p->warp_step_cost = get_u32(cfg, "warp.step_cost", 16, 0, 1000000);
     p->warp_lane_cost = get_u32(cfg, "warp.lane_cost", 1, 0, 1000000);
     p->warp_rounds = get_u32(cfg, "warp.rounds", 1, 1, 64);
-    p->spark_gpu_grant = get_u32(cfg, "spark.gpu_grant", 0, 0, 10000000);
+    p->spark_gpu_grant = get_u32(cfg, "spark.gpu_grant", p->warps ? 8 : 0, 0, 10000000);
     p->spark_gpu_born = get_f64(cfg, "spark.gpu_born", 0.5, 0, 1);
     if (p->warps && p->warp_step_cost + p->warp_lane_cost == 0)
         cfg.fail("warp.step_cost", "warp.step_cost and warp.lane_cost can't both be 0");
@@ -332,13 +342,22 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     if (p->cost.timed)
         sense_n = kSenseReadingsActions; // + an action on me: ticks until it ends, what it is
     // Threads and cores (Phase 9c, design.md 6.15): off = exactly as before.
-    p->threads = cfg.get_bool("cpu.threads", false);
+    p->threads = cfg.get_bool("cpu.threads", true);
     p->slices = get_u32(cfg, "cpu.slices", 8, 1, 64);
     p->max_threads = get_u32(cfg, "cpu.max_threads", 8, 1, 64);
-    p->e_share = get_f64(cfg, "cpu.e_share", 0.0, 0, 1);
+    p->e_share = get_f64(cfg, "cpu.e_share", p->cost.timed ? 0.5 : 0.0, 0, 1);
     p->e_gain = static_cast<float>(get_f64(cfg, "heat.e_gain", 0.4, 0, 1e3));
     if (p->e_share > 0 && !p->cost.timed) // an E-core's speed is the table's E column
         cfg.fail("cpu.e_share", "needs a timed cost table (cost.table = home_v1)");
+    // Phase 10 (design.md 6.16): vents, decay, bites and death.
+    p->mem_decay = get_f64(cfg, "mem.decay", -1.0, -1.0, 1); // -1: the default, below
+    p->disk_decay = get_f64(cfg, "disk.decay", p->disk && p->table.op[0] == Op::inert ? 1e-6 : 0.0, 0, 1);
+    p->vent_spacing = get_u32(cfg, "vent.spacing", 4096, 0, 1u << 24);
+    p->vent_rate = get_u32(cfg, "vent.rate", 64, 0, 1u << 20);
+    p->vent_radius = get_u32(cfg, "vent.radius", 256, 1, 1u << 24);
+    p->bites = cfg.get_bool("engulf.bite", true);
+    p->threads_end = cfg.get_bool("life.threads_end", true);
+    p->frozen_ticks = get_u32(cfg, "life.frozen_ticks", 200, 0, 1000000000);
     p->kinds = p->threads || p->e_share > 0;
     if (p->kinds)
         sense_n = kSenseReadingsThreads; // + my threads, my kind, my E millicores, free E millicores
@@ -404,7 +423,7 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     p->npu_gain = static_cast<float>(get_f64(cfg, "heat.npu_gain", 9.0, 0, 1e9));
     p->npu = get_curve(cfg, "heat.npu", HeatCurve{40, 60, 100, 0.25f, 10, 0});
     // The ambient leak (Phase 4): 0 = off, every unit's heat its own.
-    p->ambient = static_cast<float>(get_f64(cfg, "heat.ambient", 0.0, 0, 1e6));
+    p->ambient = static_cast<float>(get_f64(cfg, "heat.ambient", 0.05, 0, 1e6));
 
     // Ray's baselines (design.md 6.3): about 1 copy error per 2,000 codons
     // copied; about 1 background flip per 10,000 instructions executed, which
@@ -413,7 +432,17 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     double nominal = static_cast<double>(p->millicores) * p->instr_per_core / 1000.0;
     p->copy_rate = get_f64(cfg, "hazard.copy", 5e-4, 0, 1);
     p->flaw_rate = get_f64(cfg, "hazard.flaw", 1e-4, 0, 1);
-    p->rot_rate = get_f64(cfg, "hazard.rot", 1e-4 * nominal / soup_size, 0, 1);
+    // Phase 10 (design.md 6.16): rot is now cosmic rays, a hundredth of Ray's
+    // background rate by default (hazard.rot_scale); dead matter decays at
+    // that rate instead (mem.decay).
+    // Decay needs a table whose codon 0 is INERT (nova_v2): under the others
+    // zeros are labels, so there it stays off and rot keeps Ray's rate.
+    const bool inert0 = p->table.op[0] == Op::inert;
+    const double rot0 = 1e-4 * nominal / soup_size;
+    if (p->mem_decay < 0)
+        p->mem_decay = inert0 ? (rot0 < 1 ? rot0 : 1.0) : 0.0;
+    const double rot_scale = get_f64(cfg, "hazard.rot_scale", p->mem_decay > 0 ? 0.01 : 1.0, 0, 1e6);
+    p->rot_rate = get_f64(cfg, "hazard.rot", rot0 * rot_scale < 1 ? rot0 * rot_scale : 1.0, 0, 1);
 
     p->contact_range = get_u32(cfg, "contact.range", 256, 0, soup_size);
     p->contact_base = get_u32(cfg, "contact.cost_base", 8, 0, 1000000);
@@ -636,6 +665,36 @@ void Soup::init(const SoupParams* p, u64 seed, u32 node, u32 life, const Ruins* 
             for (u32 i = 0; i < dov && i < ruins->disk_stamp.size(); ++i)
                 disk_.stamp[i] = ruins->disk_stamp[i];
         weather(disk_.mem.data(), dov, p->disk_rot * static_cast<double>(ruins->fallow));
+        // Phase 10: and decayed (dead matter loses bits; past 8 expected
+        // losses a codon, simply gone).
+        auto fade = [&wr](u8* m, u32 len, double lambda) {
+            if (lambda <= 0 || len == 0)
+                return;
+            if (lambda >= 8) {
+                for (u32 i = 0; i < len; ++i)
+                    m[i] = 0;
+                return;
+            }
+            double pos = -log(1.0 - wr.unit()) / lambda;
+            while (pos < len) {
+                u8& c = m[static_cast<u32>(pos)];
+                if (c)
+                    c = fade_bit(c, wr);
+                pos += -log(1.0 - wr.unit()) / lambda;
+            }
+        };
+        fade(mem_.data(), mo, p->mem_decay * static_cast<double>(ruins->fallow));
+        fade(disk_.mem.data(), dov, p->disk_decay * static_cast<double>(ruins->fallow));
+    }
+    // Phase 10: the vents' places for this life, from their own stream (so
+    // every other draw is as without them).
+    vent_at_.clear();
+    last_ran_.clear();
+    if (p->vent_spacing > 0) {
+        const u32 nv = n / p->vent_spacing > 0 ? n / p->vent_spacing : 1;
+        Rng vr(seed ^ 0x76656E7473000000ull, node, Rng::kInitTick - life); // "vents"
+        for (u32 i = 0; i < nv; ++i)
+            vent_at_.push(static_cast<u32>(vr.below(n)));
     }
 
     tally_ = {};
@@ -868,6 +927,11 @@ u32 Soup::new_body() {
         eunits_[b] = 0;
         espeed_[b] = eheat_[b] = 0.0f;
         ework_[b] = 0;
+    }
+    if (p_->frozen_ticks > 0) { // Phase 10: born now counts as running now
+        if (last_ran_.size() < bodies_.size())
+            last_ran_.resize(bodies_.size());
+        last_ran_[b] = tick_;
     }
     return b;
 }
@@ -1624,6 +1688,22 @@ bool DiskLedger::addresses(u32 body, u32 off, u32 n, Array<u32>* out) const {
     return out->size() == n;
 }
 
+// Phase 10: free disk codons (fossils) decay like memory's dead matter.
+u32 DiskLedger::decay(Rng& rng, double rate) {
+    u32 n = 0;
+    const double size_d = static_cast<double>(size());
+    double pos = -log(1.0 - rng.unit()) / rate;
+    while (pos < size_d) {
+        const u32 a = static_cast<u32>(pos);
+        if (owner[a] == kNone && mem[a]) {
+            mem[a] = fade_bit(mem[a], rng);
+            ++n;
+        }
+        pos += -log(1.0 - rng.unit()) / rate;
+    }
+    return n;
+}
+
 // Slow bit rot over the whole disk, owned or not, sampled like memory's.
 u32 DiskLedger::rot(Rng& rng, double rate) {
     u32 flips = 0;
@@ -1877,6 +1957,8 @@ void Soup::tick(u64 tick) {
 // The tick's first half: sparks and the bodies' CPUs.
 void Soup::tick_first(u64 tick) {
     begin_tick(tick);
+    if (!vent_at_.empty()) // Phase 10: fresh material before anything claims it
+        vents();
 
     double rate = p_->spark_rate;
     u32 count = static_cast<u32>(rate);
@@ -1922,6 +2004,11 @@ void Soup::tick_second() {
         tally_.disk_rot += disk_.rot(rng_, p_->disk_rot);
     if (p_->volatility > 0)
         volatility();
+    // Phase 10, after every earlier draw so worlds without it are unchanged.
+    if (p_->mem_decay > 0)
+        decay();
+    if (p_->disk && p_->disk_decay > 0)
+        tally_.decayed += disk_.decay(rng_, p_->disk_decay);
     death_sweep();
     if (!actions_.empty()) // Phase 9
         sweep_actions();
@@ -1961,7 +2048,7 @@ u32 Soup::action_on(u32 b) const {
 
 bool Soup::cpu_waits(u32 c) const {
     const u32 i = action_of(c);
-    return i != kNone && actions_[i].target == kNone && actions_[i].end > tick_;
+    return i != kNone && !contact_action(actions_[i]) && actions_[i].end > tick_;
 }
 
 u32 Soup::action_of(u32 c) const {
@@ -2449,6 +2536,46 @@ void Soup::heat_update() {
 // Background and heat-driven bit rot: each codon flips at rot_rate x the error
 // multiplier of its page, per tick. Sampled exactly by thinning a Poisson
 // process at the maximum rate, so the cost is per event, not per codon.
+// Phase 10 (design.md 6.16): dead matter decays toward codon 0 (INERT in
+// nova_v2). Each waste codon loses one random set bit with chance mem.decay a
+// tick, sampled as a Poisson process over the soup like rot. Living code
+// doesn't decay (cosmic rays, hazard.rot, still flip it).
+void Soup::decay() {
+    const double r = p_->mem_decay;
+    const double n = static_cast<double>(p_->size);
+    double pos = -log(1.0 - rng_.unit()) / r;
+    while (pos < n) {
+        const u32 a = static_cast<u32>(pos);
+        if (owner_[a] == kNone && mem_[a]) {
+            mem_[a] = fade_bit(mem_[a], rng_);
+            ++tally_.decayed;
+        }
+        pos += -log(1.0 - rng_.unit()) / r;
+    }
+}
+
+// Phase 10 (design.md 6.16): each vent writes vent.rate random codons a tick
+// into waste within vent.radius of it, nearer more often (a triangular
+// spread). Living code is skipped: vents spew material, not radiation.
+// Fresh material is nobody's remnant.
+void Soup::vents() {
+    const u32 n = p_->size, r = p_->vent_radius < n ? p_->vent_radius : n - 1;
+    for (usize v = 0; v < vent_at_.size(); ++v) {
+        const i64 at = vent_at_[v];
+        for (u32 i = 0; i < p_->vent_rate; ++i) {
+            const i64 d = static_cast<i64>(rng_.below(r + 1)) + static_cast<i64>(rng_.below(r + 1)) - r;
+            const u32 a = static_cast<u32>(((at + d) % n + n) % n);
+            const u8 codon = static_cast<u8>(rng_.next() & 63);
+            if (owner_[a] != kNone)
+                continue;
+            mem_[a] = codon;
+            if (!stamp_.empty())
+                stamp_[a] = 0;
+            ++tally_.vent_codons;
+        }
+    }
+}
+
 void Soup::bit_rot() {
     if (p_->rot_rate <= 0)
         return;
@@ -2489,16 +2616,64 @@ void Soup::cpu_wear() {
     }
 }
 
+// Phase 10 (design.md 6.16): a halted thread leaves its body (and any action
+// it had goes with it).
+void Soup::end_thread(u32 b, u32 c) {
+    Body& B = bodies_[b];
+    if (B.cpus == c) {
+        B.cpus = cpus_[c].next;
+    } else {
+        u32 t = B.cpus;
+        while (cpus_[t].next != c)
+            t = cpus_[t].next;
+        cpus_[t].next = cpus_[c].next;
+    }
+    --B.ncpu;
+    cpus_[c].body = kNone;
+    cpus_[c].next = kNone;
+    free_cpus_.push(c);
+    for (usize i = 0; i < actions_.size();) {
+        if (!actions_[i].warp && actions_[i].cpu == c && actions_[i].actor == b) {
+            for (usize j = i; j + 1 < actions_.size(); ++j) // in start order, still
+                actions_[j] = actions_[j + 1];
+            actions_.resize(actions_.size() - 1);
+        } else {
+            ++i;
+        }
+    }
+    ++tally_.threads_ended;
+}
+
 void Soup::death_sweep() {
     // A body dies when it has no running CPU: no un-halted CPU, or no
     // millicore to run on (6.4 #1). Engulfed bodies are already gone.
     // Phase 8: ... and no running warp. A warp whose lanes have all halted
     // has ended, and goes first.
+    // Phase 10 (design.md 6.16): with life.threads_end a halted thread leaves
+    // its body first; with life.frozen_ticks a body that has run nothing that
+    // long dies (an action under way, or a warp's steps, count as running).
+    const bool frozen_on = p_->frozen_ticks > 0;
+    if (frozen_on) {
+        for (usize i = 0; i < actions_.size(); ++i) // waiting on an action isn't frozen
+            if (action_live(actions_[i]))
+                last_ran_[actions_[i].actor] = tick_;
+        if (p_->warps)
+            for (u32 w = 0; w < warps_.size(); ++w)
+                if (warps_[w].body != kNone && w < wsteps_.size() && wsteps_[w] > 0)
+                    last_ran_[warps_[w].body] = tick_;
+    }
     for (usize k = 0; k < order_.size(); ++k) {
         u32 b = order_[k];
         Body& B = bodies_[b];
         if (!B.alive)
             continue;
+        if (p_->threads_end)
+            for (u32 c = B.cpus; c != kNone;) {
+                const u32 next = cpus_[c].next;
+                if (cpus_[c].halted)
+                    end_thread(b, c);
+                c = next;
+            }
         bool running = false;
         if (B.units > 0)
             for (u32 c = B.cpus; c != kNone && !running; c = cpus_[c].next)
@@ -2512,8 +2687,16 @@ void Soup::death_sweep() {
             }
             running = running || warp_runs(b);
         }
-        if (!running)
+        if (running && frozen_on && tick_ >= last_ran_[b] + p_->frozen_ticks) {
+            ++tally_.died_frozen;
             kill(b);
+        } else if (!running) {
+            if (B.units == 0 && !(p_->warps && warp_count(b) > 0))
+                ++tally_.died_worn;
+            else
+                ++tally_.died_halted;
+            kill(b);
+        }
     }
     usize w = 0;
     for (usize k = 0; k < order_.size(); ++k) {
@@ -2591,6 +2774,10 @@ void Soup::hash_into(Hasher& h) const {
         h.word(epool_.size());
         h.bytes(epool_.data(), epool_.size() * sizeof(u32));
     }
+    if (p_->frozen_ticks > 0) // Phase 10: when each body last ran
+        h.bytes(last_ran_.data(), last_ran_.size() * sizeof(u64));
+    if (!vent_at_.empty()) // Phase 10: the vents' places
+        h.bytes(vent_at_.data(), vent_at_.size() * sizeof(u32));
 }
 
 namespace {
@@ -2805,6 +2992,10 @@ void Soup::save(ByteWriter& w) const {
         put_array(w, cpu_kind_);
     if (ek())
         put_array(w, epool_);
+    if (p_->frozen_ticks > 0) // Phase 10
+        put_array(w, last_ran_);
+    if (p_->vent_spacing > 0)
+        put_array(w, vent_at_);
 }
 
 bool Soup::load(ByteReader& r, TextBuf* err) {
@@ -2926,6 +3117,23 @@ bool Soup::load(ByteReader& r, TextBuf* err) {
         for (u32 u = e_first_; u < m; ++u)
             if (unit_owner_[u] != kNone && unit_owner_[u] < nb)
                 ++eunits_[unit_owner_[u]];
+    }
+    // Phase 10: when each body last ran; the vents' places.
+    last_ran_.clear();
+    if (p_->frozen_ticks > 0 && (!get_array(r, &last_ran_, nb) || last_ran_.size() != nb)) {
+        err->append("snapshot: frozen watch truncated or the wrong shape");
+        return false;
+    }
+    vent_at_.clear();
+    if (p_->vent_spacing > 0 && !get_array(r, &vent_at_, n)) {
+        err->append("snapshot: vents truncated");
+        return false;
+    }
+    for (usize i = 0; i < vent_at_.size(); ++i) {
+        if (vent_at_[i] >= n) {
+            err->append("snapshot: a vent out of range");
+            return false;
+        }
     }
     collapse_ = false; // a snapshot is taken after the barrier applied any collapse
     // Rebuild the derived structures, then demand every invariant.
@@ -3063,6 +3271,8 @@ bool Soup::check(TextBuf* why) const {
             return fail("E pool entry inconsistent at", i);
     if (ek() && eunits_.size() < bodies_.size())
         return fail("E millicore counts the wrong size", eunits_.size());
+    if (p_->frozen_ticks > 0 && last_ran_.size() < bodies_.size()) // Phase 10
+        return fail("frozen watch the wrong size", last_ran_.size());
     if (live != order_.size())
         return fail("schedule order size wrong, live bodies", live);
     for (usize k = 0; k < order_.size(); ++k) {
@@ -3130,7 +3340,8 @@ bool Soup::check(TextBuf* why) const {
     for (usize i = 0; i < actions_.size(); ++i) {
         const Action& a = actions_[i];
         if (a.actor >= bodies_.size() || a.cpu >= (a.warp ? warps_.size() : cpus_.size()) || a.warp > 1 ||
-            (a.target != kNone && a.target >= bodies_.size()) || a.n > 64 || a.op >= kOpCount)
+            (a.target != kNone && a.target >= bodies_.size()) || a.n > 64 || a.op >= kOpCount ||
+            (a.op == static_cast<u32>(Op::engulf) && a.target == kNone && a.at >= p_->size)) // Phase 10
             return fail("action out of range at", i);
         for (usize j = 0; j < i; ++j)
             if (actions_[j].cpu == a.cpu && actions_[j].warp == a.warp && action_live(actions_[j]) &&

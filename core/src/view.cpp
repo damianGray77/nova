@@ -195,7 +195,7 @@ const char* color_by_name(u32 c) {
     static const char* const n[kColorCount] = {"bodies",   "births",     "colonists",  "health",    "lineage",
                                                "free CPU", "waste",      "memory",     "millicores", "climate",
                                                "sparks",   "radiation",  "disk",       "volatility", "signals",
-                                               "GPU lanes", "E-cores"};
+                                               "GPU lanes", "E-cores", "material"};
     return c < kColorCount ? n[c] : "?";
 }
 
@@ -267,6 +267,8 @@ double node_metric(const NodeView& n, u32 c) {
         return n.lanes;
     case kColorEcores:
         return n.millicores ? static_cast<double>(n.emillicores) / n.millicores : 0;
+    case kColorMaterial:
+        return n.material;
     default:
         return 0;
     }
@@ -281,6 +283,7 @@ bool metric_range(u32 c, double* lo, double* hi) {
     case kColorFreeCpu:
     case kColorWaste:
     case kColorEcores:
+    case kColorMaterial:
         *hi = 1;
         return true;
     default:
@@ -300,7 +303,12 @@ void ViewFrame::clear_new() {
     save_text.clear();
 }
 
-bool stats_column_is_sum(u32 i) { return (i >= 3 && i < 42) || (i >= 49 && i <= 51) || (i >= 60 && i <= 64); }
+// Sums: the early tallies, the link counts, the warp tallies, Phase 9's
+// actions and 9c's thread tallies, and Phase 10's (e_held, 73, is a gauge).
+bool stats_column_is_sum(u32 i) {
+    return (i >= 3 && i < 42) || (i >= 49 && i <= 51) || (i >= 60 && i <= 64) || (i >= 67 && i <= 72) ||
+           (i >= 74 && i <= 82);
+}
 
 void chart_row(const StatsRow& r, double* out) {
     const double ticks = static_cast<double>(r.v[2]);
@@ -622,6 +630,16 @@ void ViewSession::build(const ViewRequest& q, ViewFrame* f) {
             v.soup_size = p.size;
             v.millicores = p.millicores;
             v.emillicores = s.e_total();
+            { // Phase 10: the share of its waste that isn't dead matter (every 16th codon)
+                u32 waste = 0, live = 0;
+                for (u32 a = 0; a < p.size; a += 16) {
+                    if (s.owner_block(a) != kNone)
+                        continue;
+                    ++waste;
+                    live += p.table.op[s.mem()[a] & 63] != Op::inert;
+                }
+                v.material = waste ? static_cast<float>(live) / waste : 0.0f;
+            }
             v.free_millicores = s.free_units();
             v.waste = s.waste();
             v.gpus = p.gpus;
@@ -736,9 +754,10 @@ void ViewSession::build(const ViewRequest& q, ViewFrame* f) {
         for (u32 a = 0; a < size; ++a) {
             const u32 owner = s.owner_body(a);
             u32 c = 0x303030;
+            const bool inert = s.params().table.op[s.mem()[a] & 63] == Op::inert; // Phase 10: dead matter
             switch (q.strip) {
             case kStripOwner:
-                c = owner == kNone ? 0x303030 : lineage_color(s.body(owner).serial + 1);
+                c = owner == kNone ? (inert ? 0x181818 : 0x303030) : lineage_color(s.body(owner).serial + 1);
                 break;
             case kStripLineage: {
                 if (owner == kNone) {
@@ -757,8 +776,8 @@ void ViewSession::build(const ViewRequest& q, ViewFrame* f) {
                 c = st ? ramp_color(log(static_cast<double>(st)) / log(4096.0)) : 0x303030;
                 break;
             }
-            default: // codon
-                c = hsv((s.mem()[a] & 63) / 64.0, 0.6, 0.9);
+            default: // codon (INERT: dark)
+                c = inert ? 0x0A0A0A : hsv((s.mem()[a] & 63) / 64.0, 0.6, 0.9);
                 break;
             }
             if (sel_body != kNone && owner == sel_body)
@@ -766,6 +785,13 @@ void ViewSession::build(const ViewRequest& q, ViewFrame* f) {
             f->strip[a] = c;
             f->strip_owner[a] = owner;
         }
+        // Phase 10: the vents, marked orange (three codons wide, to be seen).
+        const Array<u32>& vents = s.vent_places();
+        for (usize i = 0; i < vents.size(); ++i)
+            for (u32 d = 0; d < 3; ++d) {
+                const u32 a = (vents[i] + size - 1 + d) % size;
+                f->strip[a] = 0xFF8C1A;
+            }
         const usize cap = 4096;
         for (usize k = 0; k < s.body_count() && k < cap; ++k) {
             const u32 b = s.body_at(k);
@@ -989,6 +1015,7 @@ bool RunArchive::load(const char* dir, TextBuf* err) {
         Config::ParseError pe;
         if (cfg.parse(log.config_text(), &pe)) {
             cfg.set("accel.mode", "instant");
+            cfg.set("gpu.warps", "false"); // (no GPU wanted either)
             cfg.set("detect.enabled", "false");
             // Only the graph is wanted: no disk tier, in files or RAM.
             cfg.set("world.disk", "0");

@@ -190,6 +190,7 @@ NOVA_OP_IS(OP_INCB, incb);
 NOVA_OP_IS(OP_DECB, decb);
 NOVA_OP_IS(OP_ZEROA, zeroa);
 NOVA_OP_IS(OP_ZEROB, zerob);
+NOVA_OP_IS(OP_INERT, inert);
 NOVA_OP_IS(OP_COUNT, count);
 #undef NOVA_OP_IS
 static_assert(kSenseReadingsMax <= WB_OUT - WB_SENSE, "the record holds every SENSE reading");

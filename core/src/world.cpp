@@ -281,8 +281,8 @@ bool World::init(Config& cfg) {
         u32 budget = 0;
         if (spatial_) {
             if (procedural_) { // a landscape's land is its own, and doesn't drift
-                land_ = get_f64_in(cfg, "world.land", 1.0, 0.01, 1.0);
-                drift_ = get_f64_in(cfg, "world.drift", 0.0, 0.0, 1.0);
+                land_ = get_f64_in(cfg, "world.land", 0.8, 0.01, 1.0); // Phase 10: every feature on by default
+                drift_ = get_f64_in(cfg, "world.drift", 0.00001, 0.0, 1.0);
             }
             budget = get_u32_in(cfg, "world.budget", 0, 0, nodes_);
             recover_every_ = get_u32_in(cfg, "node.recover_every", 100, 1, 1000000000);
@@ -305,8 +305,8 @@ bool World::init(Config& cfg) {
             if (!spatial_)
                 gp.bandwidth = get_u32_in(cfg, "edge.bandwidth", 32, 1, 1u << 24);
             // Phase 4 (design.md 6.10): transit corruption and link failures.
-            edge_corruption_ = get_f64_in(cfg, "edge.corruption", 0.0, 0.0, 1.0);
-            edge_failure_ = get_f64_in(cfg, "edge.failure", 0.0, 0.0, 1.0);
+            edge_corruption_ = get_f64_in(cfg, "edge.corruption", 0.0002, 0.0, 1.0);
+            edge_failure_ = get_f64_in(cfg, "edge.failure", 0.0001, 0.0, 1.0);
             edge_downtime_ = get_f64_in(cfg, "edge.downtime", 1000.0, 1.0, 1e9);
         }
     }

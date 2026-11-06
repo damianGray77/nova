@@ -206,6 +206,15 @@ struct SoupParams {
     float e_gain;         // heat.e_gain: E millicores' heat gain, against P's (9c-b2)
     bool kinds;           // threads, or E millicores in the world: threads' kinds are world state
                           // (the world's switch: a site's own e_share may be 0)
+    // vents, decay, bites and death (Phase 10, design.md 6.16)
+    double mem_decay;     // mem.decay: chance per waste codon per tick of losing one set bit
+    double disk_decay;    // disk.decay: the same for free disk codons (fossils)
+    u32 vent_spacing;     // vent.spacing: codons per vent (0: no vents)
+    u32 vent_rate;        // vent.rate: codons a vent writes a tick
+    u32 vent_radius;      // vent.radius: how far from its vent a codon lands, at most
+    bool bites;           // engulf.bite: ENGULF bites (else it takes whole prey, as in Phase 9)
+    bool threads_end;     // life.threads_end: a halted thread leaves its body
+    u32 frozen_ticks;     // life.frozen_ticks: a body that runs nothing this long dies (0: never)
     // optional seeded genome (smoke tests, demos), on every node or one
     u8 seed_genome[kMaxSeedLen];
     u32 seed_len;        // 0 = no seed
@@ -316,9 +325,16 @@ struct Action {
     u32 n;             // the aim: its template's length
     u32 match, len;    // the aim's surface match at the start (its chance: match / len)
     u32 warp;          // 1: the actor is a warp (Phase 9b), and `cpu` is its slot
+    u32 bite;          // Phase 10, ENGULF as a bite: the most it takes, codons
+    u32 at;            // ... and, biting raw material (target kNone), the waste codon it aims at
     u8 bits[64];       // the aim's template bits
 };
-static_assert(sizeof(Action) == 3 * 8 + 8 * 4 + 64, "Action must have no implicit padding");
+static_assert(sizeof(Action) == 3 * 8 + 10 * 4 + 64, "Action must have no implicit padding");
+// Whether an action is contact (the CPU at work: ENGULF, INJECT) rather than
+// a wait (a long instruction). A bite of raw material has no target body.
+inline bool contact_action(const Action& a) {
+    return a.op == static_cast<u32>(Op::engulf) || a.op == static_cast<u32>(Op::inject);
+}
 inline constexpr u32 kActEngulf = 1; // SENSE 23's codes for what is acting on me
 inline constexpr u32 kActInject = 2;
 
@@ -406,6 +422,7 @@ struct DiskLedger {
     // The absolute addresses of [off, off + n) of the body's disk, or false.
     bool addresses(u32 body, u32 off, u32 n, Array<u32>* out) const;
     u32 rot(Rng& rng, double rate);        // returns flips
+    u32 decay(Rng& rng, double rate);      // Phase 10: free codons lose bits; returns bits lost
     void hash_into(Hasher& h) const;
     void save(ByteWriter& w) const;
     bool load(ByteReader& r, u64 nbodies, TextBuf* err);
@@ -476,6 +493,16 @@ struct SoupTally {
     // Phase 9c threads and cores (design.md 6.15)
     u64 threads_started;  // threads started by programs (GPU verb BX 21)
     u64 e_work;           // work done on E millicores (instructions, or world time with a timed table)
+    // Phase 10: vents, decay, bites and death (design.md 6.16)
+    u64 vent_codons;      // codons vents wrote into waste
+    u64 decayed;          // bits decayed out of dead matter (memory waste and disk fossils)
+    u64 bites_waste;      // ENGULF bites of raw material
+    u64 bites_body;       // ENGULF bites that took a piece of a bigger body (whole swallows: engulfs)
+    u64 codons_bitten;    // codons taken by bites, whole swallows included
+    u64 threads_ended;    // halted threads that left their bodies
+    u64 died_halted;      // bodies dead with no running thread
+    u64 died_frozen;      // bodies dead after life.frozen_ticks without running an instruction
+    u64 died_worn;        // bodies dead with no millicore left (wear, heat, bites)
 };
 
 class Lineages; // lineage.h: the replicator detector, a pure observer
@@ -923,6 +950,23 @@ class Soup {
     // run_body's share of a body's time among its threads (R3): each first up
     // to a core of its preferred kind, then the other kind's leftovers.
     void share_time(usize k, i64 tp, i64 te, i64 cap, u64 tick);
+
+    // Phase 10 (design.md 6.16). decay(): dead matter loses bits. vents():
+    // each vent writes its codons into nearby waste. end_thread(): a halted
+    // thread leaves its body. last_ran_: per body slot, the last tick it ran
+    // an instruction, waited on an action or was born (world state with
+    // life.frozen_ticks). vent_at_: the vents' places (from the seed).
+    void decay();
+    void vents();
+    void end_thread(u32 b, u32 c);
+    Array<u64> last_ran_;
+    Array<u32> vent_at_;
+
+  public:
+    // Phase 10: the node's vents (their places in memory; none without them).
+    const Array<u32>& vent_places() const { return vent_at_; }
+
+  private:
 
   public:
     // Phase 9c: a body's E millicores (0 without them), and the node's.

@@ -56,6 +56,7 @@ enum ColorBy : u32 {
     kColorSignals,    // signal activity
     kColorLanes,      // GPU lanes running (Phase 8 warps)
     kColorEcores,     // E millicores' share of the node's (Phase 9c)
+    kColorMaterial,   // the share of its waste that isn't dead matter (Phase 10)
     kColorCount
 };
 const char* color_by_name(u32 c);
@@ -84,6 +85,7 @@ struct NodeView {
     u32 lanes;   // GPU lanes running: not halted, in live warps (Phase 8)
     u32 gpu_bodies; // bodies born on a GPU
     u32 emillicores; // of its millicores, E (Phase 9c)
+    float material;  // the share of its waste that isn't INERT, sampled (Phase 10)
 };
 
 // A landmass with nodes on it (Phase 7): where to label it, and how many.

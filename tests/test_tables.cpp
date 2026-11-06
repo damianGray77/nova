@@ -78,7 +78,7 @@ void table_layout() {
     CHECK(op_from_name("ZEROB", &op) && op == Op::zerob && Str(op_name(Op::nopx)).eq("NOPX"));
     SoupParams p;
     CHECK(make_params(&p, "isa.table = nova_v1_inv2\n", 1024));
-    CHECK(!make_params(&p, "isa.table = nova_v2\n", 1024));
+    CHECK(!make_params(&p, "isa.table = nova_v9\n", 1024)); // (nova_v2 exists since Phase 10)
 }
 
 void plain_registers() {

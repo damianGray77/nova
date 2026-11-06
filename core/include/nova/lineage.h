@@ -185,6 +185,14 @@ class Lineages {
     // --- hooks, called by the soup during its tick -------------------------
     void on_new_block(u32 k, u32 start, u32 len);
     void on_free_block(u32 k, u64 tick);
+    // Phase 10: block k is a piece bitten off another block (its codons, and
+    // what was written into them, carried over): untagged.
+    void on_carve(u32 k) {
+        if (k >= tags_.size())
+            tags_.resize(static_cast<usize>(k) + 1);
+        else
+            tags_[k] = BlockTag{};
+    }
     // A CPU wrote codon a (COPY, WRITE, movii) into its own body.
     void on_write(u32 a) {
         written_[a >> 6] |= 1ull << (a & 63);

@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include "check.h"
+#include "nova/config.h"
 
 void suite_containers();
 void suite_str();
@@ -41,6 +42,7 @@ void suite_landscape();
 void suite_budget();
 void suite_warp();
 void suite_costs();
+void suite_ecology();
 
 namespace {
 
@@ -87,11 +89,53 @@ const Suite kSuites[] = {
     {"budget", suite_budget},
     {"warp", suite_warp},
     {"costs", suite_costs},
+    {"ecology", suite_ecology},
 };
 
 } // namespace
 
+// Phase 10 turned the world's features on by default (docs/phase10-plan.md
+// C8). The suites predate that and test one feature at a time, so they run on
+// the defaults from before it (Config::set_fallback); the ecology suite tests
+// the new defaults themselves.
+extern const char* const kLegacyDefaults; // (test_ecology.cpp clears and restores it)
+const char* const kLegacyDefaults ="accel.mode = instant\n"
+                                    "world.gpus = 0\n"
+                                    "world.npus = 0\n"
+                                    "cpu.wear = 0\n"
+                                    "isa.table = nova_v1\n"
+                                    "world.disk = 0\n"
+                                    "disk.rot = 0.000001\n"
+                                    "mem.volatility = 0\n"
+                                    "salvage.ratio = 0\n"
+                                    "signal.channels = 0\n"
+                                    "node.endurance = 0\n"
+                                    "node.starve_ticks = 0\n"
+                                    "cost.table = classic\n"
+                                    "gpu.warps = false\n"
+                                    "spark.gpu_grant = 0\n"
+                                    "cpu.threads = false\n"
+                                    "cpu.e_share = 0\n"
+                                    "heat.ambient = 0\n"
+                                    "hazard.rot_scale = 1\n"
+                                    "mem.decay = 0\n"
+                                    "disk.decay = 0\n"
+                                    "vent.spacing = 0\n"
+                                    "engulf.bite = false\n"
+                                    "engulf.codons_per_tick = 16\n"
+                                    "life.threads_end = false\n"
+                                    "life.frozen_ticks = 0\n"
+                                    "edge.corruption = 0\n"
+                                    "edge.failure = 0\n"
+                                    "world.land = 1\n"
+                                    "world.drift = 0\n";
+
 int main(int argc, char** argv) {
+    nova::Config::ParseError pe;
+    if (!nova::Config::set_fallback(kLegacyDefaults, &pe)) {
+        fprintf(stderr, "legacy defaults: line %u: %s\n", pe.line, pe.msg);
+        return 2;
+    }
     if (argc > 1) {
         for (const Suite& s : kSuites) {
             if (strcmp(argv[1], s.name) == 0) {

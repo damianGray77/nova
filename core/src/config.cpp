@@ -13,7 +13,26 @@ int show(Str s) {
     return s.n > 64 ? 64 : static_cast<int>(s.n);
 }
 
+// The process-wide fallback defaults (Config::set_fallback), or nullptr.
+Config* g_fallback = nullptr;
+
 } // namespace
+
+bool Config::set_fallback(const char* text, ParseError* err) {
+    if (!text) {
+        delete g_fallback;
+        g_fallback = nullptr;
+        return true;
+    }
+    Config* f = new Config;
+    if (!f->parse(Str(text), err)) {
+        delete f;
+        return false;
+    }
+    delete g_fallback;
+    g_fallback = f;
+    return true;
+}
 
 bool Config::valid_key(Str key) {
     if (key.n == 0 || key.n > 128)
@@ -127,8 +146,16 @@ bool Config::load_file(const char* path, ParseError* err) {
 
 bool Config::lookup(Str k, Str* v) {
     i64 idx = index_of(k);
-    if (idx < 0)
+    if (idx < 0) {
+        if (g_fallback && g_fallback != this) { // Phase 10: the fallback defaults
+            const i64 f = g_fallback->index_of(k);
+            if (f >= 0) {
+                *v = g_fallback->value(static_cast<usize>(f));
+                return true;
+            }
+        }
         return false;
+    }
     entries_[static_cast<usize>(idx)].used = 1;
     *v = value(static_cast<usize>(idx));
     return true;

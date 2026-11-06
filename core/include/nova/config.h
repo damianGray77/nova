@@ -62,6 +62,14 @@ class Config {
 
     static bool valid_key(Str key);
 
+    // Fallback defaults (Phase 10): when set, a key a config lacks takes its
+    // value from this text before the getter's own default (and needn't be
+    // read). Process-wide and set once: the test runner sets the defaults from
+    // before Phase 10, which turned the world's features on by default, so its
+    // suites keep testing what they test. A real run never sets it. nullptr
+    // clears it. False (with the reason) if the text doesn't parse.
+    static bool set_fallback(const char* text, ParseError* err);
+
   private:
     struct Entry {
         u32 key_off, key_len;

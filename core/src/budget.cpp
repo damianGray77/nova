@@ -355,12 +355,12 @@ bool resolve_budgets(Config& cfg, u32 threads, TextBuf* notes, TextBuf* err) {
         double pct = 0;
         if (!parse_amount(req.view(), 100.0, &pct) || req.view().p[req.size() - 1] != '%')
             return fail(key, "must be off or a percentage (50%)");
-        const bool async = cfg.get_str("accel.mode", "instant").eq("async");
-        const bool warps = dev == 0 && cfg.get_bool("gpu.warps", false); // Phase 8: warps run on the real GPU
+        const bool async = cfg.get_str("accel.mode", "async").eq("async"); // (the defaults, as soup.cpp's)
+        const bool warps = dev == 0 && cfg.get_bool("gpu.warps", true); // Phase 8: warps run on the real GPU
         if (!async && !warps)
             return fail(key, dev == 0 ? "needs accel.mode = async (the real devices) or gpu.warps = true"
                                       : "needs accel.mode = async (the real devices)");
-        const u64 units = cfg.get_u64(dev == 0 ? "world.gpus" : "world.npus", 0);
+        const u64 units = cfg.get_u64(dev == 0 ? "world.gpus" : "world.npus", dev == 0 ? 400 : 200);
         if (units == 0)
             return fail(key, dev == 0 ? "needs world.gpus (GPU units a node)" : "needs world.npus (NPU units a node)");
         AccelDevice devs[16];
@@ -453,7 +453,7 @@ bool resolve_budgets(Config& cfg, u32 threads, TextBuf* notes, TextBuf* err) {
     // --- does it fit? (C9) ------------------------------------------------------------
     if (soup) {
         const double size = static_cast<double>(cfg.get_u64("world.soup_size", 256));
-        const double disk = static_cast<double>(cfg.get_u64("world.disk", 0));
+        const double disk = static_cast<double>(cfg.get_u64("world.disk", 4096)); // (soup.cpp's default)
         const bool in_file = dpath.size() > 0;
         double ram = static_cast<double>(nodes) * size * kRamPerCodon;
         if (!in_file)

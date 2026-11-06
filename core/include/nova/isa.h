@@ -13,6 +13,8 @@
 //   nova_v1_inv2   nova_v1 with ENGULF and INJECT doubled (Phase 1b D8): codons 58
 //                  and 59 (EMIT and LISTEN, off until Phase 4) become ENGULF and
 //                  INJECT, one bit-1 flip from 56 and 57.
+//   nova_v2        nova_v1 with codon 0 INERT (Phase 10, design.md 6.16): what dead
+//                  matter decays to. NOP0 keeps codon 1.
 //   tierra0        Ray's original 32-opcode instruction set 0, for the light Tierra
 //                  validation mode (design.md 9.1). Codons 32-63 repeat 0-31, since
 //                  Tierra opcodes are 5 bits.
@@ -43,6 +45,9 @@ enum class Op : u8 {
     // --- Phase 1b plain-64 additions (design.md 6.6, D7) ----------------------
     nopx, jmpf, jmpb, ifeq, ifgt, mod, min_, max_,
     dup, drop, inca, deca, incb, decb, zeroa, zerob,
+    // --- Phase 10: dead matter (nova_v2's codon 0). Not a NOP, so it ends
+    // templates and surfaces; running it fails.
+    inert,
     count
 };
 

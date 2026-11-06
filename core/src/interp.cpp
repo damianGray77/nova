@@ -854,6 +854,270 @@ struct Exec {
         return written;
     }
 
+    // --- ENGULF as a bite (Phase 10, design.md 6.16; engulf.bite) -------------
+    //
+    // A bite is CX codons, at most the eater's own size: nothing bigger than
+    // itself, though it can take a piece of something bigger. An aimed bite
+    // (a template after ENGULF) goes to the best-matching surface, as the
+    // contest always did; a blind one takes the nearest material in range: a
+    // waste codon or a surfaceless body (a surface shields a body from blind
+    // bites). Raw material has no surface and no grip roll. A body no bigger
+    // than the bite is swallowed whole, as ENGULF did; a bigger one loses the
+    // codons at its end nearest the eater (the point of contact) and the same
+    // share of its millicores (at random) and GPU and NPU units, and limps on
+    // if it can. Bitten material becomes the eater's latest block, as ALLOC's.
+
+    u32 bite_size() const {
+        const i32 cx = static_cast<i32>(c.cx);
+        if (cx <= 0)
+            return 0;
+        const u32 own = s.bodies_[c.body].mem;
+        return static_cast<u32>(cx) < own ? static_cast<u32>(cx) : own;
+    }
+
+    // The nearest waste codon within contact range of ip (forward first at
+    // each distance), or kNone; each place looked at is a scan.
+    u32 nearest_waste(u32 ip) {
+        u64 seen = 0;
+        for (u32 d = 0; d <= p.contact_range; ++d) {
+            if (ip + d < p.size) {
+                ++seen;
+                if (s.owner_[ip + d] == kNone) {
+                    t_ps += seen * costs().scan;
+                    return ip + d;
+                }
+            }
+            if (d > 0 && ip >= d) {
+                ++seen;
+                if (s.owner_[ip - d] == kNone) {
+                    t_ps += seen * costs().scan;
+                    return ip - d;
+                }
+            }
+        }
+        t_ps += seen * costs().scan;
+        return kNone;
+    }
+
+    // The run of waste through a, up to want codons (forward from a, then
+    // back); *lo its start. 0 if a isn't waste.
+    u32 waste_run(u32 a, u32 want, u32* lo) const {
+        *lo = a;
+        if (a >= p.size || s.owner_[a] != kNone)
+            return 0;
+        u32 len = 0;
+        for (u32 x = a; x < p.size && len < want && s.owner_[x] == kNone; ++x)
+            ++len;
+        u32 l = a;
+        while (l > 0 && len < want && s.owner_[l - 1] == kNone) {
+            --l;
+            ++len;
+        }
+        *lo = l;
+        return len;
+    }
+
+    // The bite's aim: a body (its contest match and length), or a waste codon
+    // (*waste; the target is then kNone). Both kNone: nothing in reach.
+    u32 bite_aim(u32 ip, const u8* bits, u32 n, u32* waste, u32* pmatch, u32* plen) {
+        *waste = kNone;
+        const u32 t = contest_pick(ip, bits, n, true, pmatch, plen);
+        const bool body_ok = t != kNone && (*plen == 0 || *pmatch > 0);
+        if (n > 0) // aimed: living things only
+            return body_ok ? t : kNone;
+        const u32 w = nearest_waste(ip);
+        if (w == kNone)
+            return body_ok ? t : kNone;
+        if (body_ok) {
+            const u32 start = s.blocks_[s.bodies_[t].blocks].start;
+            const u32 bd = start > ip ? start - ip : ip - start;
+            const u32 wd = w > ip ? w - ip : ip - w;
+            if (bd < wd)
+                return t;
+        }
+        *waste = w;
+        *pmatch = *plen = 0;
+        return kNone;
+    }
+
+    // The codons a bite would take now (its time).
+    u32 bite_extent(u32 target, u32 waste, u32 want) const {
+        if (target != kNone)
+            return s.bodies_[target].mem < want ? s.bodies_[target].mem : want;
+        u32 lo = 0;
+        return waste_run(waste, want, &lo);
+    }
+
+    // Block k moves to body `to` whole (its codons, contents and stamps).
+    void give_block(u32 k, u32 to) {
+        const u32 from = s.blocks_[k].body;
+        unlink_block(from, k);
+        Body& F = s.bodies_[from];
+        if (F.latest == k)
+            F.latest = kNone;
+        F.mem -= s.blocks_[k].owned;
+        s.forget_block(from, k);
+        s.blocks_[k].body = to;
+        Body& T = s.bodies_[to];
+        if (T.blocks == kNone) {
+            T.blocks = k;
+        } else {
+            u32 t = T.blocks;
+            while (s.blocks_[t].next != kNone)
+                t = s.blocks_[t].next;
+            s.blocks_[t].next = k;
+        }
+        T.mem += s.blocks_[k].owned;
+        T.latest = k;
+    }
+
+    // Block k's codons from address a on (high) or before a (low) become a new
+    // block of the same body, right after k in its list; k keeps the rest
+    // (and its id, so a lineage member stays one). Returns the new block.
+    u32 carve_block(u32 k, u32 a, bool high) {
+        u32 k2;
+        if (!s.free_blocks_.empty()) {
+            k2 = s.free_blocks_.back();
+            s.free_blocks_.pop();
+        } else {
+            k2 = static_cast<u32>(s.blocks_.size());
+            s.blocks_.push(Block{});
+        }
+        const u32 start = s.blocks_[k].start, end = start + s.blocks_[k].len;
+        const u32 lo = high ? a : start, hi = high ? end : a;
+        u32 moved = 0;
+        for (u32 x = lo; x < hi; ++x) {
+            if (s.owner_[x] == k) {
+                s.owner_[x] = k2;
+                ++moved;
+            }
+        }
+        Block& b2 = s.blocks_[k2];
+        b2.start = lo;
+        b2.len = hi - lo;
+        b2.body = s.blocks_[k].body;
+        b2.owned = moved;
+        b2.pad = 0;
+        Block& b1 = s.blocks_[k];
+        if (high) {
+            b1.len = a - start;
+        } else {
+            b1.start = a;
+            b1.len = end - a;
+        }
+        b1.owned -= moved;
+        b2.next = b1.next;
+        b1.next = k2;
+        if (s.obs_)
+            s.obs_->on_carve(k2);
+        return k2;
+    }
+
+    // A bite of raw material: the waste run through a, up to want codons,
+    // claimed as the eater's latest block, contents and all. Returns codons.
+    u32 bite_waste(u32 a, u32 want) {
+        u32 lo = 0;
+        const u32 len = waste_run(a, want, &lo);
+        if (len == 0)
+            return 0;
+        const u32 k = s.new_block(lo, len, c.body);
+        s.bodies_[c.body].latest = k;
+        ++s.tally_.bites_waste;
+        return len;
+    }
+
+    // A bite of a bigger body: want codons from its end nearest ip, and the
+    // same share of its millicores (at random) and GPU and NPU units. The
+    // piece keeps its stamps (it was the prey's code). Returns codons taken.
+    u32 bite_piece(u32 prey, u32 want, u32 ip) {
+        const u32 eater = c.body;
+        const u32 n0 = s.bodies_[prey].mem;
+        const u32 g = s.genome_len(prey);
+        // its blocks in address order
+        Array<u32> order;
+        for (u32 k = s.bodies_[prey].blocks; k != kNone; k = s.blocks_[k].next) {
+            usize i = order.size();
+            order.push(k);
+            while (i > 0 && s.blocks_[order[i - 1]].start > s.blocks_[k].start) {
+                order[i] = order[i - 1];
+                --i;
+            }
+            order[i] = k;
+        }
+        if (order.empty() || n0 == 0)
+            return 0;
+        const u32 lo = s.blocks_[order[0]].start;
+        const u32 hi = s.blocks_[order.back()].start + s.blocks_[order.back()].len;
+        const bool from_low = ip < lo || (ip < hi && ip - lo <= hi - ip);
+        u32 left = want, taken = 0;
+        for (usize j = 0; j < order.size() && left > 0; ++j) {
+            const u32 k = order[from_low ? j : order.size() - 1 - j];
+            const u32 owned = s.blocks_[k].owned;
+            if (owned == 0)
+                continue;
+            u32 piece = k;
+            if (owned > left) { // part of it: the `left` owned codons on the near side
+                const u32 st = s.blocks_[k].start, en = st + s.blocks_[k].len;
+                u32 a = 0, cnt = 0;
+                if (from_low) {
+                    for (a = st; a < en && cnt < left; ++a)
+                        cnt += s.owner_[a] == k;
+                } else {
+                    for (a = en; a > st && cnt < left; --a)
+                        cnt += s.owner_[a - 1] == k;
+                }
+                piece = carve_block(k, a, !from_low);
+            }
+            const u32 got = s.blocks_[piece].owned;
+            s.stamp_block(piece, g);
+            give_block(piece, eater);
+            left -= got;
+            taken += got;
+        }
+        // The same share of its holdings: millicores at random, GPU and NPU
+        // units oldest first (as DIVIDE shares them).
+        const u64 share_n = taken, share_d = n0;
+        Body& P = s.bodies_[prey];
+        const u32 units = static_cast<u32>((2 * static_cast<u64>(P.units) * share_n + share_d) / (2 * share_d));
+        if (units > 0) {
+            Array<u32> pool;
+            for (u32 u = P.unit_head; u != kNone; u = s.unit_next_[u])
+                pool.push(u);
+            for (u32 i = 0; i < units && i < pool.size(); ++i) {
+                const u32 j = i + static_cast<u32>(s.rng_.below(pool.size() - i));
+                const u32 u = pool[j];
+                pool[j] = pool[i];
+                pool[i] = u;
+                s.unlink_unit(u);
+                s.append_unit(eater, u);
+            }
+        }
+        if (p.gpus)
+            s.gpu_.move(prey, eater,
+                        static_cast<u32>((2 * static_cast<u64>(s.gpu_.count[prey]) * share_n + share_d) / (2 * share_d)));
+        if (p.npus)
+            s.npu_.move(prey, eater,
+                        static_cast<u32>((2 * static_cast<u64>(s.npu_.count[prey]) * share_n + share_d) / (2 * share_d)));
+        ++s.tally_.bites_body;
+        return taken;
+    }
+
+    // A bite lands on what it aimed at: raw material claimed, a body
+    // swallowed whole, or a piece of a bigger one. Returns codons taken.
+    u32 bite_land(u32 target, u32 waste, u32 want, u32 ip) {
+        u32 got = 0;
+        if (target == kNone) {
+            got = bite_waste(waste, want);
+        } else if (s.bodies_[target].mem <= want) {
+            got = s.bodies_[target].mem;
+            engulf_body(target);
+        } else {
+            got = bite_piece(target, want, ip);
+        }
+        s.tally_.codons_bitten += got;
+        return got;
+    }
+
     // Returns the instructions charged; *ok says whether it succeeded.
     u32 contact(u32 ip, bool engulf, u32* next, bool* ok) {
         u8 bits[64];
@@ -869,6 +1133,25 @@ struct Exec {
             ++s.tally_.inject_tries;
         t_ps += costs().call; // Phase 9 (a warp's host instruction): a world change
         u32 cost = 1 + p.contact_base;
+        if (engulf && p.bites) { // Phase 10: a bite, at once
+            *ok = false;
+            const u32 want = bite_size();
+            if (want == 0)
+                return cost;
+            u32 waste = kNone, match = 0, len = 0;
+            const u32 t = bite_aim(ip, bits, n, &waste, &match, &len);
+            if (t == kNone && waste == kNone)
+                return cost;
+            if (t != kNone && len > 0 && !(s.rng_.below(len) < match))
+                return cost; // the grip slipped: a failed contest still costs the attempt
+            const u32 got = bite_land(t, waste, want, ip);
+            if (got == 0)
+                return cost;
+            cost += static_cast<u32>(p.contact_per_codon * got);
+            t_ps += static_cast<u64>(got) * costs().move;
+            *ok = true;
+            return cost;
+        }
         u32 target = contest(ip, bits, n, engulf || !p.inject_key);
         if (target == kNone) {
             *ok = false;
@@ -923,6 +1206,35 @@ struct Exec {
         else
             ++s.tally_.inject_tries;
         t_ps += costs().call;
+        if (engulf && p.bites) { // Phase 10: a bite takes its codons' time
+            const u32 want = bite_size();
+            if (want == 0)
+                return 1;
+            u32 waste = kNone, match = 0, len = 0;
+            const u32 t = bite_aim(ip, bits, n, &waste, &match, &len);
+            const u32 size = (t == kNone && waste == kNone) ? 0 : bite_extent(t, waste, want);
+            if (size == 0)
+                return 1; // nothing in reach: fails at once
+            const u64 ticks = max_of<u64>(1, (static_cast<u64>(size) + p.engulf_cpt - 1) / p.engulf_cpt);
+            Action a = {};
+            a.end = s.tick_ + ticks;
+            a.actor_serial = s.bodies_[c.body].serial;
+            a.target_serial = t != kNone ? s.bodies_[t].serial : 0;
+            a.op = static_cast<u32>(Op::engulf);
+            actor_of(&a);
+            a.actor = c.body;
+            a.target = t;
+            a.n = n;
+            a.match = match;
+            a.len = len;
+            a.bite = want;
+            a.at = t == kNone ? waste : 0;
+            memcpy(a.bits, bits, n);
+            s.actions_.push(a);
+            ++s.tally_.actions_started;
+            deferred = true;
+            return 1;
+        }
         const bool blind = engulf || !p.inject_key;
         u32 match = 0, len = 0;
         const u32 target = contest_pick(ip, bits, n, blind, &match, &len);
@@ -959,6 +1271,15 @@ struct Exec {
         u8 cur[64];
         *next = skip(ip, read_template(next_ip(ip), cur)); // past the template as it is now
         *ok = false;
+        if (engulf && p.bites && a.target == kNone) { // Phase 10: a bite of raw material
+            const u32 d = a.at > ip ? a.at - ip : ip - a.at;
+            const u32 got = d <= p.contact_range ? bite_land(kNone, a.at, a.bite, ip) : 0;
+            if (got == 0)
+                return 1; // claimed by another meanwhile (run_cpu counts it failed)
+            t_ps += static_cast<u64>(got) * costs().move;
+            *ok = true;
+            return 1;
+        }
         const u32 t = a.target;
         const Body& T = s.bodies_[t];
         if (!T.alive || T.serial != a.target_serial || T.blocks == kNone)
@@ -993,7 +1314,9 @@ struct Exec {
             return 1;
         }
         u32 moved = engulf ? T.mem : 0;
-        if (engulf)
+        if (engulf && p.bites) // Phase 10: whole if it's no bigger than the bite, else a piece
+            moved = bite_land(t, kNone, a.bite, ip);
+        else if (engulf)
             engulf_body(t);
         else
             moved = inject_into(t);
@@ -2118,6 +2441,7 @@ struct Exec {
         case Op::zerob:
             c.bx = 0;
             break;
+        case Op::inert: // Phase 10: dead matter, not an instruction (nova_v2's codon 0)
         case Op::count:
             ok = false;
             break;
@@ -2133,6 +2457,7 @@ i64 Soup::run_cpu(u32 ci, i64 quota, u8 kind) {
     if (kind == kKindE) // Phase 9c: on an E-core, at its costs
         e.ct = &p_->ecost;
     i64 used = 0;
+    const u64 ran_before = e.c.executed; // Phase 10: a body that runs isn't frozen
     // Phase 9: an action under way. Before its end the CPU waits out the tick
     // (its time is spent: it heats, as work does); at its end it lands or
     // fails first, then the CPU runs on. A contact action whose target is
@@ -2144,7 +2469,7 @@ i64 Soup::run_cpu(u32 ci, i64 quota, u8 kind) {
             const bool gone = a.target != kNone &&
                               (!bodies_[a.target].alive || bodies_[a.target].serial != a.target_serial);
             if (a.end > tick_ && !gone) // contact is the CPU at work; a wait leaves it idle (9c)
-                return a.target == kNone ? 0 : quota;
+                return contact_action(a) ? quota : 0;
             const Action act = a;
             for (usize j = ai; j + 1 < actions_.size(); ++j) // in start order, still
                 actions_[j] = actions_[j + 1];
@@ -2160,8 +2485,10 @@ i64 Soup::run_cpu(u32 ci, i64 quota, u8 kind) {
     }
     while (used < quota && !e.c.halted && !e.c.yielded && !e.deferred)
         used += e.step();
-    if (e.deferred && used < quota && actions_.back().target != kNone)
+    if (e.deferred && used < quota && contact_action(actions_.back()))
         used = quota; // the rest of the tick goes on the contact; a wait is idle (9c)
+    if (e.c.executed != ran_before && e.c.body < last_ran_.size())
+        last_ran_[e.c.body] = tick_;
     // ENGULF may have appended the prey's CPUs after this one: keep the link.
     u32 next = cpus_[ci].next;
     cpus_[ci] = e.c;

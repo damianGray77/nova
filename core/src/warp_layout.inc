@@ -17,10 +17,10 @@
 #define WC_SENSE_N 99u    // SENSE's readings
 #define WC_STEP_COST 100u // work per step
 #define WC_LANE_COST 101u // work per lane in a step
-#define WC_OPTIME 102u    // 95 words (Phase 9b): a step's time by its Op, then for a lane that
+#define WC_OPTIME 102u    // 96 words (Phase 9b): a step's time by its Op, then for a lane that
                           // can't run the code (all 0: no clock)
-#define WC_SCAN 197u      // a place a lane's template search looks at (Phase 9c; 0: free)
-#define WC_COUNT 198u
+#define WC_SCAN 198u      // a place a lane's template search looks at (Phase 9c; 0: free)
+#define WC_COUNT 199u
 
 // --- a body's record in the image (offsets from the record) -------------------
 #define WB_NBLK 0u        // blocks
@@ -172,7 +172,8 @@
 #define OP_DECB 91u
 #define OP_ZEROA 92u
 #define OP_ZEROB 93u
-#define OP_COUNT 94u
+#define OP_INERT 94u      // Phase 10: dead matter; a lane running it fails (the default case)
+#define OP_COUNT 95u
 
 // what a random draw is for
 #define WD_FLAW 1u

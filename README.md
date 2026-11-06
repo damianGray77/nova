@@ -13,12 +13,35 @@ Phase 5 Windows' own Direct3D 12, DXCore and DirectML headers, used only by
 `core/src/accel_dx.cpp`) are used. A CTest entry (`includes`) enforces this;
 adding a header to its allowlist is a dependency decision to discuss first.
 
-## Status: Phase 9 built (design.md 6.15, 9.1); tuning after stress tests
+## Status: Phase 10 built (design.md 6.16, 9.1); tuning after stress tests
+
+**Phase 10** changes where life's material comes from and how things end,
+and turns every feature of the world on by default (set a key to change it):
+
+- **Vents:** points in each node's memory spray random codons into nearby
+  waste, fast and continuously (`vent.spacing`, `vent.rate`, `vent.radius`).
+  Sparks still only animate a run of waste with a CPU and millicores, now a
+  quarter as often in the presets.
+- **Decay:** dead matter loses bits until it reaches INERT, codon 0 of the new
+  default table `nova_v2` (it ends templates and fails when run), so animated
+  dead matter halts at once. Living code doesn't decay; random flips (cosmic
+  rays) are a hundredth of the old rot.
+- **ENGULF bites:** up to CX codons, never more than the eater's own size, of
+  the nearest material: raw waste (foraging) or a body. Smaller bodies are
+  swallowed whole; bigger ones lose a piece at the point of contact and the
+  same share of their millicores, and limp on if they can. A surface still
+  shields a body from blind bites.
+- **Death:** a halted thread leaves its body, and a body that runs nothing
+  for 200 ticks (other than waiting on the disk or a device) dies.
+- **On by default:** `home_v1`, threads and E cores, the GPU and NPU with
+  async real devices, warps, the Phase 4 features and all of the above. The
+  test suites keep the old defaults (`Config::set_fallback`) so they still
+  test one feature at a time.
 
 **Phase 9** charges every instruction in world time measured on the real
-machine (`cost.table = home_v1`; the default `classic` is everything as
-before), and (9c) gives bodies threads and two kinds of core, both off
-unless asked:
+machine (`cost.table = home_v1`, the default since Phase 10; `classic` is
+every instruction costing 1), and (9c) gives bodies threads and two kinds of
+core:
 
 - **One fixed table, measured once:** `nova bench costs` times this
   machine's own operations outside the simulation (an add, a divide, a load,
