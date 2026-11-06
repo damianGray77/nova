@@ -1,0 +1,211 @@
+diff --git a/core/include/nova/soup.h b/core/include/nova/soup.h
+index 6f3f8bb..2f302a2 100644
+--- a/core/include/nova/soup.h
++++ b/core/include/nova/soup.h
+@@ -125,6 +125,8 @@ struct Cpu {
+     u32 body;
+     u32 block;         // block the IP last executed in (its wrap range)
+     u32 next;          // next CPU of the same body
++    u32 latest;        // PILOT: block this CPU most recently allocated (PROTO_PERCPU)
++    u32 pilot_pad;
+     u64 executed;      // instructions executed since birth
+     u32 sp;
+     u8 err;            // error flag: did the last instruction fail
+@@ -140,7 +142,7 @@ struct Cpu {
+ // update the number.
+ static_assert(sizeof(Block) == 6 * 4, "Block must have no implicit padding");
+ static_assert(sizeof(Body) == 8 + 14 * 4, "Body must have no implicit padding");
+-static_assert(sizeof(Cpu) == (4 + kMaxStack + 6) * 4 + 8 + 4 + 4, "Cpu must have no implicit padding");
++static_assert(sizeof(Cpu) == (4 + kMaxStack + 6) * 4 + 8 + 8 + 4 + 4, "Cpu must have no implicit padding");
+ 
+ // Per-tick counters (stats input).
+ struct SoupTally {
+diff --git a/core/src/interp.cpp b/core/src/interp.cpp
+index ebe8ccb..dbaf4ae 100644
+--- a/core/src/interp.cpp
++++ b/core/src/interp.cpp
+@@ -8,11 +8,22 @@
+ // INJECT charge more) and sets the error flag to whether it failed; K
+ // consecutive failures halt the CPU (6.4 #1).
+ #include <cmath> // log
++#include <cstdlib> // PILOT: getenv
+ 
+ #include "nova/soup.h"
+ 
+ namespace nova {
+ 
++// PILOT toggles (pilots/phase1b): read once from the environment.
++static int pilot_env(const char* name) {
++    const char* v = getenv(name);
++    return v ? atoi(v) : 0;
++}
++static bool percpu() {
++    static const bool v = pilot_env("PROTO_PERCPU") != 0;
++    return v;
++}
++
+ struct Exec {
+     Soup& s;
+     const SoupParams& p;
+@@ -231,6 +242,7 @@ struct Exec {
+         }
+         u32 k = s.new_block(at, len, c.body);
+         s.bodies_[c.body].latest = k;
++        c.latest = k; // PILOT: per-CPU pending block
+         c.wh = at;
+         return at;
+     }
+@@ -250,6 +262,8 @@ struct Exec {
+ 
+     void forget(u32 k) {
+         s.forget_block(c.body, k);
++        if (c.latest == k)
++            c.latest = kNone;
+         if (c.block == k)
+             c.block = kNone;
+     }
+@@ -259,14 +273,16 @@ struct Exec {
+     // share/64 of each non-memory holding (rounded down: zero gives nothing).
+     bool divide(u32 share) {
+         u32 parent = c.body;
+-        u32 k = s.bodies_[parent].latest;
++        u32 k = percpu() ? c.latest : s.bodies_[parent].latest;
+         if (k == kNone)
+             return false;
+         u32 d = s.new_body(); // may move bodies_
+         unlink_block(parent, k);
+         Body& P = s.bodies_[parent];
+         Body& D = s.bodies_[d];
+-        P.latest = kNone;
++        if (P.latest == k)
++            P.latest = kNone;
++        c.latest = kNone;
+         P.mem -= s.blocks_[k].owned;
+         s.blocks_[k].body = d;
+         D.blocks = k;
+@@ -282,8 +298,17 @@ struct Exec {
+     bool alloc() {
+         i32 amount = static_cast<i32>(c.cx);
+         switch (c.bx) {
+-        case 0: // memory
+-            return amount <= 0 || alloc_memory(static_cast<u32>(amount)) != kNone;
++        case 0: { // memory (PILOT: optional one-pending-block rule and size cap)
++            if (amount <= 0)
++                return true;
++            static const int pend = pilot_env("PROTO_PENDING");
++            static const int mult = pilot_env("PROTO_MULT");
++            if (pend && (percpu() ? c.latest : s.bodies_[c.body].latest) != kNone)
++                return false;
++            if (mult && (c.block == kNone || static_cast<u32>(amount) > static_cast<u32>(mult) * s.blocks_[c.block].len))
++                return false;
++            return alloc_memory(static_cast<u32>(amount)) != kNone;
++        }
+         case 1: // CPU, capped by what the pool holds
+             return amount <= 0 || s.claim_units(c.body, static_cast<u32>(amount)) > 0;
+         default: // 2 GPU, 3 disk: off in Phase 1a
+@@ -295,7 +320,7 @@ struct Exec {
+         i32 amount = static_cast<i32>(c.cx);
+         switch (c.bx) {
+         case 0: { // memory: the end of the latest block
+-            u32 k = s.bodies_[c.body].latest;
++            u32 k = percpu() ? c.latest : s.bodies_[c.body].latest;
+             if (k == kNone)
+                 return false;
+             if (amount <= 0)
+@@ -303,7 +328,9 @@ struct Exec {
+             Block& bl = s.blocks_[k];
+             if (static_cast<u32>(amount) >= bl.len) {
+                 s.bodies_[c.body].mem -= bl.owned;
+-                s.bodies_[c.body].latest = kNone;
++                if (s.bodies_[c.body].latest == k)
++                    s.bodies_[c.body].latest = kNone;
++                c.latest = kNone;
+                 unlink_block(c.body, k);
+                 forget(k);
+                 s.free_block(k);
+diff --git a/core/src/soup.cpp b/core/src/soup.cpp
+index b121e87..29adb62 100644
+--- a/core/src/soup.cpp
++++ b/core/src/soup.cpp
+@@ -1,3 +1,4 @@
++#include <cstdlib>
+ #include "nova/soup.h"
+ 
+ #include <intrin.h> // _BitScanForward64, _BitScanReverse64
+@@ -381,9 +382,12 @@ void Soup::free_block(u32 k) {
+ }
+ 
+ void Soup::forget_block(u32 body, u32 k) {
+-    for (u32 c = bodies_[body].cpus; c != kNone; c = cpus_[c].next)
++    for (u32 c = bodies_[body].cpus; c != kNone; c = cpus_[c].next) {
+         if (cpus_[c].block == k)
+             cpus_[c].block = kNone;
++        if (cpus_[c].latest == k)
++            cpus_[c].latest = kNone;
++    }
+ }
+ 
+ u32 Soup::new_body() {
+@@ -421,6 +425,7 @@ u32 Soup::new_cpu(u32 body, u32 start) {
+     Cpu& C = cpus_[c];
+     C = Cpu{};
+     C.ip = C.rh = C.wh = start;
++    C.latest = kNone;
+     C.body = body;
+     C.block = owner_[start];
+     C.next = kNone;
+@@ -571,7 +576,9 @@ void Soup::tick(u64 tick) {
+     u32 count = static_cast<u32>(rate);
+     if (rng_.chance(rate - count))
+         ++count;
+-    sparks(count);
++    static const bool spark_late = getenv("PROTO_SPARK_LATE") && atoi(getenv("PROTO_SPARK_LATE"));
++    if (!spark_late)
++        sparks(count);
+ 
+     prepare_heat();
+ 
+@@ -587,9 +594,25 @@ void Soup::tick(u64 tick) {
+                 run_body(b, tick);
+         }
+     }
++    if (spark_late)
++        sparks(count); // PILOT: chemistry takes what life left
+ 
+     heat_update();
+     bit_rot();
++    // PILOT: CPU wear. Each held millicore fails back into the pool at this
++    // rate per tick (a hazard like bit rot), so CPU is a flow that must be re-claimed.
++    static const double cpu_fault = getenv("PROTO_CPU_FAULT") ? atof(getenv("PROTO_CPU_FAULT")) : 0.0;
++    if (cpu_fault > 0) {
++        double pos = -log(1.0 - rng_.unit()) / cpu_fault;
++        while (pos < static_cast<double>(p_->millicores)) {
++            u32 u = static_cast<u32>(pos);
++            if (unit_owner_[u] != kNone) {
++                unlink_unit(u);
++                pool_push(u);
++            }
++            pos += -log(1.0 - rng_.unit()) / cpu_fault;
++        }
++    }
+     death_sweep();
+ }
+ 
+@@ -635,8 +658,16 @@ void Soup::prepare_heat() {
+ }
+ 
+ void Soup::run_body(u32 b, u64 tick) {
++    // PILOT: memory upkeep, instructions per owned codon per tick, charged
++    // first (as work, so it heats the body) and carried as debt if unpaid.
++    static const double upkeep_rate = getenv("PROTO_UPKEEP") ? atof(getenv("PROTO_UPKEEP")) : 0.0;
++    // Square-cube option: cost per codon grows as (size / 64)^(exp - 1).
++    static const double upkeep_exp = getenv("PROTO_EXP") ? atof(getenv("PROTO_EXP")) : 1.0;
++    const double m = bodies_[b].mem;
++    double upkeep = upkeep_rate * m * (upkeep_exp == 1.0 ? 1.0 : pow(m / 64.0, upkeep_exp - 1.0));
++    bodies_[b].work += static_cast<u32>(upkeep);
+     double budget = static_cast<double>(bodies_[b].speed) * p_->instr_per_core / 1000.0 +
+-                    bodies_[b].carry;
++                    bodies_[b].carry - upkeep;
+     i64 n = budget > 0 ? static_cast<i64>(floor(budget)) : 0;
+     bodies_[b].carry = static_cast<float>(budget - static_cast<double>(n));
+     if (n <= 0)
