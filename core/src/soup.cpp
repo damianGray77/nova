@@ -261,6 +261,8 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
         cfg.fail("cost.table", "must be classic or home_v1");
         builtin_costs("classic", &p->cost);
     }
+    if (!builtin_costs_e(Str(p->cost.name), &p->ecost)) // Phase 9c: on an E-core
+        p->ecost = p->cost;
     p->plain = p->cost.timed ? static_cast<double>(p->cost.alu) : 1.0;
     p->tick_units = static_cast<double>(p->instr_per_core) * p->plain;
     p->engulf_cpt = get_u32(cfg, "engulf.codons_per_tick", 16, 1, 1u << 24);
@@ -311,15 +313,40 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
         p->gpu_elements = clamp(tick / static_cast<double>(p->cost.gpu_thr));
         p->npu_macs = clamp(tick / (static_cast<double>(p->cost.npu_mac) * 1000.0));
     }
+    // Phase 9c (design.md 6.15): async results come back after each device's
+    // own round trip, in whole ticks, with a timed table; otherwise after
+    // accel.latency, as before.
+    p->gpu_latency = p->npu_latency = p->accel_latency;
+    if (p->cost.timed) {
+        auto ticks = [p](u64 ps) {
+            const double t = static_cast<double>(ps) / p->tick_units;
+            const double up = static_cast<double>(static_cast<u64>(t)) < t ? static_cast<double>(static_cast<u64>(t)) + 1
+                                                                          : static_cast<double>(static_cast<u64>(t));
+            return up < 1 ? 1u : (up > 1e9 ? 1000000000u : static_cast<u32>(up));
+        };
+        p->gpu_latency = ticks(p->cost.gpu_start);
+        p->npu_latency = ticks(p->cost.npu_start);
+    }
     if (p->warps)
         sense_n = kSenseReadingsWarp; // + my lane, lanes in my warp
     if (p->cost.timed)
         sense_n = kSenseReadingsActions; // + an action on me: ticks until it ends, what it is
+    // Threads and cores (Phase 9c, design.md 6.15): off = exactly as before.
+    p->threads = cfg.get_bool("cpu.threads", false);
+    p->slices = get_u32(cfg, "cpu.slices", 8, 1, 64);
+    p->max_threads = get_u32(cfg, "cpu.max_threads", 8, 1, 64);
+    p->e_share = get_f64(cfg, "cpu.e_share", 0.0, 0, 1);
+    p->e_gain = static_cast<float>(get_f64(cfg, "heat.e_gain", 0.4, 0, 1e3));
+    if (p->e_share > 0 && !p->cost.timed) // an E-core's speed is the table's E column
+        cfg.fail("cpu.e_share", "needs a timed cost table (cost.table = home_v1)");
+    p->kinds = p->threads || p->e_share > 0;
+    if (p->kinds)
+        sense_n = kSenseReadingsThreads; // + my threads, my kind, my E millicores, free E millicores
     m.sense_n = static_cast<u8>(sense_n);
-    m.res_n = static_cast<u8>(p->npus ? 5 : 4);
+    m.res_n = static_cast<u8>(p->e_share > 0 ? 6 : (p->npus ? 5 : 4)); // Phase 9c: 5 is E millicores
     identity_map(m.sense, kSenseReadingsMax);
     identity_map(m.disk, 3);
-    identity_map(m.res, 5);
+    identity_map(m.res, 6);
     identity_map(m.head, 2);
     identity_map(m.divide, 4);
     identity_map(m.gpu, kGpuOps);
@@ -461,7 +488,8 @@ void Soup::init(const SoupParams* p, u64 seed, u32 node, u32 life, const Ruins* 
     free_cpus_.clear();
     order_.clear();
     next_serial_ = 0;
-    actions_.clear(); // Phase 9
+    actions_.clear();   // Phase 9
+    cpu_kind_.clear();  // Phase 9c
 
     const u32 m = p->millicores;
     unit_owner_.resize(m);
@@ -477,6 +505,26 @@ void Soup::init(const SoupParams* p, u64 seed, u32 node, u32 life, const Ruins* 
     for (u32 u = 0; u < m; ++u) {
         pool_[u] = u;
         pool_pos_[u] = u;
+    }
+    // Phase 9c (design.md 6.15): the last round(m x cpu.e_share) units are E
+    // millicores, in a pool of their own.
+    e_first_ = 0xFFFFFFFFu;
+    epool_.clear();
+    eunits_.clear();
+    espeed_.clear();
+    eheat_.clear();
+    ework_.clear();
+    cpu_time_.clear();
+    cpu_etime_.clear();
+    const u32 me = p->e_share > 0 ? static_cast<u32>(floor(static_cast<double>(m) * p->e_share + 0.5)) : 0;
+    if (me > 0) {
+        e_first_ = m - me;
+        pool_.resize(e_first_);
+        epool_.resize(me);
+        for (u32 i = 0; i < me; ++i) {
+            epool_[i] = e_first_ + i;
+            pool_pos_[e_first_ + i] = i;
+        }
     }
 
     const u32 pages = (n + kPage - 1) >> kPageBits;
@@ -810,6 +858,17 @@ u32 Soup::new_body() {
         warp_carry_[b] = 0.0f;
         warp_upkeep_[b] = 0.0;
     }
+    if (ek()) { // Phase 9c: no E millicores yet
+        if (eunits_.size() < bodies_.size()) {
+            eunits_.resize(bodies_.size());
+            espeed_.resize(bodies_.size());
+            eheat_.resize(bodies_.size());
+            ework_.resize(bodies_.size());
+        }
+        eunits_[b] = 0;
+        espeed_[b] = eheat_[b] = 0.0f;
+        ework_[b] = 0;
+    }
     return b;
 }
 
@@ -831,6 +890,11 @@ u32 Soup::new_cpu(u32 body, u32 start) {
         ++cpu_gen_[c];
         cpu_result_[c] = 0;
         cpu_pending_[c] = 0;
+    }
+    if (kinds_on()) { // Phase 9c: a new thread prefers P, unless its maker says otherwise
+        while (cpu_kind_.size() < cpus_.size())
+            cpu_kind_.push(kKindP);
+        cpu_kind_[c] = kKindP;
     }
     Cpu& C = cpus_[c];
     C = Cpu{};
@@ -857,7 +921,7 @@ u32 Soup::create_body(u32 start, u32 len, u32 units) {
     u32 b = new_body();
     new_block(start, len, b);
     new_cpu(b, start);
-    claim_units(b, units);
+    claim_mixed(b, units);
     return b;
 }
 
@@ -877,7 +941,7 @@ u32 Soup::create_body_form(u32 start, u32 len, u32 units, u32 gpus, u32 form) {
         return kNone;
     u32 b = new_body();
     new_block(start, len, b);
-    claim_units(b, units);
+    claim_mixed(b, units);
     if (gpus)
         claim_gpus(b, gpus);
     birth(b, start, form);
@@ -885,7 +949,7 @@ u32 Soup::create_body_form(u32 start, u32 len, u32 units, u32 gpus, u32 form) {
 }
 
 bool Soup::arrive(const u8* code, u32 len, u32 millicores, u32 gpus, u32 npus, u32 disk, const CargoTag& tag,
-                  u32 form) {
+                  u32 form, u32 emillicores, u8 kind) {
     if (len == 0 || len > p_->size) {
         ++tally_.lost;
         return false;
@@ -903,14 +967,24 @@ bool Soup::arrive(const u8* code, u32 len, u32 millicores, u32 gpus, u32 npus, u
         mem_[at + i] = code[i];
     u32 b = kNone;
     if (!p_->warps) {
-        b = create_body(at, len, millicores);
-        NOVA_ASSERT(b != kNone);
+        if (!ek()) {
+            b = create_body(at, len, millicores);
+            NOVA_ASSERT(b != kNone);
+        } else { // Phase 9c: each kind from its own pool (capped)
+            b = new_body();
+            new_block(at, len, b);
+            new_cpu(b, at);
+            claim_units(b, millicores);
+            claim_e_units(b, emillicores);
+        }
         if (gpus && p_->gpus)
             claim_gpus(b, gpus);
     } else { // Phase 8: born in her form, once she holds her shares
         b = new_body();
         new_block(at, len, b);
         claim_units(b, millicores);
+        if (ek())
+            claim_e_units(b, emillicores);
         if (gpus && p_->gpus)
             claim_gpus(b, gpus);
     }
@@ -920,6 +994,8 @@ bool Soup::arrive(const u8* code, u32 len, u32 millicores, u32 gpus, u32 npus, u
         disk_.claim_any(rng_, b, disk);
     if (p_->warps)
         birth(b, at, form);
+    if (kinds_on() && bodies_[b].cpus != kNone) // Phase 9c: her thread prefers her divider's kind
+        cpu_kind_[bodies_[b].cpus] = kind;
     if (obs_)
         obs_->on_arrive(*this, owner_[at], tag, tick_);
     ++tally_.arrived;
@@ -965,23 +1041,29 @@ void Soup::kill(u32 b) {
 // CPU units (the millicore ledger)
 // ---------------------------------------------------------------------------
 
+// Phase 9c: an E millicore goes to and from the E pool (is_e is false for
+// every unit without them).
 void Soup::pool_push(u32 u) {
+    Array<u32>& pool = is_e(u) ? epool_ : pool_;
     unit_owner_[u] = kNone;
-    pool_pos_[u] = static_cast<u32>(pool_.size());
-    pool_.push(u);
+    pool_pos_[u] = static_cast<u32>(pool.size());
+    pool.push(u);
 }
 
 void Soup::pool_remove(u32 u) {
+    Array<u32>& pool = is_e(u) ? epool_ : pool_;
     u32 i = pool_pos_[u];
-    u32 last = pool_.back();
-    pool_[i] = last;
+    u32 last = pool.back();
+    pool[i] = last;
     pool_pos_[last] = i;
-    pool_.pop();
+    pool.pop();
     pool_pos_[u] = kNone;
 }
 
 void Soup::append_unit(u32 body, u32 u) {
     Body& B = bodies_[body];
+    if (is_e(u))
+        ++eunits_[body];
     unit_owner_[u] = body;
     unit_prev_[u] = B.unit_tail;
     unit_next_[u] = kNone;
@@ -995,6 +1077,8 @@ void Soup::append_unit(u32 body, u32 u) {
 
 void Soup::unlink_unit(u32 u) {
     Body& B = bodies_[unit_owner_[u]];
+    if (is_e(u))
+        --eunits_[unit_owner_[u]];
     u32 prev = unit_prev_[u], next = unit_next_[u];
     if (prev != kNone)
         unit_next_[prev] = next;
@@ -1035,6 +1119,72 @@ void Soup::release_units(u32 body, u32 k) {
         u32 u = bodies_[body].unit_head;
         unlink_unit(u);
         pool_push(u); // freed units keep their heat (6.4 #2)
+    }
+}
+
+// Phase 9c: E millicores, as claim_units draws P.
+u32 Soup::claim_e_units(u32 body, u32 k) {
+    if (k > epool_.size())
+        k = static_cast<u32>(epool_.size());
+    for (u32 i = 0; i < k; ++i) {
+        u32 u = epool_[rng_.below(epool_.size())];
+        pool_remove(u);
+        append_unit(body, u);
+    }
+    return k;
+}
+
+// Up to k units from both pools in proportion to what each holds free (P
+// first, then E); without E millicores, exactly claim_units.
+u32 Soup::claim_mixed(u32 body, u32 k) {
+    if (!ek())
+        return claim_units(body, k);
+    const u64 fp = pool_.size(), fe = epool_.size(), f = fp + fe;
+    if (f == 0)
+        return 0;
+    const u64 t = k < f ? k : f;
+    u64 ke = (2 * t * fe + f) / (2 * f); // t x fe / f, rounded
+    if (ke > fe)
+        ke = fe;
+    if (t - ke > fp)
+        ke = t - fp;
+    return claim_units(body, static_cast<u32>(t - ke)) + claim_e_units(body, static_cast<u32>(ke));
+}
+
+// The oldest k units of one kind, to another body or into their pool.
+void Soup::move_kind(u32 from, u32 to, u32 k, bool e) {
+    if (!ek()) {
+        if (!e)
+            move_units(from, to, k);
+        return;
+    }
+    u32 u = bodies_[from].unit_head;
+    for (u32 i = 0; i < k && u != kNone;) {
+        const u32 next = unit_next_[u];
+        if (is_e(u) == e) {
+            unlink_unit(u);
+            append_unit(to, u);
+            ++i;
+        }
+        u = next;
+    }
+}
+
+void Soup::release_kind(u32 body, u32 k, bool e) {
+    if (!ek()) {
+        if (!e)
+            release_units(body, k);
+        return;
+    }
+    u32 u = bodies_[body].unit_head;
+    for (u32 i = 0; i < k && u != kNone;) {
+        const u32 next = unit_next_[u];
+        if (is_e(u) == e) {
+            unlink_unit(u);
+            pool_push(u);
+            ++i;
+        }
+        u = next;
     }
 }
 
@@ -1585,7 +1735,7 @@ void Soup::begin_tick(u64 tick) {
 // only dents it, and only sustained starvation fills it.
 void Soup::lifecycle_check() {
     if (p_->starve_ticks > 0) {
-        const bool starving = static_cast<double>(pool_.size()) < p_->starve_below * p_->millicores;
+        const bool starving = static_cast<double>(pool_.size() + epool_.size()) < p_->starve_below * p_->millicores;
         starve_meter_ = starve_meter_ * (1.0 - p_->starve_ebb) + (starving ? 1.0 : 0.0);
     }
     collapse_ = (p_->endurance > 0 && static_cast<double>(writes_) >= p_->endurance) ||
@@ -1809,6 +1959,11 @@ u32 Soup::action_on(u32 b) const {
     return best;
 }
 
+bool Soup::cpu_waits(u32 c) const {
+    const u32 i = action_of(c);
+    return i != kNone && actions_[i].target == kNone && actions_[i].end > tick_;
+}
+
 u32 Soup::action_of(u32 c) const {
     for (u32 i = 0; i < actions_.size(); ++i)
         if (!actions_[i].warp && actions_[i].cpu == c && actions_[i].actor == cpus_[c].body &&
@@ -1901,8 +2056,8 @@ void Soup::sparks(u32 count) {
     for (u32 i = 0; i < count; ++i) {
         // Phase 8: with warps a spark may draw GPU units instead (or as well).
         const bool gpu_pool = p_->warps && p_->spark_gpu_grant && p_->gpus && !gpu_.pool.empty();
-        if (pool_.empty() && !gpu_pool)
-            return; // a spark only draws from the free pool
+        if (pool_.empty() && epool_.empty() && !gpu_pool)
+            return; // a spark only draws from the free pools
         u32 len = lo + static_cast<u32>(rng_.below(hi - lo + 1));
         u32 from = static_cast<u32>(rng_.below(p_->size));
         u32 at = known_full(len) ? kNone : find_free_fwd(from, len);
@@ -1919,7 +2074,7 @@ void Soup::sparks(u32 count) {
             // chance spark.gpu_born.
             const u32 b = new_body();
             new_block(at, len, b);
-            claim_units(b, p_->spark_grant);
+            claim_mixed(b, p_->spark_grant);
             if (p_->spark_gpu_grant)
                 claim_gpus(b, p_->spark_gpu_grant);
             u32 form = kFormCpu;
@@ -1941,13 +2096,22 @@ void Soup::prepare_heat() {
         B.work = 0;
     }
     const u32 m = p_->millicores;
+    if (ek()) { // Phase 9c: E units' speed apart too; nothing done on them yet
+        for (usize k = 0; k < order_.size(); ++k) {
+            espeed_[order_[k]] = 0.0f;
+            ework_[order_[k]] = 0;
+        }
+    }
     for (u32 u = 0; u < m; ++u) {
         u32 o = unit_owner_[u];
         if (o == kNone)
             continue;
         Body& B = bodies_[o];
         float h = unit_heat_[u];
-        B.speed += p_->heat_on ? p_->cpu.speed(h) : 1.0f;
+        const float sp = p_->heat_on ? p_->cpu.speed(h) : 1.0f;
+        B.speed += sp;
+        if (is_e(u))
+            espeed_[o] += sp;
         B.err += h;
     }
     for (usize k = 0; k < order_.size(); ++k) {
@@ -1979,6 +2143,12 @@ void Soup::run_body(u32 b, u64 tick) {
         bodies_[b].carry = 0.0f; // nothing to run on its CPUs
         return;
     }
+    // Phase 9c: the share of its time on E millicores (0 without them).
+    const double ef = ek() && bodies_[b].speed > 0 ? static_cast<double>(espeed_[b]) / bodies_[b].speed : 0.0;
+    auto add_ework = [&](double t) {
+        const double v = static_cast<double>(ework_[b]) + t * ef;
+        ework_[b] = v > 4e9 ? 4000000000u : static_cast<u32>(v);
+    };
     if (p_->upkeep > 0 && bodies_[b].mem > 0) {
         const double m = bodies_[b].mem;
         upkeep = p_->upkeep * m;
@@ -1989,6 +2159,8 @@ void Soup::run_body(u32 b, u64 tick) {
         const double time = p_->cost.timed ? static_cast<double>(charged) * p_->plain : static_cast<double>(charged);
         const u64 work = bodies_[b].work + (time < 4e9 ? static_cast<u64>(time) : 4000000000ull);
         bodies_[b].work = work > 0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<u32>(work);
+        if (ef > 0) // paid on both kinds, in proportion
+            add_ework(time < 4e9 ? time : 4e9);
         tally_.upkeep += charged;
         if (p_->cost.timed)
             upkeep *= p_->plain;
@@ -2013,6 +2185,8 @@ void Soup::run_body(u32 b, u64 tick) {
             if (cap > 0) {
                 const u64 work = bodies_[b].work + (cap < 4e9 ? static_cast<u64>(cap) : 4000000000ull);
                 bodies_[b].work = work > 0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<u32>(work);
+                if (ef > 0)
+                    add_ework(cap < 4e9 ? cap : 4e9);
             }
         }
         return;
@@ -2020,9 +2194,15 @@ void Soup::run_body(u32 b, u64 tick) {
 
     // The body's share splits equally among its running CPUs; the remainder
     // goes one each to CPUs from a tick-rotated offset.
+    // Phase 9c: a CPU waiting on the disk or a device is idle -- its units
+    // cool -- and its share goes to the body's other CPUs, as an OS runs
+    // another thread while one waits. (Its action lands at its own turn in
+    // its end tick, when it is no longer waiting.)
     scratch_.clear();
     for (u32 c = bodies_[b].cpus; c != kNone; c = cpus_[c].next) {
         if (!cpus_[c].halted) {
+            if (!actions_.empty() && cpu_waits(c))
+                continue;
             cpus_[c].yielded = 0;
             scratch_.push(c);
         }
@@ -2030,19 +2210,149 @@ void Soup::run_body(u32 b, u64 tick) {
     const usize k = scratch_.size();
     if (k == 0)
         return;
-    const i64 q = n / static_cast<i64>(k);
-    const usize extra = static_cast<usize>(n % static_cast<i64>(k));
-    const usize off = static_cast<usize>(tick % k);
     // scratch_ is a snapshot: CPUs an ENGULF adds run from next tick.
+    if (!p_->threads && !ek()) {
+        const i64 q = n / static_cast<i64>(k);
+        const usize extra = static_cast<usize>(n % static_cast<i64>(k));
+        const usize off = static_cast<usize>(tick % k);
+        for (usize i = 0; i < k; ++i) {
+            i64 quota = q + (((i + k - off) % k) < extra ? 1 : 0);
+            if (quota <= 0)
+                continue;
+            i64 used = run_cpu(scratch_[i], quota);
+            Body& B = bodies_[b];
+            B.work += static_cast<u32>(used);
+            if (used > quota)
+                B.carry -= static_cast<float>(used - quota); // attack debt
+        }
+        return;
+    }
+    // Phase 9c, threads and cores (design.md 6.15). With threads a thread
+    // runs on one core at a time, so it gets at most a core's tick; what its
+    // body holds beyond that, with too few threads to use it, goes unused and
+    // cools. With E millicores its time is P time and E time, handed out
+    // first to the threads preferring each kind, then as leftovers to threads
+    // still short of a core (share_time); a thread runs its preferred kind's
+    // time first, every instruction at the costs of the kind it runs on.
+    // Without threads one thread may use all its body's time, of both kinds.
+    // The threads take turns, cpu.slices times a tick, each running a slice's
+    // worth of its time per turn, in the body's thread order rotated each
+    // tick: side by side in world time, so they can hand data to one another
+    // within a tick. (One thread runs straight through: the same.)
+    i64 te = ef > 0 ? static_cast<i64>(floor(static_cast<double>(n) * ef)) : 0;
+    if (te > n)
+        te = n;
+    const i64 cap = p_->threads ? static_cast<i64>(p_->tick_units) : 0x3FFFFFFFFFFFFFFFll;
+    share_time(k, n - te, te, cap, tick);
+    const usize off = static_cast<usize>(tick % k);
+    const u32 slices = p_->threads && k > 1 ? p_->slices : 1;
+    for (u32 sl = 0; sl < slices; ++sl) {
+        for (usize j = 0; j < k; ++j) {
+            const usize i = (j + off) % k;
+            if (tq_[i] <= 0)
+                continue;
+            const i64 allow = tq_[i] * static_cast<i64>(sl + 1) / static_cast<i64>(slices);
+            const u32 c = scratch_[i];
+            const bool pe = cpu_kind(c) == kKindE;
+            const i64 pref = pe ? tqe_[i] : tq_[i] - tqe_[i]; // its time on its preferred kind
+            while (tu_[i] < allow) {
+                const i64 done = pe ? tue_[i] : tu_[i] - tue_[i];
+                const bool on_pref = done < pref;
+                i64 quota = allow - tu_[i];
+                if (on_pref && pref - done < quota)
+                    quota = pref - done;
+                const bool e = on_pref ? pe : !pe;
+                const i64 used = run_cpu(c, quota, e ? kKindE : kKindP);
+                tu_[i] += used;
+                if (e)
+                    tue_[i] += used;
+                if (used < quota || !on_pref)
+                    break; // it stopped, or ran on both kinds
+            }
+        }
+    }
+    u64 ew = 0;
+    if (cpu_time_.size() < cpus_.size()) {
+        cpu_time_.resize(cpus_.size());
+        cpu_etime_.resize(cpus_.size());
+    }
+    for (u32 c = bodies_[b].cpus; c != kNone; c = cpus_[c].next)
+        cpu_time_[c] = cpu_etime_[c] = 0;
     for (usize i = 0; i < k; ++i) {
-        i64 quota = q + (((i + k - off) % k) < extra ? 1 : 0);
-        if (quota <= 0)
-            continue;
-        i64 used = run_cpu(scratch_[i], quota);
         Body& B = bodies_[b];
-        B.work += static_cast<u32>(used);
-        if (used > quota)
-            B.carry -= static_cast<float>(used - quota); // attack debt
+        B.work += static_cast<u32>(tu_[i]);
+        ew += static_cast<u64>(tue_[i]);
+        cpu_time_[scratch_[i]] = tu_[i] > 0xFFFFFFFFll ? 0xFFFFFFFFu : static_cast<u32>(tu_[i]);
+        cpu_etime_[scratch_[i]] = tue_[i] > 0xFFFFFFFFll ? 0xFFFFFFFFu : static_cast<u32>(tue_[i]);
+        if (tu_[i] > tq_[i])
+            B.carry -= static_cast<float>(tu_[i] - tq_[i]); // attack debt
+    }
+    if (ew > 0) {
+        tally_.e_work += ew;
+        const u64 v = ework_[b] + ew;
+        ework_[b] = v > 0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<u32>(v);
+    }
+}
+
+// Phase 9c (R3): a body's P time tp and E time te among its k running
+// threads (scratch_), into tq_ (each thread's time) and tqe_ (its E part).
+// First each thread gets up to `cap` (a core's tick; without threads, no
+// limit) of its preferred kind, shared equally (the remainder one each from
+// a tick-rotated offset); then what's left of each kind goes the same way to
+// the other kind's threads still short of a core. A kind's threads are short
+// only once that kind is used up, so no thread waits while its body has time
+// of the other kind. Without E millicores and E-preferring threads: an equal
+// split, capped (Phase 9c-b1).
+void Soup::share_time(usize k, i64 tp, i64 te, i64 cap, u64 tick) {
+    tq_.resize(k);
+    tqe_.resize(k);
+    tu_.resize(k);
+    tue_.resize(k);
+    for (usize i = 0; i < k; ++i)
+        tq_[i] = tqe_[i] = tu_[i] = tue_[i] = 0;
+    if (k == 1) { // most bodies: the rule below, worked out for one thread
+        const bool pe = cpu_kind(scratch_[0]) == kKindE;
+        const i64 tpref = pe ? te : tp, toth = pe ? tp : te;
+        const i64 a = tpref < cap ? tpref : cap;
+        const i64 o = toth < cap - a ? toth : cap - a;
+        tq_[0] = a + o;
+        tqe_[0] = pe ? a : o;
+        return;
+    }
+    auto hand_out =[&](i64 total, bool e) -> i64 { // to grp_; returns what's given
+        const usize g = grp_.size();
+        if (g == 0 || total <= 0)
+            return 0;
+        const i64 q = total / static_cast<i64>(g);
+        const usize extra = static_cast<usize>(total % static_cast<i64>(g));
+        const usize off = static_cast<usize>(tick % g);
+        i64 given = 0;
+        for (usize j = 0; j < g; ++j) {
+            const usize i = grp_[j];
+            const i64 share = q + (((j + g - off) % g) < extra ? 1 : 0);
+            const i64 need = cap - tq_[i];
+            const i64 a = share < need ? share : need;
+            tq_[i] += a;
+            if (e)
+                tqe_[i] += a;
+            given += a;
+        }
+        return given;
+    };
+    i64 left[2] = {tp, te};
+    for (u32 x = 0; x < 2; ++x) { // each kind to the threads preferring it
+        grp_.clear();
+        for (usize i = 0; i < k; ++i)
+            if (cpu_kind(scratch_[i]) == x)
+                grp_.push(static_cast<u32>(i));
+        left[x] -= hand_out(left[x], x == kKindE);
+    }
+    for (u32 x = 0; x < 2; ++x) { // its leftovers to the other kind's threads short of a core
+        grp_.clear();
+        for (usize i = 0; i < k; ++i)
+            if (cpu_kind(scratch_[i]) != x && tq_[i] < cap)
+                grp_.push(static_cast<u32>(i));
+        hand_out(left[x], x == kKindE);
     }
 }
 
@@ -2052,13 +2362,27 @@ void Soup::heat_update() {
     const float decay = 1.0f - p_->cool;
 
     // CPU units: input from the owner's utilisation of its nominal share.
+    // Phase 9c: with E millicores, P units from its work on P and E units from
+    // its work on E, at heat.e_gain x the P gain (B.speed then holds P's input
+    // and eheat_ E's).
+    const bool ek_on = ek();
     for (usize k = 0; k < order_.size(); ++k) {
-        Body& B = bodies_[order_[k]];
-        float nominal = static_cast<float>(B.units) * static_cast<float>(p_->tick_units) / 1000.0f;
-        float work = static_cast<float>(B.work);
+        const u32 b = order_[k];
+        Body& B = bodies_[b];
+        const u32 eu = ek_on ? eunits_[b] : 0;
+        const u32 ew = ek_on ? ework_[b] : 0;
+        float nominal = static_cast<float>(B.units - eu) * static_cast<float>(p_->tick_units) / 1000.0f;
+        float work = static_cast<float>(B.work - (ew < B.work ? ew : B.work));
         if (p_->cost.timed && work > nominal) // Phase 9: a tick's overshoot heats the ticks that pay it off
             work = nominal;
         B.speed = nominal > 0 ? p_->cpu_gain * work / nominal : 0.0f;
+        if (ek_on) {
+            const float enom = static_cast<float>(eu) * static_cast<float>(p_->tick_units) / 1000.0f;
+            float ework = static_cast<float>(ew);
+            if (ework > enom)
+                ework = enom;
+            eheat_[b] = enom > 0 ? p_->e_gain * p_->cpu_gain * ework / enom : 0.0f;
+        }
     }
     const u32 m = p_->millicores;
     // The ambient leak (Phase 4, design.md 6.10): heat.ambient x the mean CPU
@@ -2068,14 +2392,18 @@ void Soup::heat_update() {
     if (p_->ambient > 0 && m > 0) {
         double sum = 0;
         for (usize k = 0; k < order_.size(); ++k) {
-            const Body& B = bodies_[order_[k]];
-            sum += static_cast<double>(B.speed) * B.units;
+            const u32 b = order_[k];
+            const Body& B = bodies_[b];
+            if (ek_on)
+                sum += static_cast<double>(B.speed) * (B.units - eunits_[b]) + static_cast<double>(eheat_[b]) * eunits_[b];
+            else
+                sum += static_cast<double>(B.speed) * B.units;
         }
         ambient_ = static_cast<float>(p_->ambient * sum / m);
     }
     for (u32 u = 0; u < m; ++u) {
         u32 o = unit_owner_[u];
-        float h = unit_heat_[u] * decay + (o != kNone ? bodies_[o].speed : 0.0f);
+        float h = unit_heat_[u] * decay + (o != kNone ? (is_e(u) ? eheat_[o] : bodies_[o].speed) : 0.0f);
         if (ambient_ > 0)
             h += ambient_;
         unit_heat_[u] = h;
@@ -2248,12 +2576,20 @@ void Soup::hash_into(Hasher& h) const {
         h.bytes(warp_head_.data(), warp_head_.size() * sizeof(u32));
         h.bytes(warp_count_.data(), warp_count_.size() * sizeof(u32));
         h.bytes(warp_carry_.data(), warp_carry_.size() * sizeof(float));
-        if (p_->cost.timed) // Phase 9b: when each warp may run again
+        if (p_->cost.timed) { // Phase 9b: when each warp may run again; 9c: its clock's carry
             h.bytes(wuntil_.data(), wuntil_.size() * sizeof(u64));
+            h.bytes(wtime_.data(), wtime_.size() * sizeof(u32));
+        }
     }
     if (p_->cost.timed) { // Phase 9: actions in progress (classic: exactly as before)
         h.word(actions_.size());
         h.bytes(actions_.data(), actions_.size() * sizeof(Action));
+    }
+    if (kinds_on()) // Phase 9c: the kind each thread prefers
+        h.bytes(cpu_kind_.data(), cpu_kind_.size());
+    if (ek()) { // Phase 9c: the free E millicores (who holds which is in the unit lists)
+        h.word(epool_.size());
+        h.bytes(epool_.data(), epool_.size() * sizeof(u32));
     }
 }
 
@@ -2458,11 +2794,17 @@ void Soup::save(ByteWriter& w) const {
         put_array(w, warp_head_);
         put_array(w, warp_count_);
         put_array(w, warp_carry_);
-        if (p_->cost.timed) // Phase 9b
+        if (p_->cost.timed) { // Phase 9b, 9c
             put_array(w, wuntil_);
+            put_array(w, wtime_);
+        }
     }
     if (p_->cost.timed) // Phase 9
         put_array(w, actions_);
+    if (kinds_on()) // Phase 9c
+        put_array(w, cpu_kind_);
+    if (ek())
+        put_array(w, epool_);
 }
 
 bool Soup::load(ByteReader& r, TextBuf* err) {
@@ -2541,7 +2883,8 @@ bool Soup::load(ByteReader& r, TextBuf* err) {
         build_warp_consts();
         wuntil_.resize(warps_.size()); // Phase 9b: when each may run again (timed tables)
         wuntil_.fill(0);
-        if (p_->cost.timed && (!get_array(r, &wuntil_, many) || wuntil_.size() != warps_.size())) {
+        if (p_->cost.timed && (!get_array(r, &wuntil_, many) || wuntil_.size() != warps_.size() ||
+                               !get_array(r, &wtime_, many) || wtime_.size() != warps_.size())) {
             err->append("snapshot: warp waits truncated or the wrong shape");
             return false;
         }
@@ -2552,6 +2895,37 @@ bool Soup::load(ByteReader& r, TextBuf* err) {
     if (p_->cost.timed && !get_array(r, &actions_, many)) { // Phase 9
         err->append("snapshot: actions section truncated");
         return false;
+    }
+    cpu_kind_.clear();
+    if (kinds_on() && (!get_array(r, &cpu_kind_, many) || cpu_kind_.size() != cpus_.size())) { // Phase 9c
+        err->append("snapshot: thread kinds truncated or the wrong shape");
+        return false;
+    }
+    // Phase 9c: E millicores. Which units are E follows from the config, as
+    // in init; each body's count from its unit list.
+    const u32 me = p_->e_share > 0 ? static_cast<u32>(floor(static_cast<double>(m) * p_->e_share + 0.5)) : 0;
+    e_first_ = me > 0 ? static_cast<u32>(m) - me : 0xFFFFFFFFu;
+    epool_.clear();
+    eunits_.clear();
+    espeed_.clear();
+    eheat_.clear();
+    ework_.clear();
+    if (ek()) {
+        if (!get_array(r, &epool_, m)) {
+            err->append("snapshot: E millicores truncated");
+            return false;
+        }
+        eunits_.resize(nb);
+        eunits_.fill(0);
+        espeed_.resize(nb);
+        espeed_.fill(0.0f);
+        eheat_.resize(nb);
+        eheat_.fill(0.0f);
+        ework_.resize(nb);
+        ework_.fill(0);
+        for (u32 u = e_first_; u < m; ++u)
+            if (unit_owner_[u] != kNone && unit_owner_[u] < nb)
+                ++eunits_[unit_owner_[u]];
     }
     collapse_ = false; // a snapshot is taken after the barrier applied any collapse
     // Rebuild the derived structures, then demand every invariant.
@@ -2573,6 +2947,13 @@ bool Soup::load(ByteReader& r, TextBuf* err) {
             return false;
         }
         pool_pos_[pool_[i]] = i;
+    }
+    for (u32 i = 0; i < epool_.size(); ++i) { // Phase 9c
+        if (epool_[i] >= m) {
+            err->append("snapshot: E pool out of range");
+            return false;
+        }
+        pool_pos_[epool_[i]] = i;
     }
     page_fetch_.resize(page_heat_.size());
     page_fetch_.fill(0);
@@ -2649,6 +3030,13 @@ bool Soup::check(TextBuf* why) const {
         }
         if (units != B.units)
             return fail("body unit count wrong at body", b);
+        if (ek()) { // Phase 9c: its E millicores counted
+            u32 e = 0;
+            for (u32 u = B.unit_head; u != kNone; u = unit_next_[u])
+                e += is_e(u) ? 1 : 0;
+            if (b >= eunits_.size() || e != eunits_[b])
+                return fail("body E millicore count wrong at body", b);
+        }
         units_total += units;
         u32 ncpu = 0;
         for (u32 c = B.cpus; c != kNone; c = cpus_[c].next) {
@@ -2665,11 +3053,16 @@ bool Soup::check(TextBuf* why) const {
     }
     if (mem_total + waste_ != n)
         return fail("memory not conserved: owned", mem_total);
-    if (units_total + pool_.size() != p_->millicores)
+    if (units_total + pool_.size() + epool_.size() != p_->millicores)
         return fail("CPU units not conserved: owned", units_total);
     for (u32 i = 0; i < pool_.size(); ++i)
-        if (unit_owner_[pool_[i]] != kNone || pool_pos_[pool_[i]] != i)
+        if (unit_owner_[pool_[i]] != kNone || pool_pos_[pool_[i]] != i || is_e(pool_[i]))
             return fail("pool entry inconsistent at", i);
+    for (u32 i = 0; i < epool_.size(); ++i) // Phase 9c
+        if (unit_owner_[epool_[i]] != kNone || pool_pos_[epool_[i]] != i || !is_e(epool_[i]))
+            return fail("E pool entry inconsistent at", i);
+    if (ek() && eunits_.size() < bodies_.size())
+        return fail("E millicore counts the wrong size", eunits_.size());
     if (live != order_.size())
         return fail("schedule order size wrong, live bodies", live);
     for (usize k = 0; k < order_.size(); ++k) {
@@ -2724,6 +3117,12 @@ bool Soup::check(TextBuf* why) const {
             if (free_warps_[i] >= warps_.size() || warps_[free_warps_[i]].body != kNone)
                 return fail("free warp slot in use at", i);
     }
+    // Phase 9c: a kind for every CPU slot, P or E.
+    if (kinds_on() && cpu_kind_.size() != cpus_.size())
+        return fail("thread kinds the wrong size", cpu_kind_.size());
+    for (usize i = 0; i < cpu_kind_.size(); ++i)
+        if (cpu_kind_[i] > kKindE)
+            return fail("thread kind out of range at", i);
     // Phase 9: actions in progress name slots that exist, by live actors (the
     // sweep drops the rest at the end of every tick), one per CPU.
     if (!actions_.empty() && !p_->cost.timed)

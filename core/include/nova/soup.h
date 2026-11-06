@@ -65,10 +65,14 @@ inline constexpr u32 kSenseReadingsLife = 18;  // + node health, with the lifecy
 inline constexpr u32 kSenseReadingsAsync = 20; // + my last accelerator result, my ops pending (6.11)
 inline constexpr u32 kSenseReadingsWarp = 22;  // + my lane, lanes in my warp, with warps (6.14)
 inline constexpr u32 kSenseReadingsActions = 24; // + ticks until an action on me ends, what it is (6.15)
-inline constexpr u32 kSenseReadingsMax = 24;
+inline constexpr u32 kSenseReadingsThreads = 28; // + my threads, my kind, my E millicores, free E (9c)
+inline constexpr u32 kSenseReadingsMax = 28;
 inline constexpr u32 kGpuOps = 16;           // accelerator BX 0-15 run on the GPU (6.8)
 inline constexpr u32 kNpuOps = 4;            // BX 16-19 run on the NPU
 inline constexpr u32 kLaunchOp = kGpuOps + kNpuOps; // BX 20 launches a warp (Phase 8, 6.14)
+inline constexpr u32 kThreadOp = kLaunchOp + 1;     // BX 21 starts a thread (Phase 9c)
+inline constexpr u32 kKindOp = kLaunchOp + 2;       // BX 22: this thread prefers P (AX even) or E cores
+inline constexpr u8 kKindP = 0, kKindE = 1;          // a thread's preferred kind of core; a millicore's kind
 inline constexpr u32 kMaxLanes = 64;         // warp.lanes, at most
 inline constexpr u32 kFormCpu = 0;           // a body born on a CPU (Body::form)
 inline constexpr u32 kFormGpu = 1;           // ... on a GPU, as a warp (Phase 8)
@@ -77,14 +81,15 @@ inline constexpr u32 kMaxSeedLen = 1024;     // longest seeded genome
 struct SelectorMap {
     u8 sense[kSenseReadingsMax]; // SENSE: BX -> reading (6.5 list; 8-10 GPU, 11-13 NPU, 14 degree,
                                  // 15-16 disk, 17 node health, 18-19 async accelerator)
-    u8 res[5];    // ALLOC and RELEASE: BX -> resource (0 memory, 1 CPU, 2 GPU, 3 disk, 4 NPU)
+    u8 res[6];    // ALLOC and RELEASE: BX -> resource (0 memory, 1 CPU, 2 GPU, 3 disk, 4 NPU,
+                  // 5 E millicores: Phase 9c; 1 is then P millicores)
     u8 head[2];   // SETH and GETH: BX -> head (0 read, 1 write)
     u8 divide[4]; // DIVIDE: BX -> destination (0 here, k neighbour edge k)
     u8 gpu[kGpuOps]; // the accelerator verb, BX 0-15 -> GPU op (0 compare ... 15 mul)
     u8 npu[kNpuOps]; // BX 16-19 -> NPU op (0 dot, 1 matvec, 2 matmul, 3 argmax)
     u8 disk[3];   // DISK: BX -> op (0 compare, 1 store, 2 load) (Phase 4)
     u8 sense_n;   // readings SENSE has: up to the highest enabled one (8, 11, 14, 15, 17, 18, 20, 22, 24)
-    u8 res_n;     // resources ALLOC knows: 4, or 5 with an NPU
+    u8 res_n;     // resources ALLOC knows: 4, 5 with an NPU, 6 with E millicores
     u8 shuffled;  // 0 nearest, 1 shuffled
     u8 pad;
 };
@@ -115,6 +120,7 @@ struct SoupParams {
     // the real devices (Phase 5, design.md 6.11): asynchronous accelerator ops
     bool accel_async;   // accel.mode = async (false: instant, exactly as Phase 4)
     u32 accel_latency;  // accel.latency: results land this many barriers on (1 = the same one)
+    u32 gpu_latency, npu_latency; // Phase 9c: each device's (accel.latency; timed tables: its round trip)
     u32 npu_max_matvec; // largest matvec k (64 instant, 256 async)
     u32 npu_max_matmul; // largest matmul k (32 instant, 64 async)
     // instruction set
@@ -187,10 +193,19 @@ struct SoupParams {
     double spark_gpu_born; // spark.gpu_born: chance a spark holding both starts on the GPU
     // measured costs (Phase 9, design.md 6.15); classic = exactly Phase 8
     CostTable cost;       // cost.table: classic or home_v1
-    double plain;         // a plain instruction (an add): 1 (classic) or its picoseconds
+    CostTable ecost;      // Phase 9c: the same table on an E-core (cost.h)
+    double plain;       // a plain instruction (an add): 1 (classic) or its picoseconds
     double tick_units;    // what 1,000 millicores give a tick: instr_per_core plain instructions
     u32 engulf_cpt;       // engulf.codons_per_tick: the prey's codons an ENGULF takes a tick (timed)
     u32 inject_cpt;       // inject.codons_per_tick: codons an INJECT writes a tick (timed)
+    // threads and cores (Phase 9c, design.md 6.15); off = exactly as before
+    bool threads;         // cpu.threads: a thread runs on one core at a time; programs start threads
+    u32 slices;           // cpu.slices: a body's threads take turns this many times a tick
+    u32 max_threads;      // cpu.max_threads: threads (CPUs) a body may hold for BX 21 to start one
+    double e_share;       // cpu.e_share: the share of a node's millicores that are E (9c-b2)
+    float e_gain;         // heat.e_gain: E millicores' heat gain, against P's (9c-b2)
+    bool kinds;           // threads, or E millicores in the world: threads' kinds are world state
+                          // (the world's switch: a site's own e_share may be 0)
     // optional seeded genome (smoke tests, demos), on every node or one
     u8 seed_genome[kMaxSeedLen];
     u32 seed_len;        // 0 = no seed
@@ -458,6 +473,9 @@ struct SoupTally {
     u64 actions_landed;   // ... that landed at their end
     u64 actions_failed;   // ... that failed at their end (or lost their actor)
     u64 actions_defended; // ... of those, contact whose target changed in time (its surface, or out of range)
+    // Phase 9c threads and cores (design.md 6.15)
+    u64 threads_started;  // threads started by programs (GPU verb BX 21)
+    u64 e_work;           // work done on E millicores (instructions, or world time with a timed table)
 };
 
 class Lineages; // lineage.h: the replicator detector, a pure observer
@@ -480,6 +498,8 @@ struct Departure {
     u32 millicores, gpus, npus; // the share she draws on arrival
     u32 disk;      // disk codons she claims on arrival (Phase 4)
     u32 form;      // kFormCpu or kFormGpu: what she is born on there (Phase 8)
+    u32 emillicores; // her share of E millicores (Phase 9c; millicores is then P)
+    u32 kind;        // the kind of core her thread prefers: her divider's (Phase 9c)
 };
 
 // A node's view of its out-edges, set by the world (Phase 3): edge ids nearest
@@ -518,10 +538,16 @@ class Soup {
     void begin_tick(u64 tick);
     // Claims waste [start, start + len) as a new body with one CPU at start and
     // up to `units` millicores from the pool. Returns its slot, or kNone if the
-    // range is not all waste.
+    // range is not all waste. (Phase 9c: with E millicores, drawn from both
+    // pools in proportion to what each holds free, as a spark draws.)
     u32 create_body(u32 start, u32 len, u32 units);
     // Executes up to `quota` instructions on CPU c; returns how many it charged.
-    i64 run_cpu(u32 c, i64 quota);
+    // Phase 9c: on a core of `kind`, at that kind's costs (cost.h).
+    i64 run_cpu(u32 c, i64 quota, u8 kind = kKindP);
+    // Phase 9c: up to k P (E) millicores at random from that pool; returns how
+    // many. ALLOC's CPU (E) selector.
+    u32 claim_p_units(u32 body, u32 k) { return claim_units(body, k); }
+    u32 claim_e_units(u32 body, u32 k);
     void death_sweep();
     // Gives body up to k GPU (NPU) units chosen at random from the pool;
     // returns how many (0 without one). Also what ALLOC's selector does.
@@ -556,7 +582,7 @@ class Soup {
     const Cpu& cpu(u32 c) const { return cpus_[c]; }
     Cpu& cpu_mut(u32 c) { return cpus_[c]; }
     const Block& block(u32 k) const { return blocks_[k]; }
-    u32 free_units() const { return static_cast<u32>(pool_.size()); }
+    u32 free_units() const { return static_cast<u32>(pool_.size() + epool_.size()); } // both kinds (9c)
     u32 waste() const { return waste_; }
     float unit_heat(u32 u) const { return unit_heat_[u]; }
     u32 unit_owner(u32 u) const { return unit_owner_[u]; }
@@ -647,8 +673,10 @@ class Soup {
     // Phase 4: she also claims `disk` codons of free disk (capped).
     // Phase 8: with warps she is born in `form` (a warp for kFormGpu), or in
     // the other form if she holds only the other's units.
+    // Phase 9c: with E millicores, `millicores` are P and `emillicores` E;
+    // her thread prefers `kind` (her divider's).
     bool arrive(const u8* code, u32 len, u32 millicores, u32 gpus, u32 npus, u32 disk, const CargoTag& tag,
-                u32 form = kFormCpu);
+                u32 form = kFormCpu, u32 emillicores = 0, u8 kind = kKindP);
 
     // --- warps (Phase 8, design.md 6.14) ------------------------------------
     // The tick in parts, so that the world can run every node's warps on the
@@ -710,6 +738,10 @@ class Soup {
     u32 action_on(u32 b) const;
     // CPU c's action under way (its index), or kNone.
     u32 action_of(u32 c) const;
+    // Phase 9c: the kind of core CPU c's thread prefers (kKindP without threads or E millicores).
+    u8 cpu_kind(u32 c) const { return c < cpu_kind_.size() ? cpu_kind_[c] : kKindP; }
+    // Phase 9c: CPU c is waiting on the disk or a device (idle, not working).
+    bool cpu_waits(u32 c) const;
 
   private:
     friend struct Exec;
@@ -735,9 +767,16 @@ class Soup {
     void forget_block(u32 body, u32 k); // CPUs of body whose wrap block is k lose it
 
     // CPU units
-    u32 claim_units(u32 body, u32 k); // random units from the pool
+    u32 claim_units(u32 body, u32 k); // random units from the (P) pool
     void move_units(u32 from, u32 to, u32 k); // oldest first
     void release_units(u32 body, u32 k);      // oldest first, into the pool
+    // Phase 9c: up to k from both pools in proportion to what each holds free
+    // (a spark's draw; just claim_units without E millicores).
+    u32 claim_mixed(u32 body, u32 k);
+    // Phase 9c: the oldest k units of one kind (E: e true) to another body, or
+    // into their pool. Without E millicores, move_units and release_units.
+    void move_kind(u32 from, u32 to, u32 k, bool e);
+    void release_kind(u32 body, u32 k, bool e);
     void unlink_unit(u32 u);
     void append_unit(u32 body, u32 u);
     void pool_push(u32 u);
@@ -858,6 +897,47 @@ class Soup {
     // (working state): the first op of a tick pays the device's start-up.
     Array<u64> gpu_batch_, npu_batch_;
     bool batch_open(Array<u64>& batch, u32 body); // true if already open this tick; opens it
+
+    // Phase 9c: per CPU slot, the kind of core its thread prefers (world state
+    // with cpu.threads or E millicores; empty otherwise)
+    Array<u8> cpu_kind_;
+    bool kinds_on() const { return p_->kinds; }
+    // scratch: run_body's per-thread time (total, and its E part) and time used
+    Array<i64> tq_, tu_, tqe_, tue_;
+    Array<u32> grp_; // scratch: one kind's threads
+    // Phase 9c-b2, E millicores (design.md 6.15): units from e_first_ on are E
+    // (the last round(millicores x cpu.e_share)). Their free pool (a free
+    // unit's pool_pos_ is its place in its own kind's pool), and each body's
+    // count of them: world state when the node has any. With none, pool_
+    // holds every unit as before and these stay empty.
+    u32 e_first_ = 0xFFFFFFFFu;
+    Array<u32> epool_;
+    Array<u32> eunits_;
+    bool ek() const { return e_first_ < unit_owner_.size(); } // the node has E millicores
+    bool is_e(u32 u) const { return u >= e_first_; }
+    // per body slot, this tick (working state): its E units' speed and heat
+    // input, and its work on them
+    Array<float> espeed_, eheat_;
+    Array<u32> ework_;
+    Array<u32> cpu_time_, cpu_etime_; // per CPU slot, its last tick's time (working state, the viewer's)
+    // run_body's share of a body's time among its threads (R3): each first up
+    // to a core of its preferred kind, then the other kind's leftovers.
+    void share_time(usize k, i64 tp, i64 te, i64 cap, u64 tick);
+
+  public:
+    // Phase 9c: a body's E millicores (0 without them), and the node's.
+    u32 e_units(u32 b) const { return b < eunits_.size() ? eunits_[b] : 0; }
+    u32 e_total() const { return ek() ? static_cast<u32>(unit_owner_.size() - e_first_) : 0; }
+    // Phase 9c, the viewer: CPU c's time last tick, and its part on E millicores
+    // (picoseconds with a timed table; 0 without threads or E millicores).
+    u32 cpu_time(u32 c) const { return c < cpu_time_.size() ? cpu_time_[c] : 0; }
+    u32 cpu_etime(u32 c) const { return c < cpu_etime_.size() ? cpu_etime_[c] : 0; }
+    u32 free_e_units() const { return static_cast<u32>(epool_.size()); }
+    u32 e_held() const { // E millicores held by bodies
+        return e_first_ < unit_owner_.size() ? static_cast<u32>(unit_owner_.size() - e_first_ - epool_.size()) : 0;
+    }
+
+  private:
 
     // actions in progress (Phase 9; world state with a timed cost table)
     Array<Action> actions_;

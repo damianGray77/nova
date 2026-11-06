@@ -57,6 +57,8 @@
 //   actions_failed, actions_defended  begun as actions; landed and failed at
 //                                     their end; failures because the target
 //                                     changed in time (9, timed cost tables)
+//   threads_started, e_work, e_held   threads programs started; work done on E
+//                                     millicores; E millicores held (9c)
 //   compress                         soup compressibility (compress.h), mean
 //                                     over nodes: ~1 random, lower = repetitive
 //   ambient                           the ambient heat input, mean over nodes (4)
@@ -71,9 +73,9 @@ void csv_field(TextBuf& out, Str s);
 
 // The soup model's stats columns (the list above), shared by stats.csv and the
 // viewer's charts (Phase 6) so both show exactly the same numbers.
-inline constexpr u32 kStatsColumns = 73;
-inline constexpr u32 kStatsIntColumns = 71; // tick_first .. live_nodes, Phase 8's warp and Phase 9's action
-                                            // columns; then compress, ambient
+inline constexpr u32 kStatsColumns = 76;
+inline constexpr u32 kStatsIntColumns = 74; // tick_first .. live_nodes, Phase 8's warp, Phase 9's action and
+                                            // Phase 9c's thread columns; then compress, ambient
 const char* stats_column(u32 i);
 // Index of a column by name, or kStatsColumns if there is none.
 u32 stats_column_index(Str name);

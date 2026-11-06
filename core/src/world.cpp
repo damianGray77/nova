@@ -420,6 +420,9 @@ bool World::init(Config& cfg) {
     acc_addr_.clear();
     acc_job_.clear();
     acc_slot_.clear();
+    acc_held_.clear();
+    acc_held_scalar_.clear();
+    acc_held_flags_.clear();
     down_until_.resize(edge_src_.size());
     down_until_.fill(0);
     live_.clear();
@@ -616,6 +619,10 @@ void World::derive_node(u32 n, const Array<double>* z, bool first) {
         p.gpus = m.gpus ? share_gpu_[n] : 0;
         p.npus = m.npus ? share_npu_[n] : 0;
         p.disk = m.disk ? share_disk_[n] : 0;
+        if (!ecpu_w_.empty()) {
+            const double e = m.e_share * ecpu_w_[n];
+            p.e_share = e < 1.0 ? e : 1.0;
+        }
         sf = spark_w_[n];
         p.spark_initial = static_cast<u32>(floor(m.spark_initial * sf + 0.5));
     }
@@ -776,8 +783,8 @@ void World::read_land_params(Config& cfg) {
 
 // The distributions of sparks and each resource (plan C6).
 void World::read_spreads(Config& cfg) {
-    const char* const names[6] = {"spark", "res.memory", "res.cpu", "res.gpu", "res.npu", "res.disk"};
-    for (u32 r = 0; r < 6; ++r) {
+    const char* const names[7] = {"spark", "res.memory", "res.cpu", "res.gpu", "res.npu", "res.disk", "res.ecpu"};
+    for (u32 r = 0; r < 7; ++r) {
         Spread& s = spreads_[r];
         TextBuf k;
         auto key = [&](const char* leaf) -> Str {
@@ -795,18 +802,19 @@ void World::read_spreads(Config& cfg) {
         // Phase 8: rich where another distribution is poor (its noise field
         // the opposite way round), so GPU-rich regions can be CPU-poor.
         const Str a = cfg.get_str(key("against"), "none");
-        const char* const others[6] = {"spark", "memory", "cpu", "gpu", "npu", "disk"};
-        const u32 fields[6] = {kFieldSparkRate, kFieldSoupSize, kFieldMillicores, kFieldGpus, kFieldNpus, kFieldDisk};
+        const char* const others[7] = {"spark", "memory", "cpu", "gpu", "npu", "disk", "ecpu"};
+        const u32 fields[7] = {kFieldSparkRate, kFieldSoupSize, kFieldMillicores, kFieldGpus,
+                               kFieldNpus,      kFieldDisk,     kFieldEcpu};
         s.against = 0xFFFFFFFFu;
         bool known = a.eq("none");
-        for (u32 o = 0; o < 6 && !known; ++o) {
+        for (u32 o = 0; o < 7 && !known; ++o) {
             if (a.eq(others[o]) && o != r) {
                 s.against = fields[o];
                 known = true;
             }
         }
         if (!known)
-            cfg.fail(key("against"), "must be none or another of spark, memory, cpu, gpu, npu, disk");
+            cfg.fail(key("against"), "must be none or another of spark, memory, cpu, gpu, npu, disk, ecpu");
     }
 }
 
@@ -837,6 +845,9 @@ void World::spread_resources() {
     split(4, kFieldNpus, m.npus, 0, 10000000, &share_npu_);
     split(5, kFieldDisk, m.disk, 0, 1u << 24, &share_disk_);
     spread_weights(seed_, kFieldSparkRate, spreads_[0], node_x_, node_y_, W, &spark_w_);
+    ecpu_w_.clear();
+    if (m.e_share > 0) // Phase 9c: E-rich and E-poor sites (res.ecpu), the share capped at all of them
+        spread_weights(seed_, kFieldEcpu, spreads_[6], node_x_, node_y_, W, &ecpu_w_);
 }
 
 // Signal paths (Phase 4, design.md 6.10): from each source, a breadth-first
@@ -1623,9 +1634,11 @@ const char* World::accel_npu_name() const {
 // issue order, with their inputs read now; then every op due at this barrier
 // is handed back to its node, in the same order. The new batch goes to the
 // devices before the due ops are applied, so with latency 2 or more it runs
-// while the CPUs work on the next tick. Every op has the same latency, so the
-// ops due now are always the oldest: those already in flight first, then
-// (latency 1) the batch just gathered.
+// while the CPUs work on the next tick. Phase 9c: each device has its own
+// latency (with a timed table, its measured round trip), so the ops due now
+// are those whose due tick has come, taken in the order they were issued; and
+// every batch comes home at the barrier after it was sent, its results held
+// until due, so a long latency holds no device slot.
 void World::accel_barrier() {
     const usize first = acc_ops_.size();
     for (u32 n = 0; n < nodes_; ++n)
@@ -1634,15 +1647,18 @@ void World::accel_barrier() {
     while (acc_job_.size() < acc_ops_.size()) {
         acc_job_.push(-1);
         acc_slot_.push(0);
+        acc_held_scalar_.push(0);
+        acc_held_flags_.push(0);
     }
+    accel_bring_home(first);
     bool any_done = accel_complete_range(0, first);
     if ((gpu_.is_open() || npu_.is_open()) && acc_ops_.size() > first)
         accel_submit(first);
     any_done = accel_complete_range(first, acc_ops_.size()) || any_done;
     if (!any_done)
         return;
-    // Keep the rest, in order, with their inputs and addresses packed.
-    Array<u8> in;
+    // Keep the rest, in order, with their inputs, addresses and held results packed.
+    Array<u8> in, held;
     Array<u32> addr;
     usize w = 0;
     for (usize i = 0; i < acc_ops_.size(); ++i) {
@@ -1657,13 +1673,71 @@ void World::accel_barrier() {
         op.addr_off = addr_off;
         acc_job_[w] = acc_job_[i];
         acc_slot_[w] = acc_slot_[i];
+        if (acc_job_[i] == -2) { // its held result moves too
+            acc_slot_[w] = static_cast<u32>(held.size());
+            held.append(acc_held_.data() + acc_slot_[i], op.out_n);
+        }
+        acc_held_scalar_[w] = acc_held_scalar_[i];
+        acc_held_flags_[w] = acc_held_flags_[i];
         acc_ops_[w++] = op;
     }
     acc_ops_.resize(w);
     acc_job_.resize(w);
     acc_slot_.resize(w);
+    acc_held_scalar_.resize(w);
+    acc_held_flags_.resize(w);
     acc_in_ = static_cast<Array<u8>&&>(in);
     acc_addr_ = static_cast<Array<u32>&&>(addr);
+    acc_held_ = static_cast<Array<u8>&&>(held);
+}
+
+// Phase 9c: a batch sent at an earlier barrier has had a tick: it comes home
+// now and its results wait with their ops until due, freeing its device slot.
+void World::accel_bring_home(usize first) {
+    for (usize i = 0; i < first; ++i) {
+        const i32 t = acc_job_[i];
+        if (t < 0)
+            continue;
+        const bool ok = accel_collect(t);
+        const AccelJob& j = acc_jobs_[t];
+        if (!ok) {
+            acc_job_[i] = -1; // the device failed: the reference, at its due tick
+            continue;
+        }
+        const AccelOp& op = acc_ops_[i];
+        const u32 off = static_cast<u32>(acc_held_.size());
+        acc_held_.append(j.codons.data() + j.out_off[acc_slot_[i]], op.out_n);
+        acc_held_scalar_[i] = j.scalars[acc_slot_[i]];
+        acc_held_flags_[i] = static_cast<u8>((j.verify ? 1 : 0) | (static_cast<u32>(t) >= kAccelSlots ? 2 : 0));
+        acc_slot_[i] = off;
+        acc_job_[i] = -2;
+    }
+}
+
+// Waits for batch `job` the first time it is asked for, closing its device
+// if it failed (the reference takes its ops from then on).
+bool World::accel_collect(i32 t) {
+    AccelJob& j = acc_jobs_[t];
+    if (j.ready)
+        return j.ok;
+    j.ready = true;
+    const bool on_npu = static_cast<u32>(t) >= kAccelSlots;
+    j.ok = on_npu ? npu_.collect(t - static_cast<i32>(kAccelSlots), j.codons.data(), j.scalars.data())
+                  : gpu_.collect(t, j.codons.data(), j.scalars.data());
+    if (!j.ok && (on_npu ? npu_.is_open() : gpu_.is_open())) {
+        acc_notes_.append(on_npu ? "NPU " : "GPU ");
+        acc_notes_.append(on_npu ? npu_.name() : gpu_.name());
+        acc_notes_.append(" failed at tick ");
+        acc_notes_.append_u64(tick_);
+        acc_notes_.append(on_npu ? (npu_on_gpu_ ? ": NPU ops run on the GPU from here\n"
+                                                : ": NPU ops run on the CPU reference from here\n")
+                                 : ": GPU ops run on the CPU reference from here\n");
+        if (on_npu)
+            npu_.close();
+        else
+            gpu_.close();
+    }
+    return j.ok;
 }
 
 // Sends the ops gathered from `first` on to the devices, one batch each: the
@@ -1730,36 +1804,26 @@ bool World::accel_complete_range(usize lo, usize hi) {
         const u8* out = nullptr;
         u32 scalar = 0;
         const i32 t = acc_job_[i];
-        if (t >= 0) {
-            AccelJob& j = acc_jobs_[t];
-            if (!j.ready) { // the first of its batch: wait for the device
-                j.ready = true;
-                const bool on_npu = static_cast<u32>(t) >= kAccelSlots;
-                j.ok = on_npu ? npu_.collect(t - static_cast<i32>(kAccelSlots), j.codons.data(), j.scalars.data())
-                              : gpu_.collect(t, j.codons.data(), j.scalars.data());
-                if (!j.ok && (on_npu ? npu_.is_open() : gpu_.is_open())) {
-                    acc_notes_.append(on_npu ? "NPU " : "GPU ");
-                    acc_notes_.append(on_npu ? npu_.name() : gpu_.name());
-                    acc_notes_.append(" failed at tick ");
-                    acc_notes_.append_u64(tick_);
-                    acc_notes_.append(on_npu ? (npu_on_gpu_ ? ": NPU ops run on the GPU from here\n"
-                                                            : ": NPU ops run on the CPU reference from here\n")
-                                             : ": GPU ops run on the CPU reference from here\n");
-                    if (on_npu)
-                        npu_.close();
-                    else
-                        gpu_.close();
-                }
-            }
-            if (j.ok) {
-                out = j.codons.data() + j.out_off[acc_slot_[i]];
-                scalar = j.scalars[acc_slot_[i]];
-            }
+        bool device = false, verify = false, on_npu = false;
+        static const u8 kNoCodons = 0; // an op with a scalar result only has no codons to point at
+        if (t == -2) { // brought home earlier, held until now (9c)
+            device = true;
+            out = op.out_n ? acc_held_.data() + acc_slot_[i] : &kNoCodons;
+            scalar = acc_held_scalar_[i];
+            verify = (acc_held_flags_[i] & 1) != 0;
+            on_npu = (acc_held_flags_[i] & 2) != 0;
+        } else if (t >= 0 && accel_collect(t)) { // the first of its batch waits for the device
+            const AccelJob& j = acc_jobs_[t];
+            device = true;
+            out = j.codons.data() + j.out_off[acc_slot_[i]];
+            scalar = j.scalars[acc_slot_[i]];
+            verify = j.verify;
+            on_npu = static_cast<u32>(t) >= kAccelSlots;
         }
-        if (out) {
+        if (device) {
             ++acc_device_ops_;
-            acc_npu_ops_ += static_cast<u32>(t) >= kAccelSlots;
-            if (acc_jobs_[t].verify) {
+            acc_npu_ops_ += on_npu ? 1 : 0;
+            if (verify) {
                 acc_out_.resize(op.out_n);
                 const u32 want = accel_reference(op, in, acc_out_.data());
                 ++acc_verified_;
@@ -1907,6 +1971,8 @@ void World::take_departures() {
             c.npus = dep.npus;
             c.disk = dep.disk;
             c.form = dep.form;
+            c.emillicores = dep.emillicores;
+            c.kind = dep.kind;
             c.ticks = static_cast<u32>(c.due - tick_);
             cargo_codons_.append(s.departure_codons() + dep.codon_off, dep.len);
             cargo_.push(c);
@@ -1937,7 +2003,7 @@ void World::deliver_cargo() {
         if (edge_corruption_ > 0)
             corrupt(c);
         soups_[edge_dst_[c.edge]].arrive(cargo_codons_.data() + c.codon_off, c.len, c.millicores, c.gpus,
-                                         c.npus, c.disk, c.tag, c.form);
+                                         c.npus, c.disk, c.tag, c.form, c.emillicores, static_cast<u8>(c.kind));
         --in_flight_[c.edge];
     }
     // Keep the rest, in order, with their codons packed.
@@ -2275,6 +2341,8 @@ u64 World::hash() const {
                     h.word(c.disk);
                 if (soup_params_.warps) // Phase 8: her form
                     h.word(c.form);
+                if (soup_params_.kinds) // Phase 9c: her E millicores, her kind
+                    h.word((static_cast<u64>(c.emillicores) << 32) | c.kind);
                 h.bytes(cargo_codons_.data() + c.codon_off, c.len);
             }
             if (edge_failure_ > 0) // Phase 4: which links are down, until when
@@ -2345,6 +2413,10 @@ void World::save_state(ByteWriter& w) const {
                     w.put_u32(c.disk);
                 if (soup_params_.warps)
                     w.put_u32(c.form);
+                if (soup_params_.kinds) { // Phase 9c
+                    w.put_u32(c.emillicores);
+                    w.put_u32(c.kind);
+                }
                 w.put_bytes(cargo_codons_.data() + c.codon_off, c.len);
             }
             if (edge_failure_ > 0)
@@ -2469,8 +2541,12 @@ bool World::load_state(ByteReader& r, TextBuf* err) {
                     r.get_u32(&c.disk);
                 if (soup_params_.warps)
                     r.get_u32(&c.form);
+                if (soup_params_.kinds) { // Phase 9c
+                    r.get_u32(&c.emillicores);
+                    r.get_u32(&c.kind);
+                }
                 if (!r.ok() || c.edge >= edge_src_.size() || c.len == 0 || c.len > r.remaining() ||
-                    c.due < tick || c.seq >= next_seq_ || c.form > kFormGpu) {
+                    c.due < tick || c.seq >= next_seq_ || c.form > kFormGpu || c.kind > kKindE) {
                     err->append("snapshot: cargo out of range");
                     return false;
                 }
@@ -2547,6 +2623,11 @@ bool World::load_state(ByteReader& r, TextBuf* err) {
         acc_job_.fill(-1);
         acc_slot_.resize(acc_ops_.size());
         acc_slot_.fill(0);
+        acc_held_.clear();
+        acc_held_scalar_.resize(acc_ops_.size());
+        acc_held_scalar_.fill(0);
+        acc_held_flags_.resize(acc_ops_.size());
+        acc_held_flags_.fill(0);
         init_ports(); // recounts in_flight_ from the cargo, derives the down flags
         for (u32 e = 0; e < in_flight_.size(); ++e) {
             if (in_flight_[e] > edge_capacity_ && dispersal_) {

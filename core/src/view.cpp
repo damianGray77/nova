@@ -195,7 +195,7 @@ const char* color_by_name(u32 c) {
     static const char* const n[kColorCount] = {"bodies",   "births",     "colonists",  "health",    "lineage",
                                                "free CPU", "waste",      "memory",     "millicores", "climate",
                                                "sparks",   "radiation",  "disk",       "volatility", "signals",
-                                               "GPU lanes"};
+                                               "GPU lanes", "E-cores"};
     return c < kColorCount ? n[c] : "?";
 }
 
@@ -265,6 +265,8 @@ double node_metric(const NodeView& n, u32 c) {
         return n.emits;
     case kColorLanes:
         return n.lanes;
+    case kColorEcores:
+        return n.millicores ? static_cast<double>(n.emillicores) / n.millicores : 0;
     default:
         return 0;
     }
@@ -278,6 +280,7 @@ bool metric_range(u32 c, double* lo, double* hi) {
         return true;
     case kColorFreeCpu:
     case kColorWaste:
+    case kColorEcores:
         *hi = 1;
         return true;
     default:
@@ -551,6 +554,7 @@ void ViewSession::build(const ViewRequest& q, ViewFrame* f) {
     const World& w = run_->world();
     const u32 nodes = w.node_count();
     f->archive = false;
+    f->kinds = false;
     f->tick = w.tick();
     f->instructions = run_->instructions();
     f->nodes = nodes;
@@ -617,6 +621,7 @@ void ViewSession::build(const ViewRequest& q, ViewFrame* f) {
             }
             v.soup_size = p.size;
             v.millicores = p.millicores;
+            v.emillicores = s.e_total();
             v.free_millicores = s.free_units();
             v.waste = s.waste();
             v.gpus = p.gpus;
@@ -714,6 +719,7 @@ void ViewSession::build(const ViewRequest& q, ViewFrame* f) {
     if (w.model() == Model::soup && q.node < nodes) {
         f->sel_node = q.node;
         const Soup& s = w.node_soup(q.node);
+        f->kinds = s.params().kinds; // Phase 9c
         const Lineages* L = w.node_lineages(q.node);
         const u32 size = s.size();
         f->strip_w = 256;
@@ -769,6 +775,7 @@ void ViewSession::build(const ViewRequest& q, ViewFrame* f) {
             r.slot = b;
             r.ncpu = B.ncpu;
             r.units = B.units;
+            r.eunits = s.e_units(b);
             r.mem = B.mem;
             r.gpus = s.gpu_count(b);
             r.npus = s.npu_count(b);
@@ -838,6 +845,10 @@ void ViewSession::build(const ViewRequest& q, ViewFrame* f) {
                 v.yielded = C.yielded;
                 v.result = s.accel_result(c);
                 v.pending = s.accel_pending(c);
+                v.kind = s.cpu_kind(c);
+                const double core = s.params().tick_units;
+                v.share = core > 0 ? static_cast<float>(s.cpu_time(c) / core) : 0.0f;
+                v.eshare = core > 0 ? static_cast<float>(s.cpu_etime(c) / core) : 0.0f;
                 f->cpus.push(v);
             }
             // Phase 8: its warps' lanes, and which run in each warp's next step.

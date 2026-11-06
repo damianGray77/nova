@@ -34,7 +34,8 @@ struct WarpVM {
     Lane* g_lanes = nullptr;
     // "groupshared": one group at a time here
     u32 gs_min = 0, gs_count = 0;
-    u32 gs_wa[kMaxLanes] = {}, gs_wv[kMaxLanes] = {}, gs_ctl[8] = {};
+    u32 gs_wa[kMaxLanes] = {}, gs_wv[kMaxLanes] = {}, gs_ctl[12] = {};
+    u32 g_seen = 0; // the lane being run's template codons read and places searched (Phase 9c)
 
 #define INOUT(T) T&
 #define IMG(i) g_img[(i)]
@@ -57,6 +58,11 @@ struct WarpVM {
             (x) = (v);                                                                                                 \
     } while (0)
 #define GS_ADD(x, v) ((x) += (v))
+#define GS_MAX(x, v)                                                                                                   \
+    do {                                                                                                               \
+        if ((v) > (x))                                                                                                 \
+            (x) = (v);                                                                                                 \
+    } while (0)
 #define W_LOOP
 #define LANE_T Lane
 #define STACK_GET(L, i) ((L).stack[(i)])
@@ -84,6 +90,7 @@ struct WarpVM {
 #undef LANES_STORE
 #undef GS_MIN
 #undef GS_ADD
+#undef GS_MAX
 #undef W_LOOP
 };
 
@@ -416,9 +423,11 @@ void Soup::build_warp_consts() {
     wcst_[WC_STEP_COST] = p_->warp_step_cost;
     wcst_[WC_LANE_COST] = p_->warp_lane_cost;
     // Phase 9b: a step's time on a GPU lane, by its instruction (classic: none).
-    static_assert(WC_COUNT - WC_OPTIME == kOpCount + 1, "the constants hold a time per Op and one for a fault");
+    static_assert(WC_SCAN - WC_OPTIME == kOpCount + 1, "the constants hold a time per Op and one for a fault");
     for (u32 i = 0; i <= kOpCount; ++i)
         wcst_[WC_OPTIME + i] = p_->cost.timed ? p_->cost.gpu_op[i] : 0;
+    // Phase 9c: a place searched (classic: searches are free, as in Phase 8).
+    wcst_[WC_SCAN] = p_->cost.timed ? static_cast<u32>(p_->cost.gpu_scan) : 0;
 }
 
 // --- a round ----------------------------------------------------------------------
@@ -432,12 +441,16 @@ bool Soup::warp_pack(u32 round) {
     const usize n = sched_n_;
     if (n == 0 || warps_.size() == free_warps_.size())
         return false;
+    const bool timed = p_->cost.timed != 0;
+    const u32 tick_time = timed ? static_cast<u32>(p_->tick_units < 4e9 ? p_->tick_units : 4e9) : 0;
     if (round == 0) { // a new tick: step keys start again (a warp's yields end when it next runs)
         for (u32 w = 0; w < warps_.size(); ++w) {
             if (warps_[w].body == kNone)
                 continue;
             wsteps_[w] = 0;
-            wtime_[w] = 0;
+            // Phase 9c: a warp's clock carries what its last step ran past the
+            // tick's end (a long search) into this one.
+            wtime_[w] = wtime_[w] > tick_time ? wtime_[w] - tick_time : 0;
             wagain_[w] = 0;
         }
         if (!actions_.empty()) // Phase 9b: warps' actions whose end has come land first
@@ -445,8 +458,6 @@ bool Soup::warp_pack(u32 round) {
     }
     // Phase 9b, timed tables: a warp waiting on a host instruction or an
     // action doesn't run, nor one whose clock is out for this tick.
-    const bool timed = p_->cost.timed != 0;
-    const u32 tick_time = timed ? static_cast<u32>(p_->tick_units < 4e9 ? p_->tick_units : 4e9) : 0;
     auto waits = [&](u32 w) { return timed && (wuntil_[w] > tick_ || wtime_[w] >= tick_time); };
     const bool stamps = !stamp_.empty();
     const double serial = static_cast<double>(p_->warp_step_cost) + p_->warp_lane_cost;

@@ -33,11 +33,14 @@ const char* const kColumns[kStatsColumns] = {
     "gpu_bodies",
     // Phase 9: actions in progress (sums), likewise after every earlier column
     "actions_started", "actions_landed", "actions_failed", "actions_defended",
+    // Phase 9c: threads and E millicores (two sums, then a gauge)
+    "threads_started", "e_work", "e_held",
     "compress",     "ambient"};
 // The first 39 tally fields fill columns 3-41; Phase 8's five go after
-// live_nodes, then Phase 9's four after the warp gauges.
-inline constexpr u32 kTallyEarly = 39, kTallyWarp = 5, kTallyAction = 4;
-static_assert(sizeof(SoupTally) / sizeof(u64) == kTallyEarly + kTallyWarp + kTallyAction,
+// live_nodes, then Phase 9's four after the warp gauges, then Phase 9c's two
+// and its gauge.
+inline constexpr u32 kTallyEarly = 39, kTallyWarp = 5, kTallyAction = 4, kTallyThread = 2;
+static_assert(sizeof(SoupTally) / sizeof(u64) == kTallyEarly + kTallyWarp + kTallyAction + kTallyThread,
               "a SoupTally field was added: update kColumns");
 
 } // namespace
@@ -74,7 +77,7 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
     const u64 links = total_links(w, LinkKind::all), inject = total_links(w, LinkKind::inject),
               gpu = total_links(w, LinkKind::gpu);
     u64 gpu_held = 0, npu_held = 0, max_depth = 0, lineages = 0, top = 0, top_genos = 0, colonised = 0,
-        disk_held = 0, warps = 0, gpu_bodies = 0;
+        disk_held = 0, warps = 0, gpu_bodies = 0, e_held = 0;
     double comp = 0, ambient = 0;
     for (u32 n = 0; n < w.node_count(); ++n) {
         const Soup& s = w.node_soup(n);
@@ -87,6 +90,7 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
             comp += estimate_compressibility(s.mem(), s.size()).ratio;
         ambient += s.ambient();
         disk_held += s.params().disk - s.free_disk();
+        e_held += s.e_held(); // Phase 9c
         gpu_held += s.params().gpus - s.free_gpus();
         npu_held += s.params().npus - s.free_npus();
         const Lineages* L = w.node_lineages(n);
@@ -107,7 +111,7 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
                         max_depth,       lineages,    top,        top_genos, colonised,    w.links_down(),
                         disk_held,       w.live_nodes()};
     const usize nt = sizeof tail / sizeof tail[0];
-    static_assert(3 + kTallyEarly + sizeof tail / sizeof tail[0] + kTallyWarp + 2 + kTallyAction ==
+    static_assert(3 + kTallyEarly + sizeof tail / sizeof tail[0] + kTallyWarp + 2 + kTallyAction + kTallyThread + 1 ==
                       kStatsIntColumns,
                   "stats row shape");
     for (usize i = 0; i < nt; ++i)
@@ -118,6 +122,9 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
     v[42 + nt + kTallyWarp + 1] = gpu_bodies;
     for (usize i = 0; i < kTallyAction; ++i) // Phase 9
         v[42 + nt + kTallyWarp + 2 + i] = t[kTallyEarly + kTallyWarp + i];
+    for (usize i = 0; i < kTallyThread; ++i) // Phase 9c
+        v[42 + nt + kTallyWarp + 2 + kTallyAction + i] = t[kTallyEarly + kTallyWarp + kTallyAction + i];
+    v[42 + nt + kTallyWarp + 2 + kTallyAction + kTallyThread] = e_held;
     marks->links = links;
     marks->inject = inject;
     marks->gpu = gpu;

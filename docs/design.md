@@ -1167,7 +1167,7 @@ Suite `budget` checks `warp.capacity` from `budget.gpu`.
    - *Profile-driven fixes:* packing had a per-codon block lookup that was quadratic for many-block bodies (12.9 → 2.4 ms a tick, on both devices); lanes now move packed and in parallel; the sorted block index (kernel 33 → 17 ms); groupshared records (no change: not the bottleneck).
 4. *Calibration:* the RTX 5080 runs 6.3 × 10⁹ warp work a second when every lane agrees.
 
-### 6.15 Measured costs (Phase 9) [built 2026-11-06 in two steps (9a, 9b) from plan revision 2, approved by Damian]
+### 6.15 Measured costs (Phase 9) [built 2026-11-06 in two steps (9a, 9b) from plan revision 2, approved by Damian; 9c's fixes, threads and E cores the same day (4c, 4d)]
 
 The plan and its calls C1–C11 are in `docs/phase9-plan.md`. Damian's direction:
 - Running on real time would be the most realistic, programs developing on real architecture, but it gives up determinism.
@@ -1183,23 +1183,23 @@ Code:
 
 **Off unless `cost.table = home_v1`.** `classic` (the default) is every instruction costing 1, exactly Phase 8: every test and pinned hash is unchanged, and naming it outright hashes as no key.
 
-**1. The machine, measured once (C1, C8, C9).** `nova bench costs` times native code, as if Nova's instructions were the machine's own, pinned to a P-core and then an E-core. Each figure is the median of 9 repeats; a run with a repeat spread over 10% is flagged. The table `home_v1` holds the medians of four runs on the home rig (2026-11-06), picoseconds:
+**1. The machine, measured once (C1, C8, C9).** `nova bench costs` times native code, as if Nova's instructions were the machine's own, pinned to a P-core and then an E-core. Each figure is the median of 9 repeats; a run with a repeat spread over 10% is flagged. The table `home_v1` holds the medians of four runs on the home rig (2026-11-06), picoseconds; its E-core column (in use since 9c-b, 4d below) holds the means of two runs:
 
 | operation | what it is | P-core | E-core |
 |---|---|---:|---:|
 | alu | an add (a dependent chain) | 190 | 218 |
 | mul | a multiply | 578 | 655 |
-| div | a 32-bit divide | 2,650 | 4,424 |
+| div | a 32-bit divide | 2,650 | 4,425 |
 | load | a load from the nearest cache (a pointer chase in 4 KB) | 755 | 872 |
 | store | a store | 95 | 109 |
-| jump | a jump the hardware can't predict, over one it can | 4,560 | 5,000 |
+| jump | a jump the hardware can't predict, over one it can | 4,560 | 4,996 |
 | scan | a codon searched | 275 | 437 |
 | move | a codon moved in bulk (its byte and its owner) | 16 | 92 |
 | draw | a random draw (splitmix64) | 2,650 | 3,489 |
-| call | a kernel call (a round trip into Windows) | 389,000 | 628,000 |
-| share | a cache line passed between two P-cores | 40,000 | |
-| disk_read, disk_write | a random 4 KB read and write on E:, unbuffered | 45.6 µs, 12.3 µs | |
-| disk_read_codon, disk_write_codon | a byte in sequence (4.1 and 5.0 GB/s) | 241, 200 | |
+| call | a kernel call (a round trip into Windows) | 389,000 | 631,000 |
+| share | a cache line passed between two P-cores | 40,000 | (the P-core's) |
+| disk_read, disk_write | a random 4 KB read and write on E:, unbuffered | 45.6 µs, 12.3 µs | (the P-core's) |
+| disk_read_codon, disk_write_codon | a byte in sequence (4.1 and 5.0 GB/s) | 241, 200 | (the P-core's) |
 
 - The P-core runs at about 5.3 GHz by the add; loads further out take 1.0 ns (64 KB), 3.6 ns (1 MB), 20 ns (16 MB) and 85 ns (256 MB).
 - Runs never measure, so every run, replay and snapshot uses these exact numbers. A re-measure would be a new table (`home_v2`).
@@ -1281,6 +1281,34 @@ So a GPU lane is about 7 times slower than a P-core at serial work, and far from
 - an op longer than a tick is an action, done at its end. A lone GPU op is about 15 ticks and a lone NPU op about 710, so blocking on a device alone is costly, and batching pays;
 - in async mode the CPU only sends ops (a kernel call opens the batch, then each op's share), and results come `accel.latency` ticks later as before. That latency stays a setting: the async barrier gives every op one latency.
 
+**4c. Phase 9c's fixes (2026-11-06, `docs/phase9c-plan.md` C1–C3, approved by Damian).**
+- *A warp's searches cost time on its clock (C1).* Before, a warp's JMP cost a lane's add however far its lanes searched. Now each lane counts the template codons it reads and the places it looks at; lanes in lockstep wait for the slowest, so the step costs the most any lane did, at `gpu_scan` each. `nova bench costs` measures that as a lane's search loop on the GPU's clock: 32.7 ns a place, against a P-core's 0.28, so searching is about 120× dearer on a GPU lane. A step that runs past the tick's end is carried into the next tick (each warp's clock is world state on a timed table). `classic` charges nothing, as before.
+- *Async results come back after each device's own round trip (C2).* With a timed table the GPU's results land `ceil(gpu_start / tick)` ticks after issue (15 at 4.75 µs) and the NPU's `ceil(npu_start / tick)` (710), each device's ops in their own order; `classic` keeps `accel.latency` for both. Every batch now comes home from its device at the barrier after it was sent and its results wait with their ops until due, so a long latency holds none of the device's 8 slots (with latency 2 the timing is as before).
+- *Waiting is idle, not work (C3).* The wait itself stays: a DISK read is synchronous, so its CPU can't go on until the data lands. But a CPU waiting on the disk or on a device no longer counts its ticks as work, so its units cool, and its share of the body's time goes to the body's other CPUs, as an OS runs another thread while one waits. ENGULF and INJECT stay busy (the CPU does the moving), and so does a kernel call's overrun.
+
+**4d. Threads and two kinds of core (Phase 9c-b, 2026-11-06, `docs/phase9c-plan.md` R1–R8, approved by Damian).** This is the world's own behaviour, not how the simulation runs on the real machine (Damian). Words: a *core* is 1,000 millicores of one kind; a *thread* is what the code calls a CPU. Both parts are off unless asked: with `cpu.threads = false` and `cpu.e_share = 0` (the defaults) every hash is as before.
+
+Code: `Soup::run_body` and `Soup::share_time` (each thread's time), the E ledger in `core/src/soup.cpp` (`claim_mixed`, `move_kind`, `release_kind`, the E pool), `spawn` and `prefer_kind` in `core/src/interp.cpp`, `builtin_costs_e` in `core/src/cost.cpp`, `res.ecpu` in `World::spread_resources`.
+
+*Threads (9c-b1, `cpu.threads = true`; Damian: a program owning two CPUs should use them as distinct processors).*
+- A thread runs on one core at a time, so it gets at most a core's tick (`tick_units`) a tick. With 2 cores and 2 threads both run at full speed; with 2 cores and 1 thread a core's worth goes unused and cools; with fewer cores than threads they share. Without threads one CPU may still use all its body's millicores.
+- GPU verb BX 21 starts a thread at the code after its template's match, found as JMP finds one. It gets the starter's AX–DX, heads and preferred kind (a fork with its arguments). It costs a kernel call, and fails past `cpu.max_threads` (8) a body.
+- GPU verb BX 22: this thread prefers P (AX even) or E (AX odd) cores.
+- *Slices:* `cpu.slices` (8) cuts a body's tick into turns. Each thread runs a slice's worth of its time per turn, in the body's thread order rotated each tick, so threads running side by side in world time see one another's writes within the tick. Bodies still run one after another (6.1).
+- SENSE 24 counts my running threads; 25 reads my preferred kind (a warp reads 0). A thread ends when it halts; a body dies with no running thread or warp, as before.
+
+*E cores (9c-b2, `cpu.e_share`, with a timed table).*
+- *Two kinds of millicore (R1):* the last round(millicores × `cpu.e_share`) of a node's millicores are E, in a pool of their own. In a landscape the share varies by site like the other resources (`res.ecpu.spread`, `.smooth`, `.barren`, `.hotspots`, `.hotspot_boost`, `.against`), capped at all of them.
+- *E time at E costs (R3):* each instruction on an E-core costs `home_v1`'s E column (the table above): about 15% more for adds, loads and jumps, 67% for a divide, 59% for a search, 62% for a kernel call, and nearly 6× for a codon moved in bulk. Devices, the disk and the signal channel cost the same on either.
+- *Handing out time, with no penalty for the wrong kind (R3, Damian):* a body's time is P time and E time, from its units of each kind (scaled by heat). Each tick each thread first gets up to a core of its preferred kind, shared equally if that kind is over-subscribed; then whatever is left of either kind goes to threads still short of a core. A thread runs its preferred kind's time first, then the other's. So a thread never idles while its body holds time of either kind, and the choice is only speed against heat, as on real P- and E-cores. Without threads the one CPU runs both kinds' time.
+- *Heat (R3):* P units heat from the body's work on P, E units from its work on E at `heat.e_gain` (0.4, approved unmeasured) × the P gain.
+- *Where E millicores go (R6):* sparks and new bodies draw from both pools in proportion to what each holds free. ALLOC and RELEASE BX 5 take E millicores (BX 1 is then P). DIVIDE gives the daughter a share of each kind, ENGULF takes both with the prey's threads, and a dispersing daughter's cargo carries both and draws them on arrival, capped by what is free there. Wear and heat release a unit into its own kind's pool. SENSE 26 reads my E millicores and 27 the node's free E millicores.
+- *Births (R6):* a newborn's thread prefers the kind of the thread that divided her, at home or after dispersal; a spark's prefers P.
+
+*World state (R8):* each thread's kind, when threads or E millicores are on anywhere in the world (a site's own share may be 0); a node's E pool, where it has E millicores (who holds which is in the unit lists); a cargo's E millicores and kind.
+
+*Seeing it (R8):* `stats.csv` has `threads_started`, `e_work` (time worked on E millicores) and `e_held`. The inspector shows a body's P-cores and E-cores, and each thread's kind and share of a core last tick, with its part on E. The map gains an "E-cores" colour (E millicores' share of a node's; live runs only).
+
 **5. Seeing it (C11).**
 - `stats.csv` gains `actions_started`, `actions_landed`, `actions_failed` and `actions_defended` after the warp columns.
 - A new milestone, `defended`: the first gated lineage whose members made `detect.defended` (3) attacks fail by changing in time. `result.txt` records it and `cost_table`.
@@ -1321,6 +1349,22 @@ So a GPU lane is about 7 times slower than a P-core at serial work, and far from
    On `home_v1` it runs ticks without the GPU while the world is small (48 of the first 200), then puts about 91% of node-rounds on the GPU; by 400 ticks it is within 3% of all on the GPU. On `classic` it runs 290 of 300 ticks without the GPU; the gap is its first 10 alternating ticks, which fade over a long run.
 8. *The cost of simulating it:* `gpu_world` on `home_v1` runs 12,600 times slower than real time on the GPU (60 ms for 4.75 µs of world time), against about 420 for the landscape without warps. Most of that is warps' work, the life that runs on the GPU.
 
+**Findings, 9c-b (2026-11-06, `configs/landscape.cfg` on `home_v1`, 2,000 ticks, Release, one seed).** Four arms: everything off; threads; half the millicores E; both.
+
+| | off | threads | E (half) | both |
+|---|---:|---:|---:|---:|
+| instructions a tick | 1.06 million | 1.04 million | 1.00 million | 1.05 million |
+| births over 2,000 ticks | 64,386 | 70,480 | 60,729 | 67,245 |
+| bodies at 2,000 | 169,477 | 171,443 | 170,930 | 171,356 |
+| millicores held at 2,000 | 1.35 million | 1.34 million | 1.18 million | 1.19 million |
+| ... of them E | | | 528,417 | 538,958 |
+| threads started by programs | | 124 | | 104 |
+| wall time a tick | 2.24 ms | 2.67 ms | 2.35 ms | 2.52 ms |
+
+9. *Programs barely start threads yet:* about one in 16,000 ticks a node, from random code finding BX 21 with a template that matches. Bodies already hold about two CPUs each (ENGULF brings the prey's), so the rules for several threads apply widely; whether starting threads pays is for selection to find once replicators exist (none appeared in 2,000 ticks in any arm, as in 9a).
+10. *E millicores are held less:* bodies hold 65% of the P millicores but 53% of the E ones. Sparks draw both kinds in proportion, but random ALLOCs likely name BX 1 (P, one INC from zero) more often than BX 5. E-cores run about 5% fewer instructions a tick in all.
+11. *What it costs to simulate:* threads add about 19% a tick, nearly all from the 8 slices (each slice runs each thread again, and the typical body has two threads of about 15 adds a slice); E cores alone add about 5%. `cpu.slices` is the knob if that matters for a long run.
+
 **Determinism (C10).** Suite `costs` checks:
 - the tables and recipes;
 - each instruction's charge (a JMP's template, places searched and jump);
@@ -1333,7 +1377,10 @@ So a GPU lane is about 7 times slower than a P-core at serial work, and far from
 - a busy timed world with the same hash at 1, 4 and 20 threads and under shuffled dispatch, and exact through a snapshot taken with actions in progress;
 - `defended` firing;
 - 9b: the device table and what it sets; a warp's clock (13 steps of adds in a 19,000 ps tick) and its units' throughput binding instead (7 steps on 8 units); a host instruction's 15-tick wait; a warp's ENGULF as an action; a block op as a 15-tick action;
-- 9b: a busy timed warp world with the same hash at 1, 4 and 20 threads, under shuffled dispatch and through a snapshot, and on the real GPU with every round checked against the reference (200 of 200, none differed) and split between the GPU and the CPU at random.
+- 9b: a busy timed warp world with the same hash at 1, 4 and 20 threads, under shuffled dispatch and through a snapshot, and on the real GPU with every round checked against the reference (200 of 200, none differed) and split between the GPU and the CPU at random;
+- 9c: a waiting CPU runs nothing and does no work while its body's other CPU gets all 1.5 cores; a warp's JMP over 11 places costs its 12 loads at `gpu_scan` (and the GPU still agrees round for round); each device's async latency (15 and 710 ticks), with `suite devices` still running every batch on the real devices at latency 1 and 2;
+- 9c-b1: a thread capped at a core (100 adds on 2,000 millicores, where one CPU without threads ran 200); BX 21 starting a thread with its starter's registers and heads, and `cpu.max_threads` stopping a third; BX 22 and SENSE 24 and 25; threads trading data within a tick in 8 slices and not in 1; a busy world with threads the same at 1, 4 and 20 threads and through a snapshot;
+- 9c-b2: the E column; the E pool and proportional draws, ALLOC and RELEASE BX 5 and 1 taking only their kind, SENSE 26 and 27; a body all of E running 88 adds where a P core runs 100; two threads preferring P and E getting a core of each, both preferring one kind getting half of it and half of the other, and one CPU without threads getting both cores; P units heating at 6 and E units at 2.4 flat out; DIVIDE's share of each kind and the divider's kind, ENGULF taking both, a dispersing daughter's shares leaving and being drawn on arrival with her kind; a busy timed world with threads and half its millicores E the same at 1, 4 and 20 threads, under reversed dispatch and through a snapshot; a landscape whose sites differ in E share (some barren of it), the same through a snapshot with cargo in flight.
 
 ## 7. Technical direction [decided via 7.1]
 
@@ -1518,6 +1565,7 @@ The original steps above predate today's decisions. Principles carried over: bui
 **Phase 9 — Measured costs** (added by Damian, 2026-11-06; plan in `docs/phase9-plan.md`, revision 2 approved). Rather than run on real time (a rewrite that gives up determinism), every instruction costs world time measured once on the real CPU, memory, disk, GPU and NPU, in a fixed table in the source (`home_v1`). A body's GPU work in a tick is one batch: start-up once, then each op's share run in parallel.
 - *9a built 2026-11-06* (6.15): the table for the CPU, memory and the disk; world time; ENGULF, INJECT and long instructions as actions with a start, a wait and an end; the SENSE readings for them; the `defended` milestone. `classic` (the default) keeps every hash. On `home_v1` a tick holds a tenth of the instructions and replication gets much dearer (a kernel call per world change), so the balance needs tuning before it becomes the default.
 - *9b built 2026-11-06* (6.15, 4b): the GPU and NPU measured (native microbenchmarks on the GPU's clock, start-up and share through the backends); each warp's own clock and its units' throughput, built into the shared kernel; host instructions waiting a GPU round trip; warps' actions; device ops in per-body batches. Tuning comes after real stress tests (Damian). Slow actions and actions on other bodies take ticks, with a start, a time acting and an end, so targets can sense them and respond: room for defences to evolve.
+- *9c built 2026-11-06* (6.15, 4c and 4d; plan in `docs/phase9c-plan.md`): 9b's loose ends (a warp's searches on its clock, each device's own async latency, waiting as idle); then threads, a thread running on one core at a time that programs start with BX 21 and that take turns in slices (9c-b1), and P and E cores, E-cores slower at E costs and cooler at 0.4 the heat, with no penalty for running on the wrong kind (9c-b2). Both are off unless asked (`cpu.threads`, `cpu.e_share`).
 
 **Milestones (updated):**
 - first self-replicator from random code;
@@ -1543,6 +1591,6 @@ Diversity/complexity/novelty metrics; spark settings and other starting paramete
 
 Damian sees the GPU's slowness at serial work as a feature (6.14). The warps' in-world costs (`warp.step_cost`, `warp.lane_cost`, `warp.capacity`) are still set by hand; Phase 9b measures them.
 
-*From Phase 9 (6.15):* the balance between actions and instructions needs heavy tuning (Damian): ENGULF's and INJECT's pace (`engulf.codons_per_tick`, `inject.codons_per_tick`), and how the per-tick rules (heat gains, upkeep, spark grants) sit against a world where a kernel call costs 2,000 adds and replication costs far more than it did. Also open: whether a CPU waiting on the disk should count as busy (it does today) or idle and cooling, and the P-cores and E-cores as two kinds of CPU. *9b:* a warp's template searches aren't yet counted on its clock; async device results keep the hand-set `accel.latency`. (`warp.device = auto` was retuned for GPU-heavy worlds the same day.)
+*From Phase 9 (6.15):* the balance between actions and instructions needs heavy tuning (Damian): ENGULF's and INJECT's pace (`engulf.codons_per_tick`, `inject.codons_per_tick`), and how the per-tick rules (heat gains, upkeep, spark grants) sit against a world where a kernel call costs 2,000 adds and replication costs far more than it did. (9b's open items, a warp's searches and async latency, were fixed in 9c, as was a waiting CPU counting as busy; `warp.device = auto` was retuned the same day.) *From 9c-b (6.15, 4d):* `heat.e_gain` (0.4) is approved but unmeasured; `cpu.slices` (8) costs about 19% of a tick's wall time in the landscape, so a long run may want fewer; and whether threads and E cores are worth having is for selection to show once replicators exist on `home_v1`.
 
 Also, replication on warps is easy (one 32-lane COPY copies a short genome whole), so whether `gpu_native` comes too soon is for the tuning with the rest. *Resolved 2026-11-05:* Section 6 (organisms); the energy/cost model (owned resources governed by heat; no abstract energy); the node creation rule, collapse consequences and recovery details (4.4a); signal channel design and the v1 resource tiers (5.1); technical direction, dependencies and analysis tooling (7.1); the phased build plan (9.1).

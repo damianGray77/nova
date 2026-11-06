@@ -564,7 +564,8 @@ void outputs() {
     CHECK(strstr(text, ",npu_held,in_flight,links,") != nullptr);
     CHECK(strstr(text, ",genotypes_in_top,colonised,links_down,disk_held,live_nodes,warp_steps,lane_instr,"
                        "warp_host,launches,gpu_births,warps,gpu_bodies,actions_started,actions_landed,"
-                       "actions_failed,actions_defended,compress,ambient\n") != nullptr);
+                       "actions_failed,actions_defended,threads_started,e_work,e_held,compress,ambient\n") !=
+          nullptr);
     CHECK(read_file(nodes, &bytes));
     bytes.push(0);
     text = reinterpret_cast<const char*>(bytes.data());

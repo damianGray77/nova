@@ -3,7 +3,9 @@
 // tick, and actions in progress -- ENGULF and INJECT with a start, a wait and
 // an end, a target that defends itself by changing in time, an actor lost
 // mid-action, a DISK op longer than a tick -- plus the determinism gates and
-// the `defended` milestone.
+// the `defended` milestone. Phase 9b and 9c: the devices' clocks; threads
+// (a core each, slices) and E cores (their costs, time and heat, and their
+// millicores through ALLOC, DIVIDE, ENGULF, cargo and landscapes).
 #include <cstring>
 
 #include "check.h"
@@ -661,6 +663,674 @@ void test_timed_warps() {
     }
 }
 
+// --- Phase 9c: the fixes ------------------------------------------------------
+
+// C3: a CPU waiting on the disk is idle -- its units do no work -- and its
+// share of the body's time goes to the body's other CPU.
+void test_idle_wait() {
+    Fix f;
+    CHECK(f.init("world.disk = 4096\ncpu.instr_per_core = 25000\n"));
+    const u32 a = plant(f.s, 100, "ENGULF NOP0 NOP0 NOP1 ALLOC INC INC INC INC INC INC INC", 1000);
+    const u32 prey = plant(f.s, 200, "NOP1 NOP1 NOP0 DISK INC INC INC INC", 500);
+    CHECK(a != kNone && prey != kNone);
+    f.s.run_cpu(f.cpu_of(a), 1000); // ENGULF: an action, one tick
+    f.s.begin_tick(1);
+    f.s.run_cpu(f.cpu_of(a), 0); // it lands: the prey's CPU is the eater's now
+    const u32 c1 = f.cpu_of(a), c2 = f.s.cpu(c1).next;
+    CHECK(!f.s.body(prey).alive && c2 != kNone && f.s.body(a).ncpu == 2);
+    Cpu& x = f.s.cpu_mut(c1);
+    x.bx = 3; // ALLOC: disk
+    x.cx = 16;
+    f.s.run_cpu(c1, 1);
+    CHECK(f.s.disk_held(a) == 16);
+    Cpu& y = f.s.cpu_mut(c2); // the other CPU stores to it: a 12 us write, three ticks
+    y.ip = 203;
+    y.bx = 1;
+    y.ax = 0;
+    y.cx = 16;
+    y.rh = 200;
+    f.s.run_cpu(c2, 100000000);
+    CHECK(f.s.actions().size() == 1 && f.s.cpu_waits(c2));
+    // A whole tick: the waiting CPU runs nothing, the other has all 1.5 cores.
+    const u64 before = f.s.cpu(c2).executed;
+    f.s.tick(2);
+    CHECK(f.s.cpu(c2).executed == before && f.s.cpu_waits(c2));
+    const double budget = 1500.0 * f.p.tick_units / 1000.0; // heat off: a unit's speed is 1
+    CHECK(static_cast<double>(f.s.body(a).work) >= 0.95 * budget);
+
+    // Alone and waiting, a CPU's units do no work at all: they cool.
+    Fix g;
+    CHECK(g.init("world.disk = 4096\ncpu.instr_per_core = 25000\n"));
+    const u32 b = plant(g.s, 100, "ALLOC DISK INC INC INC INC INC INC", 1000);
+    Cpu& c = g.cpu(b);
+    c.bx = 3;
+    c.cx = 16;
+    g.s.run_cpu(g.cpu_of(b), 1);
+    c.bx = 1;
+    c.ax = 0;
+    c.cx = 16;
+    c.rh = 100;
+    CHECK(g.s.run_cpu(g.cpu_of(b), 100000000) < 100000000); // the rest of the tick isn't work
+    g.s.tick(1);
+    CHECK(g.s.body(b).work == 0 && g.s.actions().size() == 1);
+    CHECK(soup_ok(f.s) && soup_ok(g.s));
+}
+
+// C1: a warp's searching step costs its template codons and the places its
+// slowest lane looked at, at gpu_scan each: JMP NOP0 past ten INCs to the
+// NOP1 reads 1 codon and looks at 11 places. A step that runs past the
+// tick's end is carried into the next.
+void test_warp_search_clock() {
+    GFix f;
+    CHECK(f.init("cpu.instr_per_core = 25000\n"));
+    const u32 b = f.plant_gpu(100, "JMP NOP0 INC INC INC INC INC INC INC INC INC INC NOP1", 64);
+    const u32 w = f.s.warp_head(b);
+    f.s.tick(0);
+    const double tick = f.p.tick_units;
+    const double step = static_cast<double>(f.p.cost.gpu_alu + 12 * f.p.cost.gpu_scan);
+    const u64 want = static_cast<u64>((tick - static_cast<double>(f.p.cost.gpu_alu)) / step) + 1;
+    CHECK(f.s.warp(w).steps == want);
+    f.s.tick(1); // tick 0's overshoot comes off tick 1
+    CHECK(f.s.warp(w).steps < 2 * want);
+    CHECK(soup_ok(f.s));
+}
+
+// C2: async results come back after each device's own round trip: the GPU's
+// 67 us is 15 ticks of 4.75 us, the NPU's 3.37 ms is 710; classic keeps
+// accel.latency.
+void test_async_latency() {
+    SoupParams p;
+    CHECK(make_params(&p,
+                      "world.millicores = 400\nworld.gpus = 64\nworld.npus = 64\naccel.mode = async\n"
+                      "cost.table = home_v1\ncpu.instr_per_core = 25000\n",
+                      1024));
+    CHECK(p.gpu_latency == 15 && p.npu_latency == 710);
+    SoupParams q;
+    CHECK(make_params(&q, "world.gpus = 64\naccel.mode = async\naccel.latency = 3\n", 1024));
+    CHECK(q.gpu_latency == 3 && q.npu_latency == 3);
+
+    Fix f;
+    CHECK(f.init("world.gpus = 400\naccel.mode = async\ncpu.instr_per_core = 25000\n"));
+    const u32 b = plant(f.s, 100, "GPU INC INC INC", 500);
+    CHECK(f.s.claim_gpus(b, 64) == 64);
+    f.s.prepare_gpu();
+    Cpu& c = f.cpu(b);
+    c.bx = 0; // a compare
+    c.cx = 4;
+    f.s.run_cpu(f.cpu_of(b), 1);
+    Array<AccelOp> ops;
+    Array<u8> in;
+    Array<u32> addr;
+    f.s.accel_gather(&ops, &in, &addr);
+    CHECK(ops.size() == 1 && ops[0].due == 14); // issued at tick 0, landing at the barrier of tick 14
+}
+
+// --- Phase 9c-b1: threads -------------------------------------------------------
+
+// A quiet soup with threads on, the classic table (so an instruction is 1),
+// 2,000 millicores (two cores).
+struct TFix {
+    SoupParams p;
+    Soup s;
+    bool init(const char* extra = "") {
+        TextBuf cfg;
+        cfg.append(kQuiet);
+        cfg.append("world.millicores = 2000\ncpu.threads = true\n");
+        cfg.append(extra);
+        if (!make_params(&p, cfg.c_str(), 1024))
+            return false;
+        s.init(&p, 23, 0);
+        s.begin_tick(0);
+        return true;
+    }
+};
+
+// One thread on two cores' millicores runs at one core's speed; without
+// threads it ran at two.
+void test_thread_core_cap() {
+    TFix f;
+    CHECK(f.init("cpu.instr_per_core = 100\n"));
+    const u32 b = plant(f.s, 100, "INC INC INC INC", 2000);
+    f.s.tick(0);
+    CHECK(f.s.cpu(f.s.body(b).cpus).executed == 100);
+    SoupParams p;
+    CHECK(make_params(&p, "heat.enabled = false\nmem.upkeep = 0\nworld.millicores = 2000\ncpu.instr_per_core = 100\n",
+                      1024));
+    Soup s;
+    s.init(&p, 23, 0);
+    s.begin_tick(0);
+    const u32 b2 = plant(s, 100, "INC INC INC INC", 2000);
+    s.tick(0);
+    CHECK(s.cpu(s.body(b2).cpus).executed == 200);
+}
+
+// BX 21 starts a thread at the code after its template's match, with the
+// starter's registers and heads; it runs from the next tick, and both then
+// run a core each. cpu.max_threads stops more.
+void test_thread_start() {
+    TFix f;
+    CHECK(f.init("cpu.instr_per_core = 100\ncpu.max_threads = 2\n"));
+    // 0 GPU NOP1x3 (start a thread at the NOP0x3 below), then the starter's
+    // INC loop; the new thread's own INC loop after the NOP0s.
+    const u32 b = plant(f.s, 100,
+                        "GPU NOP1 NOP1 NOP1 ZERO INC INC INC NOP0 NOP0 NOP0 SWAP SWAP SWAP SWAP SWAP SWAP", 2000);
+    CHECK(b != kNone);
+    Cpu& c = f.s.cpu_mut(f.s.body(b).cpus);
+    c.bx = kThreadOp;
+    c.ax = 7;
+    c.rh = 130;
+    f.s.run_cpu(f.s.body(b).cpus, 1);
+    CHECK(f.s.body(b).ncpu == 2 && f.s.tally().threads_started == 1);
+    const u32 t = f.s.cpu(f.s.body(b).cpus).next;
+    CHECK(t != kNone && f.s.cpu(t).ip == 111 && f.s.cpu(t).ax == 7 && f.s.cpu(t).rh == 130);
+    CHECK(f.s.cpu(f.s.body(b).cpus).ip == 104 && f.s.cpu(f.s.body(b).cpus).err == 0);
+    // A third: the limit.
+    Cpu& c2 = f.s.cpu_mut(f.s.body(b).cpus);
+    c2.ip = 100;
+    c2.bx = kThreadOp;
+    f.s.run_cpu(f.s.body(b).cpus, 1);
+    CHECK(f.s.body(b).ncpu == 2 && f.s.cpu(f.s.body(b).cpus).err == 1);
+    // A tick: each runs a core's worth.
+    const u64 e0 = f.s.cpu(f.s.body(b).cpus).executed, e1 = f.s.cpu(t).executed;
+    f.s.tick(1);
+    CHECK(f.s.cpu(f.s.body(b).cpus).executed - e0 == 100 && f.s.cpu(t).executed - e1 == 100);
+    CHECK(soup_ok(f.s));
+}
+
+// BX 22 sets the kind of core a thread prefers; SENSE 24 counts my threads
+// and 25 reads my kind.
+void test_thread_kind() {
+    TFix f;
+    CHECK(f.init());
+    const u32 b = plant(f.s, 100, "GPU SENSE SENSE INC", 500);
+    const u32 c = f.s.body(b).cpus;
+    Cpu& x = f.s.cpu_mut(c);
+    x.bx = kKindOp;
+    x.ax = 1;
+    f.s.run_cpu(c, 1);
+    CHECK(f.s.cpu_kind(c) == kKindE && f.s.cpu(c).err == 0);
+    x.bx = 25;
+    f.s.run_cpu(c, 1);
+    CHECK(f.s.cpu(c).cx == kKindE);
+    x.bx = 24;
+    f.s.run_cpu(c, 1);
+    CHECK(f.s.cpu(c).cx == 1);
+}
+
+// Threads take turns a slice at a time, so one sees another's writes within
+// a tick. The starter writes 1, 2, 3 ... into a buffer; the thread it
+// started (first in tick 1's order) idles 7 instructions, then reads the
+// buffer's 21st codon. In 8 slices the starter has written it in slice 0
+// (21); straight through, it hasn't yet (the buffer's filler, ZERO's codon).
+u32 slice_read(u32 slices) {
+    TFix f;
+    TextBuf extra;
+    extra.append("cpu.instr_per_core = 60\ncpu.slices = ");
+    extra.append_u64(slices);
+    extra.append_char('\n');
+    if (!f.init(extra.c_str()))
+        return kNone;
+    // After its READ the thread spins on its own JMP (the ZERO at 129 ends that
+    // JMP's template, so the buffer's codons can't join it).
+    TextBuf code;
+    code.append("GPU NOP1 NOP1 NOP1 ZERO NOP1 NOP0 INC WRITE JMP NOP0 NOP1 ZERO NOP0 NOP0 NOP0 "
+                "SWAP SWAP SWAP SWAP SWAP SWAP SWAP READ NOP0 NOP0 JMP NOP1 NOP1 ZERO");
+    for (int i = 0; i < 64; ++i)
+        code.append(" ZERO"); // the buffer, at 130
+    const u32 b = plant(f.s, 100, code.c_str(), 2000);
+    if (b == kNone)
+        return kNone;
+    Cpu& c = f.s.cpu_mut(f.s.body(b).cpus);
+    c.bx = kThreadOp;
+    c.wh = 130;      // the starter writes from the buffer's start
+    c.rh = 130 + 20; // the started thread reads its 21st codon
+    f.s.tick(0);
+    f.s.tick(1);
+    const u32 t = f.s.cpu(f.s.body(b).cpus).next;
+    return t == kNone ? kNone : f.s.cpu(t).cx;
+}
+
+void test_thread_slices() {
+    SoupParams p;
+    CHECK(make_params(&p, "world.millicores = 2000\n", 1024));
+    const u32 zero = static_cast<u32>(codon_of(p.table, Op::zero));
+    CHECK(slice_read(8) == 21);
+    CHECK(slice_read(1) == zero);
+}
+
+// A busy world with threads on: deterministic at 1, 4 and 20 threads, under
+// shuffled dispatch and through a snapshot.
+void test_thread_world() {
+    TextBuf t;
+    t.append(kSoupWorld1b);
+    t.append("cpu.threads = true\n");
+    u64 hashes[3] = {};
+    const u32 threads[3] = {1, 4, 20};
+    for (u32 v = 0; v < 3; ++v) {
+        Run run;
+        CHECK(make_run(run, t.c_str(), threads[v]));
+        run.run_until(200);
+        hashes[v] = run.world().hash();
+        if (v == 0)
+            for (u32 n = 0; n < run.world().node_count(); ++n)
+                CHECK(soup_ok(run.world().node_soup(n)));
+    }
+    CHECK_EQ_U64(hashes[1], hashes[0]);
+    CHECK_EQ_U64(hashes[2], hashes[0]);
+    Run a;
+    CHECK(make_run(a, t.c_str(), 4));
+    a.run_until(100);
+    ByteWriter snap;
+    a.snapshot(snap);
+    Run b;
+    TextBuf err;
+    CHECK(b.init_from_snapshot(snap.data(), snap.size(), 2, &err));
+    b.run_until(200);
+    CHECK_EQ_U64(b.world().hash(), hashes[0]);
+    Run off;
+    CHECK(make_run(off, kSoupWorld1b, 4));
+    off.run_until(200);
+    CHECK(off.world().hash() != hashes[0]); // threads change the world
+    printf("  threads world: 200 ticks, hash %016llx\n", static_cast<unsigned long long>(hashes[0]));
+}
+
+// --- Phase 9c-b2: E cores ---------------------------------------------------------
+
+// A quiet soup on home_v1 with 2,000 millicores, cpu.e_share of them E.
+struct EFix {
+    SoupParams p;
+    Soup s;
+    bool init(const char* extra) {
+        TextBuf cfg;
+        cfg.append(kQuiet);
+        cfg.append("world.millicores = 2000\ncost.table = home_v1\n");
+        cfg.append(extra);
+        if (!make_params(&p, cfg.c_str(), 1024))
+            return false;
+        s.init(&p, 23, 0);
+        s.begin_tick(0);
+        return true;
+    }
+};
+
+// The E column: home_v1's E-core figures for the CPU's operations, the
+// P-core's for the rest; classic is classic.
+void test_e_table() {
+    CostTable p = {}, e = {}, c = {};
+    CHECK(builtin_costs("home_v1", &p) && builtin_costs_e("home_v1", &e));
+    CHECK(e.timed == 1 && e.alu == 218 && e.mul == 655 && e.div == 4425 && e.load == 872 && e.store == 109);
+    CHECK(e.jump == 4996 && e.scan == 437 && e.move == 92 && e.draw == 3489 && e.call == 631000);
+    CHECK(e.share == p.share && e.disk_read == p.disk_read && e.disk_write_codon == p.disk_write_codon);
+    CHECK(e.gpu_start == p.gpu_start && e.gpu_op[static_cast<u32>(Op::inc)] == p.gpu_op[static_cast<u32>(Op::inc)]);
+    CHECK(e.op[static_cast<u32>(Op::inc)] == 218 && e.op[static_cast<u32>(Op::copy)] == e.load + e.store);
+    CHECK(builtin_costs_e("classic", &c) && !c.timed && c.op[0] == 1);
+    TextBuf d;
+    describe_costs(p, d);
+    CHECK(strstr(d.c_str(), "on an E-core") != nullptr);
+    // E millicores need a timed table (an E-core's speed is its column).
+    SoupParams sp;
+    Config cfg;
+    Config::ParseError pe;
+    CHECK(cfg.parse("cpu.e_share = 0.5\n", &pe));
+    CHECK(!soup_params_from_config(cfg, 1024, &sp));
+}
+
+// R1: the last round(millicores x e_share) units are E, in a pool of their
+// own; a new body draws from both pools in proportion to what's free; ALLOC
+// and RELEASE take E millicores with BX 5 (BX 1 is P); SENSE 26 and 27 read
+// mine and the node's free ones.
+void test_e_units() {
+    EFix f;
+    CHECK(f.init("cpu.e_share = 0.25\n"));
+    CHECK(f.p.sel.res_n == 6 && f.p.sel.sense_n == kSenseReadingsThreads);
+    CHECK(f.s.e_total() == 500 && f.s.free_e_units() == 500 && f.s.free_units() == 2000);
+    const u32 b = plant(f.s, 100, "ALLOC ALLOC RELEASE RELEASE SENSE SENSE", 1000);
+    CHECK(b != kNone && f.s.body(b).units == 1000 && f.s.e_units(b) == 250); // 1500:500 free
+    const u32 c = f.s.body(b).cpus;
+    Cpu& x = f.s.cpu_mut(c);
+    x.bx = 5; // ALLOC E millicores
+    x.cx = 100;
+    f.s.run_cpu(c, 1);
+    CHECK(x.err == 0 && f.s.e_units(b) == 350 && f.s.free_e_units() == 150);
+    x.bx = 1; // ALLOC P millicores
+    f.s.run_cpu(c, 1);
+    CHECK(f.s.body(b).units == 1200 && f.s.e_units(b) == 350);
+    x.bx = 5; // RELEASE E
+    x.cx = 50;
+    f.s.run_cpu(c, 1);
+    CHECK(f.s.e_units(b) == 300 && f.s.body(b).units == 1150);
+    x.bx = 1; // RELEASE P: only P, all 850 of them
+    x.cx = 1000;
+    f.s.run_cpu(c, 1);
+    CHECK(x.err == 0 && f.s.body(b).units == 300 && f.s.e_units(b) == 300);
+    x.bx = 26;
+    f.s.run_cpu(c, 1);
+    CHECK(x.cx == 300);
+    x.bx = 27;
+    f.s.run_cpu(c, 1);
+    CHECK(x.cx == 200);
+    CHECK(soup_ok(f.s));
+    // Without E millicores BX 5 fails.
+    EFix g;
+    CHECK(g.init("cpu.threads = true\n"));
+    const u32 b2 = plant(g.s, 100, "ALLOC", 100);
+    Cpu& y = g.s.cpu_mut(g.s.body(b2).cpus);
+    y.bx = 5;
+    y.cx = 10;
+    g.s.run_cpu(g.s.body(b2).cpus, 1);
+    CHECK(y.err == 1 && g.s.e_total() == 0);
+}
+
+// R3: an instruction on an E-core costs the E column's time, so a body all of
+// E millicores runs fewer adds in a tick; its time on them is e_work.
+void test_e_costs() {
+    EFix f;
+    CHECK(f.init("cpu.e_share = 1\ncpu.instr_per_core = 100\n"));
+    const u32 b = plant(f.s, 100, "INC INC INC INC", 1000);
+    CHECK(f.s.e_units(b) == 1000);
+    f.s.tick(0);
+    // A core's tick is 100 P-core adds (19,000 ps); an E-core add is 218 ps.
+    CHECK(f.s.cpu(f.s.body(b).cpus).executed == 88 && f.s.tally().e_work == 88u * 218u);
+    EFix g;
+    CHECK(g.init("cpu.e_share = 0.5\n"));
+    const u32 b2 = plant(g.s, 100, "MUL MUL", 100);
+    CHECK(g.s.run_cpu(g.s.body(b2).cpus, 1, kKindE) == g.p.ecost.mul && g.p.ecost.mul == 655);
+    CHECK(g.s.run_cpu(g.s.body(b2).cpus, 1, kKindP) == g.p.cost.mul);
+}
+
+// Two threads (the starter and the one it starts) looping on INCs in a body
+// of 1,000 P and 1,000 E millicores, preferring kinds k0 and k1: each one's
+// time in a tick, and its part on E.
+void two_threads(u8 k0, u8 k1, bool threads, u32 time[2], u32 etime[2]) {
+    EFix f;
+    time[0] = time[1] = etime[0] = etime[1] = 0;
+    if (!f.init(threads ? "cpu.e_share = 0.5\ncpu.instr_per_core = 25000\ncpu.threads = true\n"
+                        : "cpu.e_share = 0.5\ncpu.instr_per_core = 25000\n"))
+        return;
+    TextBuf code;
+    code.append("GPU NOP1 NOP1 NOP1 ZERO NOP0 NOP0 NOP0 NOP1 NOP0");
+    for (int i = 0; i < 60; ++i)
+        code.append(" INC");
+    code.append(" JMP NOP0 NOP1"); // back to the INCs at 110
+    const u32 b = plant(f.s, 100, code.c_str(), 2000);
+    if (b == kNone || f.s.e_units(b) != 1000)
+        return;
+    const u32 c0 = f.s.body(b).cpus;
+    u32 cs[2] = {c0, kNone};
+    if (threads) {
+        f.s.cpu_mut(c0).bx = kThreadOp;
+        f.s.run_cpu(c0, 1);
+        cs[1] = f.s.cpu(c0).next;
+        if (cs[1] == kNone)
+            return;
+        const u8 kinds[2] = {k0, k1};
+        for (u32 i = 0; i < 2; ++i) { // BX 22, then on to the INCs
+            Cpu& x = f.s.cpu_mut(cs[i]);
+            x.ip = 100;
+            x.bx = kKindOp;
+            x.ax = kinds[i];
+            f.s.run_cpu(cs[i], 1);
+            x.ip = 110;
+        }
+    }
+    f.s.tick(0);
+    for (u32 i = 0; i < 2; ++i)
+        if (cs[i] != kNone) {
+            time[i] = f.s.cpu_time(cs[i]);
+            etime[i] = f.s.cpu_etime(cs[i]);
+        }
+    CHECK(soup_ok(f.s));
+}
+
+// R3: each thread first gets up to a core of its preferred kind, then the
+// other kind's leftovers, with no penalty: a thread never idles while its
+// body has time of either kind.
+void test_e_share_time() {
+    const i64 core = 25000 * 190; // a core's tick, ps
+    // within the last instruction's overshoot (a JMP's search, on an E-core)
+    auto near = [](u32 v, i64 want) {
+        const i64 d = static_cast<i64>(v) - want;
+        return d > -40000 && d < 40000;
+    };
+    u32 t[2], e[2];
+    two_threads(kKindP, kKindE, true, t, e); // a core of each kind, one each
+    CHECK(near(t[0], core) && e[0] == 0 && near(t[1], core) && near(e[1], core));
+    two_threads(kKindP, kKindP, true, t, e); // P over-subscribed: half a core of P each, the E core's time shared
+    CHECK(near(t[0], core) && near(t[1], core));
+    CHECK(near(e[0], core / 2) && near(e[1], core / 2));
+    two_threads(kKindE, kKindE, true, t, e); // the same the other way
+    CHECK(near(t[0], core) && near(t[1], core));
+    CHECK(near(e[0], core / 2) && near(e[1], core / 2));
+    two_threads(kKindP, kKindP, false, t, e); // no threads: one CPU runs both cores' time
+    CHECK(near(t[0], 2 * core) && near(e[0], core));
+}
+
+// R3: heat lands on the units that ran the work, E at heat.e_gain x P's gain.
+void test_e_heat() {
+    SoupParams p;
+    CHECK(make_params(&p,
+                      "hazard.copy = 0\nhazard.flaw = 0\nhazard.rot = 0\nmem.upkeep = 0\nworld.millicores = 2000\n"
+                      "cost.table = home_v1\ncpu.e_share = 0.5\ncpu.instr_per_core = 100\n",
+                      1024));
+    Soup s;
+    s.init(&p, 23, 0);
+    s.begin_tick(0);
+    const u32 b = plant(s, 100, "INC INC INC INC", 2000);
+    CHECK(b != kNone && s.e_units(b) == 1000);
+    s.tick(0);
+    // Both kinds flat out: a P unit takes cpu_gain (6), an E unit 0.4 x 6.
+    float hp = -1, he = -1;
+    for (u32 u = 0; u < 2000; ++u) {
+        if (s.unit_owner(u) != b)
+            continue;
+        if (u < 1000)
+            hp = s.unit_heat(u);
+        else
+            he = s.unit_heat(u);
+    }
+    CHECK(hp > 5.999f && hp < 6.001f);
+    CHECK(he > 2.399f && he < 2.401f);
+    CHECK(s.tally().e_work == 88u * 218u);
+}
+
+// R6: DIVIDE gives a share of each kind and the divider's kind; ENGULF takes
+// both kinds with the prey; a dispersing daughter carries both, and her
+// divider's kind, and draws them on arrival.
+void test_e_moves() {
+    EFix f;
+    CHECK(f.init("cpu.e_share = 0.5\ncpu.threads = true\n"));
+    const u32 b = plant(f.s, 100, "GPU ALLOC DIVIDE", 2000);
+    CHECK(f.s.e_units(b) == 1000);
+    const u32 c = f.s.body(b).cpus;
+    Cpu& x = f.s.cpu_mut(c);
+    x.bx = kKindOp;
+    x.ax = 1;
+    f.s.run_cpu(c, 1); // prefers E
+    x.bx = 0;          // ALLOC 16 codons of memory
+    x.cx = 16;
+    f.s.run_cpu(c, 1);
+    x.bx = 0; // DIVIDE here, half of each
+    x.cx = 32;
+    f.s.run_cpu(c, 1);
+    CHECK(x.err == 0 && f.s.tally().births == 1);
+    u32 d = kNone;
+    for (usize k = 0; k < f.s.body_count(); ++k)
+        if (f.s.body_at(k) != b)
+            d = f.s.body_at(k);
+    CHECK(d != kNone && f.s.body(d).units == 1000 && f.s.e_units(d) == 500 && f.s.e_units(b) == 500);
+    CHECK(f.s.cpu_kind(f.s.body(d).cpus) == kKindE);
+    CHECK(soup_ok(f.s));
+
+    // ENGULF: the prey's E millicores go with it.
+    EFix g;
+    CHECK(g.init("cpu.e_share = 0.5\n"));
+    const u32 eater = plant(g.s, 100, "ENGULF NOP0 NOP0 NOP1 INC", 500);
+    const u32 prey = plant(g.s, 200, "NOP1 NOP1 NOP0 SENSE", 300);
+    CHECK(eater != kNone && prey != kNone);
+    const u32 ee = g.s.e_units(eater), pe = g.s.e_units(prey);
+    CHECK(ee == 250 && pe == 150);
+    g.s.run_cpu(g.s.body(eater).cpus, 1000000);
+    g.s.begin_tick(1);
+    g.s.run_cpu(g.s.body(eater).cpus, 0);
+    CHECK(g.s.tally().engulfs == 1 && g.s.e_units(eater) == ee + pe && g.s.body(eater).units == 800);
+    g.s.death_sweep(); // the prey's slot
+    CHECK(soup_ok(g.s));
+
+    // Dispersal: her shares leave at home and are drawn on arrival.
+    EFix h;
+    CHECK(h.init("cpu.e_share = 0.5\ncpu.threads = true\nworld.dispersal = true\n"));
+    const u32 edges[1] = {0}, flight[1] = {0};
+    DispersalPorts ports;
+    ports.edges = edges;
+    ports.in_flight = flight;
+    ports.degree = 1;
+    ports.capacity = 4;
+    h.s.set_ports(ports);
+    const u32 pb = plant(h.s, 100, "GPU ALLOC DIVIDE", 2000);
+    const u32 pc = h.s.body(pb).cpus;
+    Cpu& y = h.s.cpu_mut(pc);
+    y.bx = kKindOp;
+    y.ax = 1;
+    h.s.run_cpu(pc, 1);
+    y.bx = 0;
+    y.cx = 16;
+    h.s.run_cpu(pc, 1);
+    y.bx = 1; // DIVIDE to neighbour 1, a quarter of each
+    y.cx = 16;
+    h.s.run_cpu(pc, 1);
+    CHECK(y.err == 0 && h.s.departures().size() == 1);
+    const Departure dep = h.s.departures()[0];
+    CHECK(dep.millicores == 250 && dep.emillicores == 250 && dep.kind == kKindE);
+    CHECK(h.s.body(pb).units == 1500 && h.s.e_units(pb) == 750 && h.s.free_e_units() == 250);
+    EFix k;
+    CHECK(k.init("cpu.e_share = 0.5\ncpu.threads = true\nworld.dispersal = true\n"));
+    CargoTag tag = {};
+    CHECK(k.s.arrive(h.s.departure_codons() + dep.codon_off, dep.len, dep.millicores, 0, 0, 0, tag, kFormCpu,
+                     dep.emillicores, static_cast<u8>(dep.kind)));
+    const u32 nb = k.s.body_at(0);
+    CHECK(k.s.body(nb).units == 500 && k.s.e_units(nb) == 250 && k.s.cpu_kind(k.s.body(nb).cpus) == kKindE);
+    CHECK(soup_ok(h.s) && soup_ok(k.s));
+}
+
+// A busy timed world with threads on and half its millicores E: the
+// determinism gates (1, 4 and 20 threads, shuffled dispatch, a snapshot);
+// work done on E millicores; and the switch off changes the world.
+void test_e_world() {
+    TextBuf t;
+    t.append(kTimedWorld);
+    t.append("cpu.threads = true\ncpu.e_share = 0.5\n");
+    u64 hashes[4] = {};
+    const u32 threads[4] = {1, 4, 20, 4};
+    Array<u32> order;
+    u64 ework = 0, started = 0;
+    for (u32 v = 0; v < 4; ++v) {
+        Run run;
+        CHECK(make_run(run, t.c_str(), threads[v]));
+        if (v == 3) {
+            const u32 n = run.world().node_count();
+            order.resize(n);
+            for (u32 i = 0; i < n; ++i)
+                order[i] = n - 1 - i;
+            run.set_dispatch_order(order.data());
+        }
+        for (u64 tk = 1; tk <= 200; ++tk) {
+            run.run_until(tk);
+            if (v == 0) {
+                ework += run.world().last_soup_tick().e_work;
+                started += run.world().last_soup_tick().threads_started;
+            }
+        }
+        hashes[v] = run.world().hash();
+        if (v == 0)
+            for (u32 n = 0; n < run.world().node_count(); ++n)
+                CHECK(soup_ok(run.world().node_soup(n)));
+    }
+    CHECK_EQ_U64(hashes[1], hashes[0]);
+    CHECK_EQ_U64(hashes[2], hashes[0]);
+    CHECK_EQ_U64(hashes[3], hashes[0]);
+    CHECK(ework > 0);
+    Run a;
+    CHECK(make_run(a, t.c_str(), 4));
+    a.run_until(100);
+    ByteWriter snap;
+    a.snapshot(snap);
+    Run b;
+    TextBuf err;
+    CHECK(b.init_from_snapshot(snap.data(), snap.size(), 2, &err));
+    b.run_until(200);
+    CHECK_EQ_U64(b.world().hash(), hashes[0]);
+    TextBuf p;
+    p.append(kTimedWorld);
+    p.append("cpu.threads = true\n");
+    Run off;
+    CHECK(make_run(off, p.c_str(), 4));
+    off.run_until(200);
+    CHECK(off.world().hash() != hashes[0]); // E millicores change the world
+    printf("  E world: 200 ticks, E work %.3g ms, %llu threads started, hash %016llx\n", ework / 1e9,
+           static_cast<unsigned long long>(started), static_cast<unsigned long long>(hashes[0]));
+}
+
+// A landscape with E millicores (res.ecpu): sites differ in their share;
+// cargo carries both kinds; deterministic, and through a snapshot.
+void test_e_landscape() {
+    const char* cfg = "seed = 7\n"
+                      "world.model = soup\n"
+                      "world.graph = landscape\n"
+                      "world.nodes = 40\n"
+                      "land.scale = 4\n"
+                      "land.resolution = 96\n"
+                      "world.soup_size = 2048\n"
+                      "world.millicores = 600\n"
+                      "res.ecpu.spread = 1\n"
+                      "res.ecpu.barren = 0.1\n"
+                      "cost.table = home_v1\n"
+                      "cpu.instr_per_core = 25000\n"
+                      "cpu.e_share = 0.4\n"
+                      "cpu.threads = true\n"
+                      "edge.bandwidth = 8\n"
+                      "spark.timing = last\n"
+                      "spark.initial = 20\n"
+                      "spark.rate = 0.5\n"
+                      "spark.grant = 20\n"
+                      "spark.min_len = 8\n"
+                      "spark.max_len = 24\n"
+                      "seed.genome = ZERO ROTB SENSE ALLOC NOP1 COPY DJNZ NOP0 ZERO INC ROTB SENSE DIVIDE\n"
+                      "seed.at = 600\n"
+                      "seed.millicores = 200\n"
+                      "heat.cpu_gain = 36\n";
+    Run run;
+    CHECK(make_run(run, cfg, 4));
+    u32 lo = 0xFFFFFFFFu, hi = 0, zero = 0;
+    for (u32 n = 0; n < run.world().node_count(); ++n) {
+        const Soup& s = run.world().node_soup(n);
+        const u32 e = s.params().millicores ? s.e_total() * 1000 / s.params().millicores : 0;
+        lo = e < lo ? e : lo;
+        hi = e > hi ? e : hi;
+        zero += s.e_total() == 0;
+    }
+    CHECK(hi > lo && hi <= 1000 && zero > 0); // E-rich, E-poor and barren sites
+    u64 sent = 0;
+    for (u64 tk = 1; tk <= 150; ++tk) {
+        run.run_until(tk);
+        sent += run.world().last_soup_tick().sent;
+    }
+    const u64 h = run.world().hash();
+    Run one;
+    CHECK(make_run(one, cfg, 1));
+    one.run_until(80);
+    ByteWriter snap;
+    one.snapshot(snap);
+    Run back;
+    TextBuf err;
+    CHECK(back.init_from_snapshot(snap.data(), snap.size(), 3, &err));
+    back.run_until(150);
+    CHECK_EQ_U64(back.world().hash(), h);
+    for (u32 n = 0; n < run.world().node_count(); ++n)
+        CHECK(soup_ok(run.world().node_soup(n)));
+    printf("  E landscape: E share %u..%u per mille, %u sites without, %llu sent in 150 ticks\n", lo, hi, zero,
+           static_cast<unsigned long long>(sent));
+}
+
 } // namespace
 
 void suite_costs() {
@@ -681,4 +1351,23 @@ void suite_costs() {
     test_warp_engulf();
     test_block_op_action();
     test_timed_warps();
+    // Phase 9c
+    test_idle_wait();
+    test_warp_search_clock();
+    test_async_latency();
+    // Phase 9c-b1
+    test_thread_core_cap();
+    test_thread_start();
+    test_thread_kind();
+    test_thread_slices();
+    test_thread_world();
+    // Phase 9c-b2
+    test_e_table();
+    test_e_units();
+    test_e_costs();
+    test_e_share_time();
+    test_e_heat();
+    test_e_moves();
+    test_e_world();
+    test_e_landscape();
 }

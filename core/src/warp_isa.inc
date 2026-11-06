@@ -355,10 +355,12 @@ uint w_search(uint b, uint a, uint t0, uint t1, uint n, int dir) {
         dmax = fmax;
     if (dir <= 0 && bmax > dmax)
         dmax = bmax;
+    g_seen += n; // Phase 9c: the template's codons, read (each search's own clock: see w_run_warp)
     W_LOOP for (d = 1; d <= dmax; d++) {
         if (dir >= 0 && d <= fmax) {
             st = (int)a + (int)n + d;
             if (st + (int)n <= size) {
+                g_seen += 1u; // a place looked at
                 if (w_complement_at(b, (uint)st, t0, t1, n))
                     return w_adv(b, ((uint)st + n - 1u) % (uint)size, 1u);
             }
@@ -366,6 +368,7 @@ uint w_search(uint b, uint a, uint t0, uint t1, uint n, int dir) {
         if (dir <= 0 && d <= bmax) {
             st = (int)a - (int)n - d + 1;
             if (st >= 0) {
+                g_seen += 1u;
                 if (w_complement_at(b, (uint)st, t0, t1, n))
                     return w_adv(b, ((uint)st + n - 1u) % (uint)size, 1u);
             }
@@ -867,6 +870,7 @@ void w_run_warp(uint b, uint wi) {
     uint tleft = 0u;
     uint tused = 0u;
     uint tstep = 0u;
+    uint tsearch = 0u;
     uint key = w_mix(IMG(b + WB_KEY) ^ (IMG(wr + WW_INDEX) * 0x27D4EB2Fu));
     uint step = IMG(wr + WW_STEP0);
     uint nl = CST(WC_LANES);
@@ -904,6 +908,7 @@ void w_run_warp(uint b, uint wi) {
         ONCE_BEGIN
             gs_min = W_NONE;
             gs_count = 0u;
+            gs_ctl[8] = 0u; // the slowest lane's search, this step (Phase 9c)
         ONCE_END
         SYNC
         LANE_BEGIN(lane0)
@@ -979,7 +984,9 @@ void w_run_warp(uint b, uint wi) {
                     L.ip = nx;
                 } else {
                     L.block = obid;
+                    g_seen = 0u;
                     ok = w_exec(b, L, l, op, minip, key, step, nx, wto, wval);
+                    GS_MAX(gs_ctl[8], g_seen);
                     // an execution flaw: one register comes out off by one
                     if (w_draw(key, step, l, WD_FLAW) < IMG(b + WB_FLAW_THR)) {
                         fd = w_draw(key, step, l, WD_FLAW_KIND);
@@ -1022,7 +1029,11 @@ void w_run_warp(uint b, uint wi) {
         LANE_END
         SYNC
         g = gs_count;
+        tsearch = gs_ctl[8];
         SYNC
+        // Phase 9c: lanes in lockstep wait for the slowest one's search (a
+        // step that runs past the tick's end is carried into the next).
+        tused += tsearch * CST(WC_SCAN);
         used += CST(WC_STEP_COST) + CST(WC_LANE_COST) * g;
         steps++;
         lins += g;

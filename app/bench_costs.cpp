@@ -704,8 +704,9 @@ int cmd_bench_costs() {
         printf("  disk: could not measure (needs room for a 256 MB file in this folder)\n");
     if (dc.gpu) {
         printf("\n  GPU %s, a lane's dependent op on its own clock:\n", dc.gpu_name);
-        printf("    add %.0f, multiply %.0f, divide %.0f; a load from 4 KB %.0f, 1 MB %.0f, 256 MB %.0f\n",
-               dc.micro.alu, dc.micro.mul, dc.micro.div, dc.micro.l1, dc.micro.mem, dc.micro.vram);
+        printf("    add %.0f, multiply %.0f, divide %.0f; a load from 4 KB %.0f, 1 MB %.0f, 256 MB %.0f; "
+               "a place searched %.0f\n",
+               dc.micro.alu, dc.micro.mul, dc.micro.div, dc.micro.l1, dc.micro.mem, dc.micro.vram, dc.micro.scan);
         printf("    the whole GPU busy: %.3g lane-ops a second, so %.0f ps a lane-op per lane (%u lanes)\n",
                dc.micro.ops_per_s, dc.gpu_thr, lanes);
         printf("    a lone op's round trip %.1f us; each further op in a batch of 64 adds %.2f us\n",
@@ -721,8 +722,8 @@ int cmd_bench_costs() {
            val[0][0], val[0][1], val[0][2], val[0][3], val[0][4], val[0][5], val[0][6], val[0][7], val[0][8],
            val[0][9], share, disk.read_ps, disk.write_ps, disk.read_codon_ps, disk.write_codon_ps);
     printf("    gpu_alu %.0f, gpu_mul %.0f, gpu_div %.0f, gpu_l1 %.0f, gpu_mem %.0f, gpu_vram %.0f, gpu_thr %.0f,\n"
-           "    gpu_start %.0f, gpu_share %.0f, npu_start %.0f, npu_share %.0f, npu_mac %.0f\n",
+           "    gpu_start %.0f, gpu_share %.0f, npu_start %.0f, npu_share %.0f, npu_mac %.0f, gpu_scan %.0f\n",
            dc.micro.alu, dc.micro.mul, dc.micro.div, dc.micro.l1, dc.micro.mem, dc.micro.vram, dc.gpu_thr, dc.gpu_start,
-           dc.gpu_share, dc.npu_start, dc.npu_share, dc.npu_mac);
+           dc.gpu_share, dc.npu_start, dc.npu_share, dc.npu_mac, dc.micro.scan);
     return 0;
 }

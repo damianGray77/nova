@@ -1523,8 +1523,16 @@ void Viewer::inspector(const UiInput& in, Canvas& c) {
         snprintf(buf, sizeof buf, "not a member of any lineage");
     c.text(det.x, dy, buf, kFontSmall, B.lineage ? lineage_color(B.lineage) : kDim, kAlignLeft, det.w);
     dy += sh2;
-    snprintf(buf, sizeof buf, "holds %u millicores, %u codons, %u GPU, %u NPU, %u disk; %u CPUs, %u warps; born on a %s",
-             B.units, B.mem, B.gpus, B.npus, B.disk, B.ncpu, B.warps, B.form == kFormGpu ? "GPU" : "CPU");
+    if (cur_.kinds) // Phase 9c: its cores by kind, and its threads
+        snprintf(buf, sizeof buf,
+                 "holds %.2f P-cores and %.2f E-cores, %u codons, %u GPU, %u NPU, %u disk; %u threads, %u warps; born on a "
+                 "%s",
+                 (B.units - B.eunits) / 1000.0, B.eunits / 1000.0, B.mem, B.gpus, B.npus, B.disk, B.ncpu, B.warps,
+                 B.form == kFormGpu ? "GPU" : "CPU");
+    else
+        snprintf(buf, sizeof buf,
+                 "holds %u millicores, %u codons, %u GPU, %u NPU, %u disk; %u CPUs, %u warps; born on a %s", B.units,
+                 B.mem, B.gpus, B.npus, B.disk, B.ncpu, B.warps, B.form == kFormGpu ? "GPU" : "CPU");
     c.text(det.x, dy, buf, kFontSmall, kText, kAlignLeft, det.w);
     dy += sh2 + c.px(2);
     // Phase 9: an action under way, by it or on it.
@@ -1562,9 +1570,12 @@ void Viewer::inspector(const UiInput& in, Canvas& c) {
         }
         dy += c.px(2);
     }
-    // CPUs: a compact table.
-    c.text(det.x, dy, "cpu   ip    rh    wh    ax    bx    cx    dx  sp errs state       executed", kFontMono, kDim,
-           kAlignLeft, det.w);
+    // CPUs: a compact table. Phase 9c: with threads or E millicores, each
+    // thread's preferred kind and its share of a core last tick (E: on E-cores).
+    c.text(det.x, dy,
+           cur_.kinds ? "cpu   ip    rh    wh    ax    bx    cx    dx  sp errs state       executed kind core   E"
+                      : "cpu   ip    rh    wh    ax    bx    cx    dx  sp errs state       executed",
+           kFontMono, kDim, kAlignLeft, det.w);
     dy += c.line_h(kFontMono);
     for (usize i = 0; i < cur_.cpus.size() && i < 6; ++i) {
         const CpuView& cv = cur_.cpus[i];
@@ -1572,6 +1583,11 @@ void Viewer::inspector(const UiInput& in, Canvas& c) {
         snprintf(buf, sizeof buf, "%3u %5u %5u %5u %5u %5u %5u %5u %3u %4u %-8s %10llu", static_cast<unsigned>(i),
                  cv.ip, cv.rh, cv.wh, cv.ax, cv.bx, cv.cx, cv.dx, cv.sp, cv.errs, state,
                  static_cast<unsigned long long>(cv.executed));
+        if (cur_.kinds) {
+            char k[40];
+            snprintf(k, sizeof k, "    %c %4.0f%% %3.0f%%", cv.kind ? 'E' : 'P', cv.share * 100.0, cv.eshare * 100.0);
+            strncat(buf, k, sizeof buf - strlen(buf) - 1);
+        }
         c.text(det.x, dy, buf, kFontMono, kText, kAlignLeft, det.w);
         dy += c.line_h(kFontMono);
     }

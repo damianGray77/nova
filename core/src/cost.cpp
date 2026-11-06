@@ -51,8 +51,9 @@ void recipes(CostTable* t) {
     // Phase 9b: a warp step on the GPU, by its instruction. A lane's add for
     // most; a multiply, a divide (emulated on a GPU: 22 adds); the stack in
     // the lane's nearest cache; the body's memory (a megabyte or so, in the
-    // GPU's L2) for COPY, READ and SENSE; a hash of adds for RAND. Searches
-    // aren't counted on a warp (each lane searches on its own).
+    // GPU's L2) for COPY, READ and SENSE; a hash of adds for RAND. A step's
+    // template searches come on top (Phase 9c): the slowest lane's places
+    // searched and template codons read, at gpu_scan each (warp_isa.inc).
     const u32 a = static_cast<u32>(t->gpu_alu), l1 = static_cast<u32>(t->gpu_l1),
               mem = static_cast<u32>(t->gpu_mem);
     for (u32 i = 0; i <= kOpCount; ++i)
@@ -110,11 +111,33 @@ const u64 kHomeV1Dev[] = {
     3370000000, // npu_start  (3.37 ms)
     10300000,   // npu_share  (10.3 us)
     2200,       // npu_mac    (0.45 G a second, through DirectML's float16 graphs)
+    32700,      // gpu_scan   (Phase 9c: a lane's search loop, a place, the same in two runs)
 };
 
-void put(TextBuf& out, const char* what, u32 ps, u32 alu) {
-    char line[96];
-    snprintf(line, sizeof line, "  %-18s %12u ps %14.1f adds\n", what, ps, alu ? static_cast<double>(ps) / alu : 0.0);
+const u32 kHomeV1E[] = {
+    // Phase 9c: the same rig's E-cores (`nova bench costs`, the means of two
+    // runs, 2026-11-06; an E-core of the 285K at about 4.6 GHz). alu .. call;
+    // share and the disk are the P-core's. Its bulk move is the one large gap
+    // (92 against 16, in both runs).
+    218,    // alu
+    655,    // mul
+    4425,   // div
+    872,    // load
+    109,    // store
+    4996,   // jump
+    437,    // scan
+    92,     // move
+    3489,   // draw
+    631000, // call (631 ns)
+};
+
+void put(TextBuf& out, const char* what, u32 ps, u32 alu, u32 eps) {
+    char line[112];
+    if (eps)
+        snprintf(line, sizeof line, "  %-18s %12u ps %14.1f adds %12u ps on an E-core\n", what, ps,
+                 alu ? static_cast<double>(ps) / alu : 0.0, eps);
+    else
+        snprintf(line, sizeof line, "  %-18s %12u ps %14.1f adds\n", what, ps, alu ? static_cast<double>(ps) / alu : 0.0);
     out.append(line);
 }
 
@@ -146,6 +169,19 @@ bool builtin_costs(Str name, CostTable* out) {
     return false;
 }
 
+bool builtin_costs_e(Str name, CostTable* out) {
+    if (!builtin_costs(name, out))
+        return false;
+    if (name.eq("home_v1")) {
+        u32* f = &out->alu;
+        static_assert(sizeof kHomeV1E / sizeof kHomeV1E[0] == 10, "home_v1's E-core: alu .. call");
+        for (u32 i = 0; i < 10; ++i)
+            f[i] = kHomeV1E[i];
+        recipes(out);
+    }
+    return true;
+}
+
 void describe_costs(const CostTable& t, TextBuf& out) {
     out.append("cost table ");
     out.append(t.name);
@@ -158,11 +194,16 @@ void describe_costs(const CostTable& t, TextBuf& out) {
     const char* const names[] = {"alu (an add)", "mul",        "div",       "load",           "store",
                                  "jump",         "scan",       "move",      "draw",           "call",
                                  "share",        "disk_read",  "disk_write", "disk_read_codon", "disk_write_codon"};
+    CostTable e;
+    if (!builtin_costs_e(Str(t.name), &e))
+        e = t;
     const u32* f = &t.alu;
+    const u32* fe = &e.alu;
     for (u32 i = 0; i < kCostCpuOps; ++i)
-        put(out, names[i], f[i], t.alu);
-    const char* const dnames[] = {"gpu_alu",   "gpu_mul",   "gpu_div",   "gpu_l1",    "gpu_mem",   "gpu_vram",
-                                  "gpu_thr",   "gpu_start", "gpu_share", "npu_start", "npu_share", "npu_mac"};
+        put(out, names[i], f[i], t.alu, i < 10 ? fe[i] : 0);
+    const char* const dnames[] = {"gpu_alu",   "gpu_mul",   "gpu_div",   "gpu_l1",    "gpu_mem",
+                                  "gpu_vram",  "gpu_thr",   "gpu_start", "gpu_share", "npu_start",
+                                  "npu_share", "npu_mac",   "gpu_scan"};
     const u64* d = &t.gpu_alu;
     for (u32 i = 0; i < kCostDevOps; ++i) {
         char line[96];
@@ -171,11 +212,11 @@ void describe_costs(const CostTable& t, TextBuf& out) {
         out.append(line);
     }
     out.append("\neach instruction's own part (searches, jumps, kernel calls, codons moved and the disk come on "
-               "top as it runs), and a warp step's time on the GPU:\n");
+               "top as it runs), on an E-core, and a warp step's time on the GPU:\n");
     for (u32 i = 0; i < kOpCount; ++i) {
-        char line[112];
-        snprintf(line, sizeof line, "  %-18s %12u ps %14.1f adds %12u ps on a GPU lane\n",
-                 op_name(static_cast<Op>(i)), t.op[i], t.alu ? static_cast<double>(t.op[i]) / t.alu : 0.0,
+        char line[144];
+        snprintf(line, sizeof line, "  %-18s %12u ps %14.1f adds %12u ps on an E-core %12u ps on a GPU lane\n",
+                 op_name(static_cast<Op>(i)), t.op[i], t.alu ? static_cast<double>(t.op[i]) / t.alu : 0.0, e.op[i],
                  t.gpu_op[i]);
         out.append(line);
     }

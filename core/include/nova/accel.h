@@ -40,6 +40,7 @@ struct GpuMicro {
     double alu, mul, div;  // an add, a multiply, a 32-bit divide
     double l1, mem, vram;  // a load: from 4 KB, 1 MB and 256 MB of video memory
     double ops_per_s;      // independent adds a second, every lane busy
+    double scan;           // a place searched (Phase 9c): a lane's search loop through 4 KB
 };
 bool gpu_microbench(u32 index, GpuMicro* out, TextBuf* err);
 

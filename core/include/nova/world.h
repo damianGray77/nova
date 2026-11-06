@@ -316,6 +316,8 @@ class World {
         u32 ticks; // in transit (Phase 4: corruption exposure); derived from the edge
         u32 disk;  // disk codons she claims on arrival (Phase 4)
         u32 form;  // kFormCpu or kFormGpu (Phase 8)
+        u32 emillicores; // her E millicores (Phase 9c; millicores is then P)
+        u32 kind;  // the kind of core her thread prefers (Phase 9c)
         u32 pad;
     };
 
@@ -411,9 +413,10 @@ class World {
     Array<u8> shut_;              // per edge: a bridge shut this tick
     Array<u8> port_down_;         // per edge: refuses departures (failed, shut, fallow end)
     bool ports_dirty_ = false;
-    Spread spreads_[6];           // spark, then res.memory, cpu, gpu, npu, disk
+    Spread spreads_[7];           // spark, then res.memory, cpu, gpu, npu, disk, ecpu (9c)
     Array<u32> share_mem_, share_cpu_, share_gpu_, share_npu_, share_disk_;
     Array<double> spark_w_;
+    Array<double> ecpu_w_;        // Phase 9c: each site's weight for its E millicores' share
     void read_land_params(Config& cfg);
     void read_spreads(Config& cfg);
     static bool resource_field(u32 f);
@@ -493,8 +496,16 @@ class World {
     u64 acc_batches_ = 0, acc_device_ops_ = 0, acc_npu_ops_ = 0, acc_reference_ops_ = 0, acc_verified_ = 0,
         acc_mismatches_ = 0;
     TextBuf acc_notes_;
-    Array<i32> acc_job_;  // per op in acc_ops_: its batch's ticket, or -1 (the reference)
-    Array<u32> acc_slot_; // per op: its place in that batch
+    Array<i32> acc_job_;  // per op in acc_ops_: its batch's ticket, -1 (the reference), or -2 (held, 9c)
+    Array<u32> acc_slot_; // per op: its place in that batch (held: where its codons start in acc_held_)
+    // Phase 9c: a batch comes home from its device at the barrier after it was
+    // sent, and its results wait here until due (a long latency holds no
+    // device slot). Not world state: the same results as the reference's.
+    Array<u8> acc_held_;
+    Array<u32> acc_held_scalar_; // per op
+    Array<u8> acc_held_flags_;   // per op: 1 checked against the reference, 2 ran on the NPU
+    void accel_bring_home(usize first); // every op before `first` still on a device
+    bool accel_collect(i32 job);        // waits for a batch (true: its results are good)
     Array<u32> acc_pick_; // scratch
     AccelJob acc_jobs_[2 * kAccelSlots];
     void accel_take_job(u32 job); // after a submit: the picked ops belong to batch `job`

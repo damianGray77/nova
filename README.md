@@ -17,7 +17,8 @@ adding a header to its allowlist is a dependency decision to discuss first.
 
 **Phase 9** charges every instruction in world time measured on the real
 machine (`cost.table = home_v1`; the default `classic` is everything as
-before):
+before), and (9c) gives bodies threads and two kinds of core, both off
+unless asked:
 
 - **One fixed table, measured once:** `nova bench costs` times this
   machine's own operations outside the simulation (an add, a divide, a load,
@@ -43,6 +44,18 @@ before):
   further op only its share. With warps doing that much more, the real GPU
   now runs `configs/gpu_world.cfg` twice as fast as the CPU (60 against 124
   ms a tick, the same world).
+- **Threads (`cpu.threads = true`, 9c):** a body's CPUs are threads, each on
+  one core (1,000 millicores) at a time, so a thread gets at most a core's
+  tick. Programs start threads with the GPU verb's BX 21 (a fork at a
+  template) and choose P or E cores with BX 22. Threads take turns in
+  `cpu.slices` (8) a tick, so they can hand data to one another within it.
+- **P and E cores (`cpu.e_share`, 9c):** that share of each node's millicores
+  are E: an instruction on one costs `home_v1`'s E-core column (about 15%
+  slower for adds, 60–70% for divides, searches and kernel calls) and makes
+  0.4 of the heat. Each thread gets a core of its preferred kind first, then
+  whatever is left of either kind, with no penalty for the wrong one. ALLOC
+  and RELEASE BX 5 take E millicores; DIVIDE, ENGULF and dispersal carry both
+  kinds; in a landscape the E share varies by site (`res.ecpu.*`).
 
 **Phase 8** runs programs on the GPU (`gpu.warps = true`; off, everything is
 as before):

@@ -7,19 +7,20 @@
 // --- constants (CST) ------------------------------------------------------------
 #define W_NONE 0xFFFFFFFFu
 #define WC_TABLE 0u       // 64 words: Op per codon
-#define WC_SENSE 64u      // 24 words: SENSE's selector, BX -> reading
-#define WC_HEAD 88u       // 2 words: SETH/GETH's selector, BX -> head (0 read, 1 write)
-#define WC_LANES 90u      // lanes per warp
-#define WC_STACK 91u      // stack depth
-#define WC_SEARCH 92u     // template search limit, each way
-#define WC_TEMPLATE 93u   // longest template
-#define WC_HALT 94u       // consecutive errors that halt a lane
-#define WC_SENSE_N 95u    // SENSE's readings
-#define WC_STEP_COST 96u  // work per step
-#define WC_LANE_COST 97u  // work per lane in a step
-#define WC_OPTIME 98u     // 95 words (Phase 9b): a step's time by its Op, then for a lane that
+#define WC_SENSE 64u      // 28 words: SENSE's selector, BX -> reading
+#define WC_HEAD 92u       // 2 words: SETH/GETH's selector, BX -> head (0 read, 1 write)
+#define WC_LANES 94u      // lanes per warp
+#define WC_STACK 95u      // stack depth
+#define WC_SEARCH 96u     // template search limit, each way
+#define WC_TEMPLATE 97u   // longest template
+#define WC_HALT 98u       // consecutive errors that halt a lane
+#define WC_SENSE_N 99u    // SENSE's readings
+#define WC_STEP_COST 100u // work per step
+#define WC_LANE_COST 101u // work per lane in a step
+#define WC_OPTIME 102u    // 95 words (Phase 9b): a step's time by its Op, then for a lane that
                           // can't run the code (all 0: no clock)
-#define WC_COUNT 193u
+#define WC_SCAN 197u      // a place a lane's template search looks at (Phase 9c; 0: free)
+#define WC_COUNT 198u
 
 // --- a body's record in the image (offsets from the record) -------------------
 #define WB_NBLK 0u        // blocks
@@ -34,15 +35,15 @@
 #define WB_STAMP 9u       // stamp word = codon word + this (0: no stamps)
 #define WB_NWARP 10u      // warps to run
 #define WB_SENSE_OK 11u   // bit r: SENSE reading r is available
-#define WB_SENSE 12u      // 24 words: the readings, taken before the GPU phase
-#define WB_OUT 36u        // outputs (WO_*)
+#define WB_SENSE 12u      // 28 words: the readings, taken before the GPU phase
+#define WB_OUT 40u        // outputs (WO_*)
 #define WO_COPYERR 0u
 #define WO_FLAWS 1u
 #define WO_GARBLED 2u
 #define WO_HALTS 3u
 #define WO_WRITES 4u
-#define WB_SORT 41u       // where the blocks' sorted index starts (0: none, look them up in order)
-#define WB_WARPS 42u      // per warp, WW_SIZE words
+#define WB_SORT 45u       // where the blocks' sorted index starts (0: none, look them up in order)
+#define WB_WARPS 46u      // per warp, WW_SIZE words
 #define WW_LANE0 0u       // its first lane in LANES
 #define WW_QUOTA 1u       // work it may do
 #define WW_INDEX 2u       // its place in the body's list (its key)

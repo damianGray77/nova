@@ -55,6 +55,7 @@ enum ColorBy : u32 {
     kColorVolatility,
     kColorSignals,    // signal activity
     kColorLanes,      // GPU lanes running (Phase 8 warps)
+    kColorEcores,     // E millicores' share of the node's (Phase 9c)
     kColorCount
 };
 const char* color_by_name(u32 c);
@@ -82,6 +83,7 @@ struct NodeView {
     u32 mass;    // its landmass (a landscape, Phase 7; 0 otherwise)
     u32 lanes;   // GPU lanes running: not halted, in live warps (Phase 8)
     u32 gpu_bodies; // bodies born on a GPU
+    u32 emillicores; // of its millicores, E (Phase 9c)
 };
 
 // A landmass with nodes on it (Phase 7): where to label it, and how many.
@@ -122,6 +124,7 @@ struct BodyRow {
     // doing and the ticks left; what is acting on it and the ticks left.
     u32 doing_op, doing_left;
     u32 threat_op, threat_left;
+    u32 eunits; // of its millicores, E (Phase 9c)
 };
 
 // A lane of the selected body's warps (Phase 8).
@@ -140,6 +143,10 @@ struct CpuView {
     u64 executed;
     u32 err, errs, halted, yielded;
     u32 result, pending; // async accelerator slot and ops pending (Phase 5)
+    // Phase 9c: the kind of core its thread prefers, and its share of a core
+    // last tick, in all and on E millicores (0-1; threads or E millicores only)
+    u32 kind;
+    float share, eshare;
 };
 
 // A world or genebank event, parsed from its text.
@@ -194,6 +201,7 @@ struct ViewFrame {
     // the run
     u64 tick = 0, instructions = 0, hash = 0;
     bool hashed = false, procedural = false, archive = false;
+    bool kinds = false; // Phase 9c: threads or E millicores (the inspector shows kinds and shares)
     u32 nodes = 0;
     u64 detect_tick = 0; // first replicator's tick + 1, 0 = none yet
     // A landscape (Phase 7), in the first frame only (the viewer keeps it):

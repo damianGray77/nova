@@ -197,7 +197,7 @@ void test_stats_header() {
                          "lineages,top_lineage,genotypes_in_top,colonised,links_down,disk_held,live_nodes,"
                          "warp_steps,lane_instr,warp_host,launches,gpu_births,warps,gpu_bodies,"
                          "actions_started,actions_landed,actions_failed,actions_defended,"
-                         "compress,ambient\n";
+                         "threads_started,e_work,e_held,compress,ambient\n";
     CHECK(bytes.size() > strlen(header) && memcmp(bytes.data(), header, strlen(header)) == 0);
     remove(path);
 }

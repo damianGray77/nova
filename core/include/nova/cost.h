@@ -52,18 +52,23 @@ struct CostTable {
     u64 gpu_start, gpu_share;      // a lone GPU op's round trip; what each further op in a batch adds
     u64 npu_start, npu_share;      // the same on the NPU
     u64 npu_mac;                   // a multiply-add, the whole NPU
+    u64 gpu_scan;                  // a place a GPU lane's template search looks at (Phase 9c)
     // A warp step's time by its instruction, on the GPU (the last: a lane
     // that can't run the code); classic: 0.
     u32 gpu_op[kOpCount + 1];
 };
 inline constexpr u32 kCostCpuOps = 15; // alu .. disk_write_codon
-inline constexpr u32 kCostDevOps = 12; // gpu_alu .. npu_mac
+inline constexpr u32 kCostDevOps = 13; // gpu_alu .. gpu_scan
 
 // Built-in tables by name ("classic", "home_v1"); false for an unknown name.
 bool builtin_costs(Str name, CostTable* out);
+// Phase 9c: the same table on an E-core (design.md 6.15): its CPU operations
+// (alu .. call) as an E-core runs them; the devices, the disk and a cache
+// line between cores as on the P-core. Classic: the classic table.
+bool builtin_costs_e(Str name, CostTable* out);
 
 // For `nova costs`: the table, each operation and each instruction's own part
-// in picoseconds and in adds.
+// in picoseconds and in adds, on a P-core and an E-core.
 void describe_costs(const CostTable& t, TextBuf& out);
 
 } // namespace nova

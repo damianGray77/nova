@@ -35,6 +35,9 @@ struct Exec {
     const Action* resolving = nullptr;
     bool deferred = false;
     u32 wslot = kNone; // Phase 9b: the warp, for its host instruction
+    // Phase 9c: the costs of the kind of core it runs on (nullptr: a P-core's, the table itself).
+    const CostTable* ct = nullptr;
+    const CostTable& costs() const { return ct ? *ct : p.cost; }
     // Whether an instruction starts an action rather than happening at once.
     bool acts() const { return p.cost.timed && !resolving && (warp ? wslot != kNone : ci != kNone); }
     // Who acts: a CPU's slot, or a warp's (Phase 9b).
@@ -111,7 +114,7 @@ struct Exec {
             bits[n++] = op == Op::nop1;
             a = next_ip(a);
         }
-        t_ps += static_cast<u64>(n) * p.cost.load; // Phase 9: the template's codons, read
+        t_ps += static_cast<u64>(n) * costs().load; // Phase 9: the template's codons, read
         return n;
     }
 
@@ -160,7 +163,7 @@ struct Exec {
                 if (st + n <= size || p.open_membrane) {
                     ++seen;
                     if (complement_at(static_cast<u32>(st), bits, n)) {
-                        t_ps += seen * p.cost.scan;
+                        t_ps += seen * costs().scan;
                         return next_addr(static_cast<u32>((st + n - 1) % size));
                     }
                 }
@@ -172,13 +175,13 @@ struct Exec {
                 if (st >= 0) {
                     ++seen;
                     if (complement_at(static_cast<u32>(st), bits, n)) {
-                        t_ps += seen * p.cost.scan;
+                        t_ps += seen * costs().scan;
                         return next_addr(static_cast<u32>((st + n - 1) % size));
                     }
                 }
             }
         }
-        t_ps += seen * p.cost.scan;
+        t_ps += seen * costs().scan;
         return kNone;
     }
 
@@ -195,7 +198,7 @@ struct Exec {
         u32 to = search(ip, bits, n, dir);
         *next = to == kNone ? after : to;
         if (to != kNone)
-            t_ps += p.cost.jump; // Phase 9: a jump taken
+            t_ps += costs().jump; // Phase 9: a jump taken
         return to != kNone;
     }
 
@@ -310,7 +313,7 @@ struct Exec {
         u32 k = s.new_block(at, len, c.body);
         s.bodies_[c.body].latest = k;
         c.wh = at;
-        t_ps += static_cast<u64>(len) * p.cost.move; // Phase 9: its codons claimed
+        t_ps += static_cast<u64>(len) * costs().move; // Phase 9: its codons claimed
         return at;
     }
 
@@ -339,10 +342,10 @@ struct Exec {
     bool divide(u32 share) {
         u32 parent = c.body;
         u32 k = s.bodies_[parent].latest;
-        t_ps += p.cost.call; // Phase 9: a world change
+        t_ps += costs().call; // Phase 9: a world change
         if (k == kNone)
             return false;
-        t_ps += static_cast<u64>(s.blocks_[k].len) * p.cost.move; // her codons handed over
+        t_ps += static_cast<u64>(s.blocks_[k].len) * costs().move; // her codons handed over
         // The detector compares the daughter with the block this CPU runs in
         // (read-only; see lineage.h).
         if (s.obs_)
@@ -356,10 +359,15 @@ struct Exec {
         s.blocks_[k].body = d;
         D.blocks = k;
         D.mem = s.blocks_[k].owned;
-        u32 give = static_cast<u32>(static_cast<u64>(P.units) * share / 64);
+        // Phase 9c: a share of each kind of millicore (all of them P without E millicores).
+        const u32 pe = s.e_units(parent);
+        u32 give = static_cast<u32>(static_cast<u64>(P.units - pe) * share / 64);
+        const u32 egive = static_cast<u32>(static_cast<u64>(pe) * share / 64);
         if (!p.warps)
             s.new_cpu(d, s.blocks_[k].start);
-        s.move_units(parent, d, give);
+        s.move_kind(parent, d, give, false);
+        if (egive)
+            s.move_kind(parent, d, egive, true);
         if (p.gpus) // GPU and NPU units too: every non-memory holding (Phase 2, 2b)
             s.gpu_.move(parent, d, static_cast<u32>(static_cast<u64>(s.gpu_.count[parent]) * share / 64));
         if (p.npus)
@@ -370,6 +378,9 @@ struct Exec {
         // warp), once she holds her shares.
         if (p.warps)
             s.birth(d, s.blocks_[k].start, warp ? kFormGpu : kFormCpu);
+        // Phase 9c: her thread prefers the kind of core the thread that divided her does.
+        if (s.kinds_on() && s.bodies_[d].cpus != kNone)
+            s.cpu_kind_[s.bodies_[d].cpus] = warp ? kKindP : s.cpu_kind(ci);
         forget(k);
         ++s.tally_.births;
         return true;
@@ -387,10 +398,10 @@ struct Exec {
             return false;
         const u32 parent = c.body;
         const u32 k = s.bodies_[parent].latest;
-        t_ps += p.cost.call; // Phase 9: a world change
+        t_ps += costs().call; // Phase 9: a world change
         if (k == kNone)
             return false;
-        t_ps += static_cast<u64>(s.blocks_[k].len) * p.cost.move; // her codons, packed as cargo
+        t_ps += static_cast<u64>(s.blocks_[k].len) * costs().move; // her codons, packed as cargo
         const u32 nbr = dest - 1;
         if (P.down && P.down[P.edges[nbr]]) // a failed link (Phase 4)
             return false;
@@ -413,8 +424,13 @@ struct Exec {
         d.codon_off = static_cast<u32>(s.departure_codons_.size());
         s.departure_codons_.append(s.mem_.data() + B.start, B.len);
         Body& Pb = s.bodies_[parent];
-        d.millicores = static_cast<u32>(static_cast<u64>(Pb.units) * share / 64);
-        s.release_units(parent, d.millicores);
+        const u32 pe = s.e_units(parent); // Phase 9c: each kind's share (P only without E millicores)
+        d.millicores = static_cast<u32>(static_cast<u64>(Pb.units - pe) * share / 64);
+        d.emillicores = static_cast<u32>(static_cast<u64>(pe) * share / 64);
+        s.release_kind(parent, d.millicores, false);
+        if (d.emillicores)
+            s.release_kind(parent, d.emillicores, true);
+        d.kind = warp ? kKindP : s.cpu_kind(ci); // her thread prefers her divider's kind
         if (p.gpus) {
             d.gpus = static_cast<u32>(static_cast<u64>(s.gpu_.count[parent]) * share / 64);
             s.gpu_.release(parent, d.gpus);
@@ -503,7 +519,8 @@ struct Exec {
     }
 
     // ALLOC and RELEASE share one selector map (BX -> resource, D6): 0 memory,
-    // 1 CPU, 2 GPU, 3 disk, and 4 NPU when the node has one.
+    // 1 CPU, 2 GPU, 3 disk, 4 NPU when the node has one, and 5 E millicores
+    // with them (Phase 9c; 1 is then P millicores).
     u32 resource() const { return c.bx < p.sel.res_n ? p.sel.res[c.bx] : 99u; }
 
     // The unit ledger for resource r (2 GPU, 4 NPU), or nullptr if absent.
@@ -518,12 +535,16 @@ struct Exec {
     bool alloc() {
         i32 amount = static_cast<i32>(c.cx);
         const u32 r = resource();
-        t_ps += p.cost.call; // Phase 9: a world change (memory's codons: alloc_memory)
+        t_ps += costs().call; // Phase 9: a world change (memory's codons: alloc_memory)
         switch (r) {
         case 0: // memory
             return amount <= 0 || alloc_memory(static_cast<u32>(amount)) != kNone;
         case 1: // CPU, capped by what the pool holds
             return amount <= 0 || s.claim_units(c.body, static_cast<u32>(amount)) > 0;
+        case 5: // E millicores (Phase 9c), the same way from theirs
+            if (!s.ek())
+                return false;
+            return amount <= 0 || s.claim_e_units(c.body, static_cast<u32>(amount)) > 0;
         case 2:   // GPU units (Phase 2) and
         case 4: { // NPU units (Phase 2b), capped by their pool; none: fails
             UnitLedger* L = units_of(r);
@@ -549,7 +570,7 @@ struct Exec {
 
     bool release() {
         i32 amount = static_cast<i32>(c.cx);
-        t_ps += p.cost.call; // Phase 9: a world change
+        t_ps += costs().call; // Phase 9: a world change
         switch (resource()) {
         case 0: { // memory: the end of the latest block
             u32 k = s.bodies_[c.body].latest;
@@ -559,7 +580,7 @@ struct Exec {
                 return true;
             Block& bl = s.blocks_[k];
             t_ps += static_cast<u64>(amount < static_cast<i32>(bl.len) ? amount : static_cast<i32>(bl.len)) *
-                    p.cost.move; // its codons given up
+                    costs().move; // its codons given up
             if (static_cast<u32>(amount) >= bl.len) {
                 s.stamp_block(k, genome()); // left behind as my remnants (Phase 4)
                 s.bodies_[c.body].mem -= bl.owned;
@@ -588,11 +609,20 @@ struct Exec {
         case 1: { // CPU units, oldest first; they keep their heat
             if (amount <= 0)
                 return true;
-            if (s.bodies_[c.body].units == 0)
+            if (s.bodies_[c.body].units - s.e_units(c.body) == 0)
                 return false;
-            s.release_units(c.body, static_cast<u32>(amount));
+            s.release_kind(c.body, static_cast<u32>(amount), false);
             return true;
         }
+        case 5: // E millicores (Phase 9c), the same way
+            if (!s.ek())
+                return false;
+            if (amount <= 0)
+                return true;
+            if (s.e_units(c.body) == 0)
+                return false;
+            s.release_kind(c.body, static_cast<u32>(amount), true);
+            return true;
         case 2:   // GPU and
         case 4: { // NPU units, the same way (none: fails)
             UnitLedger* L = units_of(resource());
@@ -718,7 +748,7 @@ struct Exec {
                 best_dist = dist;
             }
         }
-        t_ps += seen * p.cost.scan;
+        t_ps += seen * costs().scan;
         *pmatch = best_match;
         *plen = best_len;
         return best;
@@ -769,6 +799,10 @@ struct Exec {
             }
             E.unit_tail = P.unit_tail;
             E.units += P.units;
+            if (s.ek()) { // Phase 9c: E millicores among them
+                s.eunits_[eater] += s.eunits_[prey];
+                s.eunits_[prey] = 0;
+            }
         }
         if (p.gpus) // and every GPU and NPU unit, with its heat
             s.gpu_.move(prey, eater, s.gpu_.count[prey]);
@@ -833,7 +867,7 @@ struct Exec {
             ++s.tally_.engulf_tries;
         else
             ++s.tally_.inject_tries;
-        t_ps += p.cost.call; // Phase 9 (a warp's host instruction): a world change
+        t_ps += costs().call; // Phase 9 (a warp's host instruction): a world change
         u32 cost = 1 + p.contact_base;
         u32 target = contest(ip, bits, n, engulf || !p.inject_key);
         if (target == kNone) {
@@ -856,7 +890,7 @@ struct Exec {
         else
             moved = inject_into(target);
         cost += static_cast<u32>(p.contact_per_codon * moved);
-        t_ps += static_cast<u64>(moved) * p.cost.move;
+        t_ps += static_cast<u64>(moved) * costs().move;
         *ok = true;
         return cost;
     }
@@ -888,7 +922,7 @@ struct Exec {
             ++s.tally_.engulf_tries;
         else
             ++s.tally_.inject_tries;
-        t_ps += p.cost.call;
+        t_ps += costs().call;
         const bool blind = engulf || !p.inject_key;
         u32 match = 0, len = 0;
         const u32 target = contest_pick(ip, bits, n, blind, &match, &len);
@@ -963,7 +997,7 @@ struct Exec {
             engulf_body(t);
         else
             moved = inject_into(t);
-        t_ps += static_cast<u64>(moved) * p.cost.move;
+        t_ps += static_cast<u64>(moved) * costs().move;
         *ok = true;
         return 1;
     }
@@ -973,12 +1007,12 @@ struct Exec {
     // A DISK op's picoseconds: a kernel call, then a disk access and its
     // codons in sequence (just the call when it fails on its arguments).
     u64 disk_time() const {
-        const u64 t = p.cost.call;
+        const u64 t = costs().call;
         if (!p.disk || c.bx >= 3 || static_cast<i32>(c.cx) <= 0)
             return t;
         const u64 n = c.cx;
-        return p.sel.disk[c.bx] == 1 ? t + p.cost.disk_write + n * p.cost.disk_write_codon
-                                     : t + p.cost.disk_read + n * p.cost.disk_read_codon;
+        return p.sel.disk[c.bx] == 1 ? t + costs().disk_write + n * costs().disk_write_codon
+                                     : t + costs().disk_read + n * costs().disk_read_codon;
     }
 
     // An instruction longer than a tick of a whole core's time becomes an
@@ -1034,10 +1068,10 @@ struct Exec {
     bool device_time(bool npu, u32 op) {
         Array<u64>& batch = npu ? s.npu_batch_ : s.gpu_batch_;
         const bool open = s.batch_open(batch, c.body);
-        const u64 start = npu ? p.cost.npu_start : p.cost.gpu_start;
-        const u64 share = npu ? p.cost.npu_share : p.cost.gpu_share;
+        const u64 start = npu ? costs().npu_start : costs().gpu_start;
+        const u64 share = npu ? costs().npu_share : costs().gpu_share;
         if (p.accel_async) {
-            t_ps += (open ? 0 : p.cost.call) + share;
+            t_ps += (open ? 0 : costs().call) + share;
             return false;
         }
         u64 t = open ? share : start;
@@ -1047,10 +1081,10 @@ struct Exec {
             if (npu) {
                 const u64 macs = op == kMatvec ? k * k : (op == kMatmul ? k * k * k : k);
                 const u64 units = s.npu_count(c.body) ? s.npu_count(c.body) : 1;
-                t += macs * p.cost.npu_mac * 1000 / units;
+                t += macs * costs().npu_mac * 1000 / units;
             } else {
                 const u64 units = s.gpu_count(c.body) ? s.gpu_count(c.body) : 1;
-                t += k * p.cost.gpu_thr / units;
+                t += k * costs().gpu_thr / units;
             }
         }
         if (acts() && static_cast<double>(t) > p.tick_units) {
@@ -1078,14 +1112,54 @@ struct Exec {
         const u32 w = s.new_warp(c.body, to, &c);
         *cost = max_of<u32>(1, p.gpu_setup);
         if (p.cost.timed) { // Phase 9b: a kernel launch is a call; the warp starts after the GPU's start-up
-            t_ps += p.cost.call;
-            const double ticks = static_cast<double>(p.cost.gpu_start) / p.tick_units;
+            t_ps += costs().call;
+            const double ticks = static_cast<double>(costs().gpu_start) / p.tick_units;
             u64 whole = static_cast<u64>(ticks);
             if (static_cast<double>(whole) < ticks)
                 ++whole;
             s.wuntil_[w] = s.tick_ + whole;
         }
         ++s.tally_.launches;
+        return true;
+    }
+
+    // --- threads (Phase 9c, design.md 6.15) ----------------------------------
+
+    // The GPU verb's BX 21 starts a thread at the code after the template
+    // that follows it, found as JMP finds one, with this thread's registers
+    // and heads (a fork with its arguments) and the kind of core it prefers.
+    // It runs from the next tick. Fails without a template or a match, or
+    // when the body holds cpu.max_threads. A kernel call.
+    bool spawn(u32 ip, u32* next) {
+        u8 bits[64];
+        const u32 n = read_template(next_ip(ip), bits);
+        *next = skip(ip, n);
+        t_ps += costs().call;
+        if (n == 0)
+            return false;
+        const u32 to = search(ip, bits, n, 0);
+        if (to == kNone || s.bodies_[c.body].ncpu >= p.max_threads)
+            return false;
+        const u8 kind = warp ? kKindP : s.cpu_kind(ci);
+        const u32 t = s.new_cpu(c.body, to);
+        Cpu& T = s.cpus_[t];
+        T.ax = c.ax;
+        T.bx = c.bx;
+        T.cx = c.cx;
+        T.dx = c.dx;
+        T.rh = c.rh;
+        T.wh = c.wh;
+        s.cpu_kind_[t] = kind;
+        ++s.tally_.threads_started;
+        return true;
+    }
+
+    // BX 22: this thread prefers P cores (AX even) or E cores (AX odd). A
+    // warp isn't a thread on a core: it fails there.
+    bool prefer_kind() {
+        if (warp || ci == kNone)
+            return false;
+        s.cpu_kind_[ci] = (c.ax & 1u) ? kKindE : kKindP;
         return true;
     }
 
@@ -1229,7 +1303,7 @@ struct Exec {
         c.rh = rh;
         c.wh = wh;
         op.out_n = accel_out_codons(kind, op.n);
-        op.due = s.tick_ + p.accel_latency - 1;
+        op.due = s.tick_ + (accel_is_npu(kind) ? p.npu_latency : p.gpu_latency) - 1; // (9c: each device's own)
         op.serial = s.accel_serial_++;
         op.body = c.body;
         op.body_serial = s.bodies_[c.body].serial;
@@ -1559,7 +1633,7 @@ struct Exec {
             if (!own(ip)) { // not my code: private code can't be executed
                 fault();
                 c.ip = next_ip(ip);
-                return p.cost.timed ? p.cost.alu : 1;
+                return p.cost.timed ? costs().alu : 1;
             }
             c.block = s.owner_[ip];
         }
@@ -1574,7 +1648,7 @@ struct Exec {
         if (deferred) // Phase 9: it started an action; the CPU waits here, at it, until its end
             return 0;
         if (p.cost.timed) { // Phase 9: world time (the GPU verb adds its devices' own, 9b)
-            const u64 t = p.cost.op[static_cast<u32>(op)] + t_ps;
+            const u64 t = costs().op[static_cast<u32>(op)] + t_ps;
             cost = t > 0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<u32>(t);
         }
 
@@ -1679,7 +1753,7 @@ struct Exec {
             ok = to != kNone && push(ret);
             next = ok ? to : ret;
             if (ok)
-                t_ps += p.cost.jump;
+                t_ps += costs().jump;
             break;
         }
         case Op::ret: {
@@ -1687,7 +1761,7 @@ struct Exec {
             ok = pop(&v);
             if (ok) {
                 next = v % p.size;
-                t_ps += p.cost.jump;
+                t_ps += costs().jump;
             }
             break;
         }
@@ -1843,8 +1917,12 @@ struct Exec {
             }
             ok = disk_op(&cost);
             break;
-        case Op::gpu: // the accelerator verb: GPU ops, NPU ops (Phase 2, 2b), launch (Phase 8)
-            if (p.warps && c.bx == kLaunchOp)
+        case Op::gpu: // the accelerator verb: GPU ops, NPU ops (Phase 2, 2b), launch (Phase 8), threads (9c)
+            if (p.threads && c.bx == kThreadOp)
+                ok = spawn(ip, &next);
+            else if (p.threads && c.bx == kKindOp)
+                ok = prefer_kind();
+            else if (p.warps && c.bx == kLaunchOp)
                 ok = launch(ip, &next, &cost);
             else
                 ok = accel(&cost);
@@ -1926,7 +2004,7 @@ struct Exec {
             ok = to != kNone && push(ret);
             next = ok ? to : ret;
             if (ok)
-                t_ps += p.cost.jump;
+                t_ps += costs().jump;
             break;
         }
         case Op::t_ret: {
@@ -1934,7 +2012,7 @@ struct Exec {
             ok = pop(&v);
             if (ok) {
                 next = v % p.size;
-                t_ps += p.cost.jump;
+                t_ps += costs().jump;
             }
             break;
         }
@@ -1972,7 +2050,7 @@ struct Exec {
         }
         case Op::t_mal: { // CX codons; AX = their address
             i32 amount = static_cast<i32>(c.cx);
-            t_ps += p.cost.call; // Phase 9: a world change
+            t_ps += costs().call; // Phase 9: a world change
             u32 at = amount > 0 ? alloc_memory(static_cast<u32>(amount)) : kNone;
             ok = at != kNone;
             if (ok)
@@ -2050,8 +2128,10 @@ struct Exec {
     }
 };
 
-i64 Soup::run_cpu(u32 ci, i64 quota) {
+i64 Soup::run_cpu(u32 ci, i64 quota, u8 kind) {
     Exec e{*this, *p_, cpus_[ci], bodies_[cpus_[ci].body].err, ci};
+    if (kind == kKindE) // Phase 9c: on an E-core, at its costs
+        e.ct = &p_->ecost;
     i64 used = 0;
     // Phase 9: an action under way. Before its end the CPU waits out the tick
     // (its time is spent: it heats, as work does); at its end it lands or
@@ -2063,8 +2143,8 @@ i64 Soup::run_cpu(u32 ci, i64 quota) {
             const Action& a = actions_[ai];
             const bool gone = a.target != kNone &&
                               (!bodies_[a.target].alive || bodies_[a.target].serial != a.target_serial);
-            if (a.end > tick_ && !gone)
-                return quota;
+            if (a.end > tick_ && !gone) // contact is the CPU at work; a wait leaves it idle (9c)
+                return a.target == kNone ? 0 : quota;
             const Action act = a;
             for (usize j = ai; j + 1 < actions_.size(); ++j) // in start order, still
                 actions_[j] = actions_[j + 1];
@@ -2080,8 +2160,8 @@ i64 Soup::run_cpu(u32 ci, i64 quota) {
     }
     while (used < quota && !e.c.halted && !e.c.yielded && !e.deferred)
         used += e.step();
-    if (e.deferred && used < quota)
-        used = quota; // the rest of the tick goes on the wait
+    if (e.deferred && used < quota && actions_.back().target != kNone)
+        used = quota; // the rest of the tick goes on the contact; a wait is idle (9c)
     // ENGULF may have appended the prey's CPUs after this one: keep the link.
     u32 next = cpus_[ci].next;
     cpus_[ci] = e.c;
@@ -2195,6 +2275,30 @@ bool Soup::sense_reading(u32 b, u32 r, u32 ci, u32* v) const {
         }
         return true;
     }
+    case 24: { // Phase 9c: my threads still running
+        if (!kinds_on())
+            return false;
+        u32 n = 0;
+        for (u32 c = B.cpus; c != kNone; c = cpus_[c].next)
+            n += cpus_[c].halted ? 0 : 1;
+        *v = n;
+        return true;
+    }
+    case 25: // the kind of core this thread prefers (0 P, 1 E; a warp reads 0)
+        if (!kinds_on())
+            return false;
+        *v = ci == kNone ? kKindP : cpu_kind(ci);
+        return true;
+    case 26: // my E millicores (9c-b2; 0 where there are none)
+        if (!kinds_on())
+            return false;
+        *v = e_units(b);
+        return true;
+    case 27: // free E millicores on the node
+        if (!kinds_on())
+            return false;
+        *v = static_cast<u32>(epool_.size());
+        return true;
     default:
         return false;
     }

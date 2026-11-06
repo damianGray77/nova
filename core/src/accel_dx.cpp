@@ -1441,6 +1441,7 @@ const char* const kWarpHead = R"(
 #define LANES_STORE(l0) lane_store((l0) + g_tid, L);
 #define GS_MIN(x, v) InterlockedMin(x, v)
 #define GS_ADD(x, v) InterlockedAdd(x, v)
+#define GS_MAX(x, v) InterlockedMax(x, v)
 #define W_LOOP [loop]
 #define LANE_T LaneR
 #define WARP_LANE0(wr, wi) IMG((wr) + WW_LANE0)
@@ -1467,6 +1468,7 @@ static uint g_lbase;
 static uint g_tid;
 static uint g_rec;
 static uint g_lidx; // this thread's lane in g_lanes
+static uint g_seen; // this lane's template codons read and places searched this step (Phase 9c)
 #if W_LDS
 groupshared uint gs_img[W_LDS];
 groupshared uint gs_cst[256];
@@ -1509,7 +1511,7 @@ groupshared uint gs_min;
 groupshared uint gs_count;
 groupshared uint gs_wa[W_LANES];
 groupshared uint gs_wv[W_LANES];
-groupshared uint gs_ctl[8];
+groupshared uint gs_ctl[12];
 )";
 
 const char* const kWarpMain = R"(
@@ -3146,7 +3148,9 @@ namespace {
 // One source, a kernel per MODE: 0 add, 1 multiply, 2 divide (dependent
 // chains, one per lane), 3 a load (each lane chasing its own pointer chain
 // through `chase` from start + lane), 4 independent adds (four chains a lane,
-// for throughput). Every result is written, so nothing is optimised away.
+// for throughput), 5 a search (each lane looking through 4 KB for a value
+// that isn't there, place by place, as a template search does). Every
+// result is written, so nothing is optimised away.
 const char* const kMicroHlsl =
     "RWStructuredBuffer<uint> chase : register(u0);\n"
     "RWStructuredBuffer<uint> outb : register(u1);\n"
@@ -3169,6 +3173,10 @@ const char* const kMicroHlsl =
     "    x = chase[start + tid.x];\n"
     "    for (i = 0u; i < iters; i++) { x = chase[x]; x = chase[x]; x = chase[x]; x = chase[x];\n"
     "                                   x = chase[x]; x = chase[x]; x = chase[x]; x = chase[x]; }\n"
+    "#elif MODE == 5\n"
+    "    uint at = start + tid.x;\n"
+    "    for (i = 0u; i < iters; i++) { if (chase[(at + i) & 1023u] == 0xFFFFFFFFu) break; }\n"
+    "    x = i;\n"
     "#else\n"
     "    uint a = x; uint b2 = x + 1u; uint c = x + 2u; uint e = x + 3u; uint y = seed | 1u; uint z = seed >> 3;\n"
     "    for (i = 0u; i < iters; i++) { a += y; b2 += y; c += y; e += y; a ^= z; b2 ^= z; c ^= z; e ^= z;\n"
@@ -3216,7 +3224,7 @@ bool gpu_microbench(u32 index, GpuMicro* out, TextBuf* r) {
     bool ok = false;
     ID3DBlob *sig = nullptr, *err = nullptr;
     ID3D12RootSignature* root = nullptr;
-    ID3D12PipelineState* pso[5] = {};
+    ID3D12PipelineState* pso[6] = {};
     ID3D12Resource *chase = nullptr, *outb = nullptr, *up = nullptr, *qrb = nullptr;
     ID3D12QueryHeap* qh = nullptr;
     do {
@@ -3243,7 +3251,7 @@ bool gpu_microbench(u32 index, GpuMicro* out, TextBuf* r) {
             break;
         }
         bool built = true;
-        for (u32 m = 0; m < 5 && built; ++m) {
+        for (u32 m = 0; m < 6 && built; ++m) {
             char mode[2] = {static_cast<char>('0' + m), 0};
             const D3D_SHADER_MACRO defs[] = {{"MODE", mode}, {nullptr, nullptr}};
             ID3DBlob *cs = nullptr, *msg = nullptr;
@@ -3342,12 +3350,13 @@ bool gpu_microbench(u32 index, GpuMicro* out, TextBuf* r) {
             *ps = v[2] * 1e12 / (static_cast<double>(iters) * ops_per_iter);
             return true;
         };
-        double alu = 0, mul = 0, div = 0, l1 = 0, mem = 0, vram = 0, thr = 0;
+        double alu = 0, mul = 0, div = 0, l1 = 0, mem = 0, vram = 0, thr = 0, scan = 0;
         const u32 tgroups = 8192;
         if (!measure(0, 1, 0, 8, &alu) || !measure(1, 1, 0, 8, &mul) || !measure(2, 1, 0, 4, &div) ||
             !measure(3, 1, 0, 8, &l1) || !measure(3, 1, kL1, 8, &mem) || !measure(3, 1, kL1 + kMem, 8, &vram) ||
-            !measure(4, tgroups, 0, 16, &thr))
+            !measure(4, tgroups, 0, 16, &thr) || !measure(5, 1, 0, 1, &scan))
             break;
+        out->scan = scan;
         out->alu = alu;
         out->mul = mul > alu ? mul - alu : mul; // less the xor between
         out->div = div > alu ? div - alu : div; // less the add between

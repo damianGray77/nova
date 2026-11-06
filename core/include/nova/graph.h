@@ -64,6 +64,8 @@ enum NoiseField : u32 {
     kFieldTerrain, // land and water
     kFieldWarpX,   // the coastline's wander
     kFieldWarpY,
+    // Phase 9c
+    kFieldEcpu,    // E millicores' share of a site's (landscapes: res.ecpu)
     kFieldCount
 };
 
