@@ -198,6 +198,13 @@ class World {
     // demo.* or the soup keys (soup.h). On a bad value returns false; the reason
     // is in cfg.value_error(). Keys read here are marked used.
     bool init(Config& cfg);
+    // The setup page's check (docs/config-plan.md C4, nova/check.h): reads and
+    // checks every setting exactly as init() does -- the same reads, the same
+    // cross-checks -- but opens no device, creates no disk folder and builds
+    // nothing (no graph, no soups). False on a bad value, the reason in
+    // cfg.value_error(). The world is left unusable: only for reading back
+    // what init read (landscape(), land_params(), seed(), ...).
+    bool check_settings(Config& cfg);
 
     // One tick: parallel update over all nodes, barrier, serial delivery.
     void step(ThreadPool& pool);
@@ -217,7 +224,9 @@ class World {
     // spark.min_len, spark.max_len, and from Phase 6 cpu.wear, heat.ambient
     // and, with dispersal, edge.corruption in the soup model) may change
     // between ticks; structural keys may not. check_knob validates without
-    // applying.
+    // applying. Since docs/config-plan.md C3 no front end issues knob changes
+    // (a run's settings are fixed from its start: Run::lock_knobs); these stay
+    // so that replay logs with knob records still replay exactly.
     KnobResult check_knob(Str key, Str value) const;
     KnobResult set_knob(Str key, Str value);
     // The soup model's live knobs, for a knobs panel: their keys and current
@@ -600,6 +609,7 @@ class World {
     Lineages* lineages_ = nullptr; // nodes_ detectors, or nullptr
 
     StepProfile* prof_ = nullptr;
+    bool check_only_ = false; // check_settings(): read and check, build nothing (config-plan C4)
     TextBuf disk_folder_; // Phase 7b: this run's disk files, or empty (RAM)
     // Phase 7: a landscape (generated once; the ports derive from it each tick)
     bool landscape_ = false, spatial_ = false;

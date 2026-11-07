@@ -191,9 +191,9 @@ with GDI (Windows' own `user32` and `gdi32`, nothing else).
 - **Live:** `nova view <config>` runs the world and shows it, writing the
   outputs the config names (`--no-output` turns them off). A sim thread steps
   the run; the window reads view frames between ticks. Pause, step, a speed
-  limit, snapshot now and stop. Knobs typed in the toolbar (`spark.*`, and new
-  in Phase 6 `cpu.wear`, `heat.ambient`, `edge.corruption`) are applied between
-  ticks, logged and replayed: watching changes nothing.
+  limit, snapshot now and stop: watching changes nothing. (Phase 6's live
+  knobs in the toolbar are gone: since the setup page, a run's settings are
+  fixed from its start. Replay logs with knob records still replay.)
 - **Panels:** a map (colour by bodies, lineage territories, health, any node
   property...; cargo in flight, failed links, fallow sites, collapse and
   recovery rings), four charts of any `stats.csv` column, an inspector (a
@@ -365,8 +365,8 @@ its gate hash and replay logs are unchanged.
 
 | Path | Role |
 |------|------|
-| `core/` | `nova_core` static library, namespace `nova`. Containers (`Array`, `HashMap`, `Str`, `TextBuf`), counter-based RNG, hashing, `key = value` config, Win32 thread pool, world + tick loop, run driver, snapshots, CSV stats, replay log. Phase 1a: `isa` (codon tables), `soup` (a node's organisms, ledger, heat, hazards, sparks, death sweep), `interp.cpp` (the instructions). Phase 1b: `lineage` (the replicator detector), `genebank`, `compress`. Phase 2 and 2b: the GPU and NPU (`UnitLedger` in `soup`, the accelerator verb in `interp.cpp`). Phase 3: `graph` (procedural generation and noise), per-node parameters, transit and delivery in `world`. Phase 4: the disk (`DiskLedger`), volatility, stamps and salvage, wear and ruins in `soup`; corruption, link failures, signal propagation, collapse, recovery and graph rebuilds in `world`. Phase 5: `accelop.h` and `accel_ref.cpp` (async ops and the CPU reference), `accel.h` and `accel_dx.cpp` (device discovery, probes, the Direct3D 12 GPU backend and the DirectML NPU backend), the ops in flight and the devices in `world`. Phase 6: `view` (view frames, the live session, a finished run's files, the phylogeny layout), `png` (the PNG writer), the shared stats row in `stats`, the new live knobs in `world`, the genebank log and numbered snapshots in `run`. Phase 7: `landscape` (land, nodes, the triangulation, paths, bridges, distributions), the landscape mode, bridge schedules and fixed-path lifecycle in `world`, the step profile; `budget` (budgets, calibration, the fit checks) and `mapped` (memory-mapped files for the disk tier). Phase 8: `warp_isa.inc` (the warp interpreter, one source for C++ and HLSL) and `warp_layout.inc` (its image), `warp.cpp` (packing, unpacking, the warps' bookkeeping), host instructions in `interp.cpp`, `WarpGpu` in `accel_dx.cpp` (the kernel), the tick split and device choice in `world`. The settings registry: `keys` (`keys.h` explains adding and reading a setting; `keys.inc` is the table of every setting's kind, default, range, group and help). |
-| `app/` | The `nova` command line, including `nova bench`, `nova bench devices`, `nova devices`, `nova keys` (every setting; `--md` writes `docs/keys.md`), `nova resume` and `nova view` (`view_cmd.cpp`: the window and the sim thread). `canvas` and `viewer` (the GDI canvas and the panels) form the `nova_viewer` library, which the tests drive headless. |
+| `core/` | `nova_core` static library, namespace `nova`. Containers (`Array`, `HashMap`, `Str`, `TextBuf`), counter-based RNG, hashing, `key = value` config, Win32 thread pool, world + tick loop, run driver, snapshots, CSV stats, replay log. Phase 1a: `isa` (codon tables), `soup` (a node's organisms, ledger, heat, hazards, sparks, death sweep), `interp.cpp` (the instructions). Phase 1b: `lineage` (the replicator detector), `genebank`, `compress`. Phase 2 and 2b: the GPU and NPU (`UnitLedger` in `soup`, the accelerator verb in `interp.cpp`). Phase 3: `graph` (procedural generation and noise), per-node parameters, transit and delivery in `world`. Phase 4: the disk (`DiskLedger`), volatility, stamps and salvage, wear and ruins in `soup`; corruption, link failures, signal propagation, collapse, recovery and graph rebuilds in `world`. Phase 5: `accelop.h` and `accel_ref.cpp` (async ops and the CPU reference), `accel.h` and `accel_dx.cpp` (device discovery, probes, the Direct3D 12 GPU backend and the DirectML NPU backend), the ops in flight and the devices in `world`. Phase 6: `view` (view frames, the live session, a finished run's files, the phylogeny layout), `png` (the PNG writer), the shared stats row in `stats`, the new live knobs in `world`, the genebank log and numbered snapshots in `run`. Phase 7: `landscape` (land, nodes, the triangulation, paths, bridges, distributions), the landscape mode, bridge schedules and fixed-path lifecycle in `world`, the step profile; `budget` (budgets, calibration, the fit checks) and `mapped` (memory-mapped files for the disk tier). Phase 8: `warp_isa.inc` (the warp interpreter, one source for C++ and HLSL) and `warp_layout.inc` (its image), `warp.cpp` (packing, unpacking, the warps' bookkeeping), host instructions in `interp.cpp`, `WarpGpu` in `accel_dx.cpp` (the kernel), the tick split and device choice in `world`. The settings registry: `keys` (`keys.h` explains adding and reading a setting; `keys.inc` is the table of every setting's kind, default, range, group and help). The setup page's check: `check` (a config read with the engine's own code, nothing built). |
+| `app/` | The `nova` command line, including `nova bench`, `nova bench devices`, `nova devices`, `nova keys` (every setting; `--md` writes `docs/keys.md`), `nova resume` and `nova view` (`view_cmd.cpp`: the window, the sim thread, starting runs from the setup page). `canvas`, `viewer` and `setup` (the GDI canvas, the panels and the setup page; `theme.h`, their colours) form the `nova_viewer` library, which the tests drive headless. |
 | `tests/` | One `nova_tests` executable, one CTest entry per suite, hand-rolled `tests/check.h` harness. |
 | `tools/` | `check_includes.cmake`, the no-STL guard; `bench.ps1`, the Release benchmark; `abio.ps1`, the trial harness (single-node abiogenesis trials, or world trials with `-Threads`). |
 | `configs/` | Example run configs; `abio.cfg` is the Phase 1b baseline trial, `world.cfg` the Phase 3 100-node world. |
@@ -398,10 +398,32 @@ The quickest start, from the repository folder:
 
 ```powershell
 .\tools\build.ps1                                        # build nova.exe (Release) into build-release\bin
+.\build-release\bin\nova.exe view                        # the setup page: every setting (from configs\landscape.cfg), then Start
+.\build-release\bin\nova.exe view --setup configs\world.cfg   # the setup page on another file
 .\build-release\bin\nova.exe view configs\landscape.cfg  # watch the 1,000-node world live (Space pauses; close the window to stop)
 .\build-release\bin\nova.exe run configs\landscape.cfg --ticks 2000 --profile   # headless: prints events, then the hash
 .\build-release\bin\nova.exe                             # the usage: every command and option
 ```
+
+**The setup page** (`nova view` with no config, or `--setup <config>`;
+`docs/config-plan.md`) shows every setting before a run begins, from the
+settings registry: the groups down the left, a row per setting with its
+control (a checkbox, a slider and a number, a drop-down or a text field), its
+default, a mark when it differs from the loaded file, and a reset. Hover a row
+for the key's name and help; search names, labels and help; "changed only"
+lists what you changed. Settings whose switch is off are greyed out but keep
+their values. The right-hand panel checks the settings with the engine's own
+code as you go: problems by setting (Start stays off until they are fixed),
+the values the run will work out for itself, the memory and disk the world
+needs, and a landscape's landmasses, paths and hermits. **Load** opens any
+`.cfg` (the presets one click away); **Save as** writes what differs from the
+defaults, grouped and commented. **Start** writes every setting to the run's
+folder (`runs\<name>` unless you pick or type another) as `run.cfg` and starts
+it in the window, watched, or headless (`nova run <folder>\run.cfg` in its own
+console; Esc there, the page's Stop, or a file named `stop` in the folder ends
+it). A run's settings are fixed from its start: the toolbar's Settings button
+shows them read-only, as `nova view --run <folder>` does for a finished run
+(with **Copy to a new run**).
 
 A `run` with no tick or time limit (`run.ticks = 0`, `run.seconds = 0`, as in
 `landscape.cfg`) goes on until Esc. Outputs go where the config's `output.*`
@@ -465,8 +487,9 @@ More:
 A run reads `run.*`, `stats.window`, `replay.checkpoint_every` and `output.*`
 from the config, writes CSV stats (opens in Excel), a replay log, a final
 snapshot (and numbered ones every `output.snapshot_every` ticks) and, for soup
-worlds, the genebank, lineage log and `result.txt`, and prints the world hash. Any config key nothing reads is an error, so typos fail
-loudly. `--set key=value` overrides a key before anything reads it, so the
+worlds, the genebank, lineage log and `result.txt`, and prints the world hash. Any config key that isn't a setting (one with no
+entry in the registry, `nova keys`) is an error, so typos fail loudly; a setting whose feature is off is accepted (a setup
+page's `run.cfg` names them all). `--set key=value` overrides a key before anything reads it, so the
 override is logged with the config.
 
 ## Determinism rules (design.md 7.1 D)
@@ -476,5 +499,6 @@ override is logged with the config.
 - During a tick, a node touches only its own state and its own outboxes.
 - Cross-node effects are applied at the barrier in a fixed order: destination
   node id, then source node id, then send order.
-- Knob changes are timed events: applied before a given tick, written to the
-  replay log, and carried in snapshots.
+- A run's settings are fixed from its start (`docs/config-plan.md` C3): a run
+  started from the setup page is exactly `nova run` on its `run.cfg`. Knob
+  changes in older replay logs are timed events, re-applied before their tick.

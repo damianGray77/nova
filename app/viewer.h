@@ -5,8 +5,11 @@
 // Immediate mode: every frame() handles the input that arrived since the
 // last one and redraws everything from the latest view frame, in one pass.
 // The viewer never touches a Run: frames come in through take(), and what
-// the user asks for (pause, a knob, a snapshot) goes out as commands that
-// the shell applies between ticks, so watching changes nothing (7.1 D).
+// the user asks for (pause, a snapshot) goes out as commands that the shell
+// applies between ticks, so watching changes nothing (7.1 D). A run's
+// settings are fixed from its start (docs/config-plan.md C3): the toolbar has
+// no knobs, only a button to show the settings the run started with (the
+// setup page, read-only).
 // It has no Win32 in it either, beyond drawing through a Canvas, so tests
 // can drive it with made-up input and read back what it selected.
 #include "canvas.h"
@@ -27,14 +30,13 @@ struct UiInput {
     u32 nchars = 0;
 };
 
-enum CmdKind : u32 { kCmdPause, kCmdResume, kCmdStep, kCmdSpeed, kCmdSnapshot, kCmdStop, kCmdKnob, kCmdWindow };
+// kCmdSettings: show the setup page, read-only, with the run's settings.
+enum CmdKind : u32 { kCmdPause, kCmdResume, kCmdStep, kCmdSpeed, kCmdSnapshot, kCmdStop, kCmdWindow, kCmdSettings };
 
 struct ViewCommand {
     u32 kind;
     u32 pad;
     double value; // speed (ticks per second, 0 = flat out), window index
-    char key[24];
-    char text[40]; // a knob's new value
 };
 
 // What the shell knows about the run that a frame doesn't carry.
@@ -44,7 +46,7 @@ struct RunStatus {
     double speed = 0;   // the speed limit, ticks per second (0 = flat out)
     double tps = 0, ips = 0; // measured ticks and instructions per second
     u32 windows = 0, window = 0; // an archive's nodes.csv windows
-    char note[200] = {};  // the latest message (a knob refused, a snapshot written)
+    char note[200] = {};  // the latest message (a snapshot written, a pause and why)
     char title[120] = {}; // what is open
 };
 
@@ -86,7 +88,7 @@ class Viewer {
     // The genome browser's rows, in order, after its filter (test hook).
     usize browser_rows() const { return order_.size(); }
     void set_filter(const char* text);
-    bool knob_editing() const { return edit_ != kNone; }
+    bool editing() const { return edit_ != kNone; } // typing into the browser's filter
     // The mouse cursor the shell should show: 0 arrow, 1 west-east resize,
     // 2 north-south resize, 3 hand.
     u32 cursor() const { return cursor_; }
@@ -108,7 +110,7 @@ class Viewer {
     bool button(const UiInput& in, Canvas& c, const Rect& r, const char* label, bool on = false);
     void panel_box(Canvas& c, const Rect& r, const char* title, Rect* inner);
     void open_popup(u32 kind, u32 owner, const Rect& anchor);
-    void command(u32 kind, double value, const char* key = "", const char* text = "");
+    void command(u32 kind, double value);
     // the map transform
     double map_scale() const;
     void to_screen(float x, float y, i32* sx, i32* sy) const;
@@ -118,8 +120,6 @@ class Viewer {
     void trim_logs();
     u64 richest_lineage() const;
     void set_tooltip(const char* text);
-    u32 knob_index(const char* key) const;
-    void apply_knob_text(u32 k);
 
     ViewFrame cur_;
     bool have_ = false;
@@ -176,7 +176,7 @@ class Viewer {
     u64 phylo_lineage_ = 0;
     usize phylo_saves_ = 0;
 
-    // text editing (a knob's value)
+    // text editing (the browser's filter)
     u32 edit_ = kNone;
     char edit_buf_[40] = {};
     u32 edit_len_ = 0;

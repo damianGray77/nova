@@ -50,7 +50,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `output.csv` | text | (empty) | text | **Stats CSV**. Path of the stats CSV, one row per stats window (empty = off). |
 | `output.nodes` | text | (empty) | text | **Node rows**. Path of the per-node stats rows (empty = off). Needs `output.csv`. |
 | `output.signals` | text | (empty) | text | **Signal rows**. Path of the signal channels' rows, per window and channel (empty = off). Needs `output.csv`. |
-| `output.replay` | text | (empty) | text | **Replay log**. Path of the replay log: the config, live knob changes and checkpoint hashes (empty = off). |
+| `output.replay` | text | (empty) | text | **Replay log**. Path of the replay log: the config, checkpoint hashes and events (empty = off). |
 | `output.snapshot` | text | (empty) | text | **Snapshot**. Path of the snapshot written when the run ends (empty = off). |
 | `output.snapshot_every` | whole | 0 | at least 0 | **Snapshot every**. Also write &lt;output.snapshot&gt;.&lt;tick&gt; every this many ticks (0 = off). Needs `output.snapshot`. |
 | `output.genebank` | text | (empty) | text | **Genebank**. Path of the genebank: every genotype that reached detect.genebank_threshold living copies (empty = off). |
@@ -91,7 +91,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `edge.latency_scale` | number | 20 | 0 to 1000000 | **Latency scale**. Ticks per unit of length along a path. Needs `world.graph=procedural\|landscape`. |
 | `edge.bandwidth` | whole | 32 | 1 to 16777216 | **Bandwidth**. Codons per tick a path carries on smooth ground. |
 | `edge.capacity` | whole | 2 | 1 to 1024 | **Capacity**. Cargoes in transit at once on a path, per direction. Needs `world.dispersal`. |
-| `edge.corruption` | number, log | 0.0002 | 0 to 1 | **Transit corruption**. The chance per codon per tick in transit of a bit flip (a live knob). Needs `world.dispersal`. |
+| `edge.corruption` | number, log | 0.0002 | 0 to 1 | **Transit corruption**. The chance per codon per tick in transit of a bit flip. Needs `world.dispersal`. |
 | `edge.failure` | number, log | 0.0001 | 0 to 1 | **Path failures**. The chance per path per tick that it goes down; cargo on it is lost. Needs `world.dispersal`. |
 | `edge.downtime` | number | 1000 | 1 to 1000000000 | **Downtime**. Ticks a failed path stays down, on average. Needs `edge.failure`. |
 | `paths.mean` | number | 3 | 0 to 64 | **Paths per node**. Paths a node wants, on average. Needs `world.graph=landscape`. |
@@ -150,11 +150,11 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `spark.hotspots` | whole | 0 | 0 to 10000 | **Hotspots of sparks**. Hotspots: places where there is much more. Needs `world.graph=landscape`. |
 | `spark.hotspot_boost` | number | 2 | 0 to 1000 | **Hotspot boost for sparks**. How much more a hotspot has at its centre. Needs `world.graph=landscape`. |
 | `spark.against` | choice | none | none, spark, memory, cpu, gpu, npu, disk, ecpu, archive | **sparks against**. Rich where another distribution is poor (its noise field the other way round); not itself. Needs `world.graph=landscape`. |
-| `spark.rate` | number, log | 0 | 0 to 1000000 | **Spark rate**. Expected sparks per node per tick: a random run of waste gets a CPU (a live knob). |
+| `spark.rate` | number, log | 0 | 0 to 1000000 | **Spark rate**. Expected sparks per node per tick: a random run of waste gets a CPU. |
 | `spark.initial` | whole | 0 | 0 to 10000000 | **Initial sparks**. Sparks at tick 0, per node. |
-| `spark.grant` | whole | 10 | 1 to 10000000 | **Spark grant**. Millicores a spark draws from the free pool (a live knob). |
-| `spark.min_len` | whole | 8 | 1 to 16777216 (max computed) | **Shortest spark**. The shortest run of waste a spark animates, in codons (at most the node's size; a live knob). |
-| `spark.max_len` | whole | 128 (computed) | 1 to 16777216 (max computed) | **Longest spark**. The longest run a spark animates (default 128, or the node's size if smaller; a live knob). |
+| `spark.grant` | whole | 10 | 1 to 10000000 | **Spark grant**. Millicores a spark draws from the free pool. |
+| `spark.min_len` | whole | 8 | 1 to 16777216 (max computed) | **Shortest spark**. The shortest run of waste a spark animates, in codons (at most the node's size). |
+| `spark.max_len` | whole | 128 (computed) | 1 to 16777216 (max computed) | **Longest spark**. The longest run a spark animates (default 128, or the node's size if smaller). |
 | `spark.timing` | choice | first | first, last | **Spark timing**. Whether sparks fire before the bodies run each tick, or after them. |
 | `spark.activity` | number | 2 | 0 to 100 | **Sparks by activity**. Sparks fade as a node fills: the rate x (1 - occupancy)^this, occupancy being the share of its memory held by living bodies (0 = sparks follow time alone, as before). |
 | `spark.gpu_grant` | whole | 8 (computed) | 0 to 10000000 | **Spark GPU grant**. GPU units a spark draws (default 8 with warps, else 0). Needs `gpu.warps`. |
@@ -175,7 +175,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `world.millicores` | whole | 4000 | 1 to 10000000 | **Millicores**. CPU units per node: 1,000 millicores are one core. |
 | `cpu.instr_per_core` | whole | 1000 | 1 to 100000000 | **Instructions a tick**. Instructions a tick 1,000 millicores give at full speed (with a timed cost table, this many plain adds). |
 | `cpu.halt_after` | whole | 8 | 1 to 255 | **Halt after errors**. Consecutive failed instructions that halt a CPU. |
-| `cpu.wear` | number, log | 0.001 | 0 to 1 | **CPU wear**. The chance per held millicore per tick that it fails back to the free pool (a live knob). |
+| `cpu.wear` | number, log | 0.001 | 0 to 1 | **CPU wear**. The chance per held millicore per tick that it fails back to the free pool. |
 | `cpu.threads` | switch | true | true or false | **Threads**. Threads: each runs on one core at a time, and programs can start more (BX 21). |
 | `cpu.slices` | whole | 8 | 1 to 64 | **Slices**. Turns a body's threads take each tick. Needs `cpu.threads`. |
 | `cpu.max_threads` | whole | 8 | 1 to 64 | **Most threads**. Threads (CPUs) a body may hold. Needs `cpu.threads`. |
@@ -260,7 +260,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `heat.gpu_gain` | number | 9 | 0 to 1000000000 | **GPU heating**. Heat a GPU unit gains per tick at full use (it runs hot). Needs `heat.enabled`. |
 | `heat.npu_gain` | number | 9 | 0 to 1000000000 | **NPU heating**. Heat an NPU unit gains per tick at full use. Needs `heat.enabled`. |
 | `heat.e_gain` | number | 0.4 | 0 to 1000 | **E-core heating**. An E millicore's heat gain against a P millicore's. Needs `heat.enabled`. |
-| `heat.ambient` | number | 0.05 | 0 to 1000000 | **Ambient leak**. Each tick every unit on a node gains this x the node's mean CPU heat input (0 = off; a live knob). Needs `heat.enabled`. |
+| `heat.ambient` | number | 0.05 | 0 to 1000000 | **Ambient leak**. Each tick every unit on a node gains this x the node's mean CPU heat input (0 = off). Needs `heat.enabled`. |
 | `heat.<unit>.warm` | number | 40 | 0 to 1000000000 | **&lt;unit&gt; warm**. The heat at which a &lt;unit&gt; unit's error rate starts rising (below hot). For each of: `heat.cpu.warm`, `heat.mem.warm`, `heat.gpu.warm`, `heat.npu.warm`. Needs `heat.enabled`. |
 | `heat.<unit>.hot` | number | 60; heat.mem.hot: 70 | 0 to 1000000000 | **&lt;unit&gt; hot**. The heat at which a &lt;unit&gt; unit starts slowing down (below max). For each of: `heat.cpu.hot`, `heat.mem.hot`, `heat.gpu.hot`, `heat.npu.hot`. Needs `heat.enabled`. |
 | `heat.<unit>.max` | number | 100 | 0 to 1000000000 | **&lt;unit&gt; max**. The heat at which a &lt;unit&gt; unit is released, keeping its heat. For each of: `heat.cpu.max`, `heat.mem.max`, `heat.gpu.max`, `heat.npu.max`. Needs `heat.enabled`. |

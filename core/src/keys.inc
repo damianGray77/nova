@@ -38,7 +38,7 @@ NOVA_TEXT("output.nodes", "", 0, "Run and output", "Node rows", "output.csv",
 NOVA_TEXT("output.signals", "", 0, "Run and output", "Signal rows", "output.csv",
           "Path of the signal channels' rows, per window and channel (empty = off).")
 NOVA_TEXT("output.replay", "", 0, "Run and output", "Replay log", "",
-          "Path of the replay log: the config, live knob changes and checkpoint hashes (empty = off).")
+          "Path of the replay log: the config, checkpoint hashes and events (empty = off).")
 NOVA_TEXT("output.snapshot", "", 0, "Run and output", "Snapshot", "",
           "Path of the snapshot written when the run ends (empty = off).")
 NOVA_WHOLE("output.snapshot_every", 0, 0, kKeyNoMax, 0, "Run and output", "Snapshot every", "output.snapshot",
@@ -129,7 +129,7 @@ NOVA_WHOLE("edge.bandwidth", 32, 1, 1u << 24, 0, "Paths and bridges", "Bandwidth
 NOVA_WHOLE("edge.capacity", 2, 1, 1024, 0, "Paths and bridges", "Capacity", "world.dispersal",
            "Cargoes in transit at once on a path, per direction.")
 NOVA_NUMBER("edge.corruption", 0.0002, 0, 1, kKeyLog, "Paths and bridges", "Transit corruption", "world.dispersal",
-            "The chance per codon per tick in transit of a bit flip (a live knob).")
+            "The chance per codon per tick in transit of a bit flip.")
 NOVA_NUMBER("edge.failure", 0.0001, 0, 1, kKeyLog, "Paths and bridges", "Path failures", "world.dispersal",
             "The chance per path per tick that it goes down; cargo on it is lost.")
 NOVA_NUMBER("edge.downtime", 1000, 1, 1000000000, 0, "Paths and bridges", "Downtime", "edge.failure",
@@ -242,14 +242,14 @@ NOVA_NUMBER("substrate.share_two", 10, 0, 100, 0, "Substrates", "Share at 2x", "
 // Sparks, origins and the seeded genome
 // ---------------------------------------------------------------------------
 NOVA_NUMBER("spark.rate", 0, 0, 1000000, kKeyLog, "Sparks", "Spark rate", "",
-            "Expected sparks per node per tick: a random run of waste gets a CPU (a live knob).")
+            "Expected sparks per node per tick: a random run of waste gets a CPU.")
 NOVA_WHOLE("spark.initial", 0, 0, 10000000, 0, "Sparks", "Initial sparks", "", "Sparks at tick 0, per node.")
 NOVA_WHOLE("spark.grant", 10, 1, 10000000, 0, "Sparks", "Spark grant", "",
-           "Millicores a spark draws from the free pool (a live knob).")
+           "Millicores a spark draws from the free pool.")
 NOVA_WHOLE("spark.min_len", 8, 1, 1u << 24, kKeyMaxComputed, "Sparks", "Shortest spark", "",
-           "The shortest run of waste a spark animates, in codons (at most the node's size; a live knob).")
+           "The shortest run of waste a spark animates, in codons (at most the node's size).")
 NOVA_WHOLE("spark.max_len", 128, 1, 1u << 24, kKeyComputed | kKeyMaxComputed, "Sparks", "Longest spark", "",
-           "The longest run a spark animates (default 128, or the node's size if smaller; a live knob).")
+           "The longest run a spark animates (default 128, or the node's size if smaller).")
 NOVA_CHOICE("spark.timing", "first", "first last", 0, "Sparks", "Spark timing", "",
             "Whether sparks fire before the bodies run each tick, or after them.")
 NOVA_NUMBER("spark.activity", 2, 0, 100, 0, "Sparks", "Sparks by activity", "",
@@ -286,7 +286,7 @@ NOVA_WHOLE("cpu.instr_per_core", 1000, 1, 100000000, 0, "CPU and cores", "Instru
 NOVA_WHOLE("cpu.halt_after", 8, 1, 255, 0, "CPU and cores", "Halt after errors", "",
            "Consecutive failed instructions that halt a CPU.")
 NOVA_NUMBER("cpu.wear", 0.001, 0, 1, kKeyLog, "CPU and cores", "CPU wear", "",
-            "The chance per held millicore per tick that it fails back to the free pool (a live knob).")
+            "The chance per held millicore per tick that it fails back to the free pool.")
 NOVA_FLAG("cpu.threads", true, 0, "CPU and cores", "Threads", "",
           "Threads: each runs on one core at a time, and programs can start more (BX 21).")
 NOVA_WHOLE("cpu.slices", 8, 1, 64, 0, "CPU and cores", "Slices", "cpu.threads",
@@ -434,7 +434,7 @@ NOVA_NUMBER("heat.npu_gain", 9, 0, 1e9, 0, "Heat", "NPU heating", "heat.enabled"
 NOVA_NUMBER("heat.e_gain", 0.4, 0, 1000, 0, "Heat", "E-core heating", "heat.enabled",
             "An E millicore's heat gain against a P millicore's.")
 NOVA_NUMBER("heat.ambient", 0.05, 0, 1000000, 0, "Heat", "Ambient leak", "heat.enabled",
-            "Each tick every unit on a node gains this x the node's mean CPU heat input (0 = off; a live knob).")
+            "Each tick every unit on a node gains this x the node's mean CPU heat input (0 = off).")
 NOVA_MEMBER("unit", "cpu", "CPU", "Heat")
 NOVA_MEMBER("unit", "mem", "memory", "Heat")
 NOVA_MEMBER("unit", "gpu", "GPU", "Heat")

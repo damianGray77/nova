@@ -211,6 +211,21 @@ KeyMisuseHook key_set_misuse_hook(KeyMisuseHook hook);
 using KeyTraceHook = void (*)(const Key& key);
 void key_set_trace_hook(KeyTraceHook hook);
 
+// The setup page's check (docs/config-plan.md C4, nova/check.h): when set,
+// each reader (not the peeks) also reports the value it gives back, as config
+// text ("true", "4096", "1e-06", "ring"), so the page can show the value a run
+// will actually use, computed defaults worked out. One process-wide hook, set
+// only while the check runs; nullptr turns it off.
+using KeyValueHook = void (*)(const Key& key, Str value);
+void key_set_value_hook(KeyValueHook hook);
+
+// Marks every key in cfg that has a registry entry as used, so that
+// Config::first_unused afterwards reports only keys with no entry (typos). A
+// key the registry knows that nothing read (its feature off) is not a typo:
+// the setup page's run.cfg names every setting (docs/config-plan.md C3), and
+// nova run and nova view accept it.
+void key_accept_known(Config& cfg);
+
 // `nova keys`: every setting as a plain-text table, by group.
 void keys_table(TextBuf& out);
 // `nova keys --md`: the Markdown reference (docs/keys.md).

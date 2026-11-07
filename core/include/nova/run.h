@@ -75,8 +75,16 @@ class Run {
     void set_dispatch_order(const u32* order) { pool_.set_dispatch_order(order, world_.node_count()); }
 
     // Schedules a live knob change for `tick` (>= the current tick). Several
-    // changes at one tick apply in the order they were scheduled.
+    // changes at one tick apply in the order they were scheduled. Refused once
+    // the knobs are locked.
     bool schedule_knob(u64 tick, Str key, Str value, TextBuf* err);
+    // The knob lock (docs/config-plan.md C3, Damian): a run's settings are
+    // fixed from its start. The front ends (nova run, nova view) lock their
+    // run as soon as it is made, so nothing can change a setting mid-run;
+    // changes scheduled before the lock -- a replay log's knob records, which
+    // replay_verify schedules up front -- still apply at their ticks.
+    void lock_knobs() { knobs_locked_ = true; }
+    bool knobs_locked() const { return knobs_locked_; }
 
     void step();
     void run_until(u64 tick);
@@ -174,6 +182,7 @@ class Run {
     Array<Knob> knobs_;
     Array<char> knob_text_;
     usize next_knob_ = 0;
+    bool knobs_locked_ = false; // lock_knobs(): settings fixed for the whole run
     StatsCsv stats_;
     ReplayWriter replay_;
     u64 checkpoint_every_ = 0;

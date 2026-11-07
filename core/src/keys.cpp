@@ -236,6 +236,37 @@ const Registry& reg() {
 
 KeyMisuseHook g_misuse = nullptr;
 KeyTraceHook g_trace = nullptr;
+KeyValueHook g_value = nullptr; // the setup page's check (key_set_value_hook)
+
+// The value a reader gives back, to the value hook (when set).
+void report(const Key& k, Str v) {
+    if (g_value)
+        g_value(k, v);
+}
+
+void report_u(const Key& k, u64 v) {
+    if (!g_value)
+        return;
+    TextBuf t;
+    t.append_u64(v);
+    g_value(k, t.view());
+}
+
+void report_i(const Key& k, i64 v) {
+    if (!g_value)
+        return;
+    TextBuf t;
+    t.append_i64(v);
+    g_value(k, t.view());
+}
+
+void report_f(const Key& k, double v) {
+    if (!g_value)
+        return;
+    TextBuf t;
+    t.append_f64(v);
+    g_value(k, t.view());
+}
 
 int show(Str s) { return s.n > 96 ? 96 : static_cast<int>(s.n); }
 
@@ -398,11 +429,21 @@ KeyMisuseHook key_set_misuse_hook(KeyMisuseHook hook) {
 
 void key_set_trace_hook(KeyTraceHook hook) { g_trace = hook; }
 
+void key_set_value_hook(KeyValueHook hook) { g_value = hook; }
+
+void key_accept_known(Config& cfg) {
+    for (usize i = 0; i < cfg.count(); ++i)
+        if (key_find(cfg.key(i)))
+            (void)cfg.get_str(cfg.key(i), Str()); // marks it used; reads nothing
+}
+
 bool key_flag(Config& cfg, Str name, KeyAt at) {
     const Key* k = entry(name, KeyKind::flag, at);
     if (!k)
         return false;
-    return cfg.get_bool(name, def_of(*k, at) != 0);
+    const bool v = cfg.get_bool(name, def_of(*k, at) != 0);
+    report(*k, v ? "true" : "false");
+    return v;
 }
 
 u64 key_u64(Config& cfg, Str name, KeyAt at) {
@@ -419,8 +460,10 @@ u64 key_u64(Config& cfg, Str name, KeyAt at) {
         char what[96];
         range_message_u(static_cast<u64>(k->lo), hi, what, sizeof what);
         cfg.fail(name, what);
+        report_u(*k, static_cast<u64>(k->lo));
         return static_cast<u64>(k->lo);
     }
+    report_u(*k, v);
     return v;
 }
 
@@ -447,8 +490,10 @@ i64 key_i64(Config& cfg, Str name, KeyAt at) {
             snprintf(what, sizeof what, "must be between %lld and %lld", static_cast<long long>(k->lo),
                      static_cast<long long>(hi));
         cfg.fail(name, what);
+        report_i(*k, static_cast<i64>(k->lo));
         return static_cast<i64>(k->lo);
     }
+    report_i(*k, v);
     return v;
 }
 
@@ -462,8 +507,10 @@ double key_f64(Config& cfg, Str name, KeyAt at) {
         char what[96];
         range_message_f(*k, hi, what, sizeof what);
         cfg.fail(name, what);
+        report_f(*k, k->lo);
         return k->lo;
     }
+    report_f(*k, v);
     return v;
 }
 
@@ -476,8 +523,10 @@ Str key_choice(Config& cfg, Str name) {
         char what[192];
         options_message(k->options, what, sizeof what);
         cfg.fail(name, what);
+        report(*k, k->def_text);
         return Str(k->def_text);
     }
+    report(*k, v);
     return v;
 }
 
@@ -485,7 +534,9 @@ Str key_str(Config& cfg, Str name) {
     const Key* k = entry(name, KeyKind::text, KeyAt{});
     if (!k)
         return Str();
-    return cfg.get_str(name, k->def_text);
+    const Str v = cfg.get_str(name, k->def_text);
+    report(*k, v);
+    return v;
 }
 
 Str key_text(Config& cfg, Str name) {
@@ -500,7 +551,9 @@ Str key_text(Config& cfg, Str name) {
     }
     if (g_trace)
         g_trace(*k);
-    return cfg.get_str(name, k->def_text);
+    const Str v = cfg.get_str(name, k->def_text);
+    report(*k, v);
+    return v;
 }
 
 // Peeks: an estimate's look at a setting the world reads (and checks) later.

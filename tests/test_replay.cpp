@@ -327,6 +327,68 @@ void test_legacy_logs() {
     CHECK(Config::set_fallback(kLegacyDefaults, nullptr));
 }
 
+// A replay log written before a run's settings were fixed (docs/config-plan.md
+// C3): the viewer's toolbar changed three knobs mid-run, at the tick it was
+// on. Recorded once (2026-11-07) and kept as it was written.
+const char* const kOldKnobLog = "nova-replay 2\n"
+                                "config seed = 11\n"
+                                "config world.model = soup\n"
+                                "config world.nodes = 4\n"
+                                "config world.soup_size = 1024\n"
+                                "config world.millicores = 400\n"
+                                "config spark.initial = 20\n"
+                                "config spark.rate = 0.2\n"
+                                "config spark.grant = 10\n"
+                                "config cpu.instr_per_core = 500\n"
+                                "hash 0 59248df7f4738bbf\n"
+                                "hash 30 4525ef163a838553\n"
+                                "knob 30 spark.rate = 0.6\n"
+                                "hash 60 8b2a4c357a05d9ec\n"
+                                "knob 60 cpu.wear = 0.01\n"
+                                "hash 90 37a5b939a0fe3a2f\n"
+                                "knob 90 spark.grant = 25\n"
+                                "hash 120 bee92e82e15ae314\n"
+                                "end 120 bee92e82e15ae314\n";
+
+// The knob lock: no front end changes a setting mid-run any more, and a
+// locked run refuses new changes -- but an old log's knob records still
+// replay to every logged hash, at any thread count.
+void test_old_knob_log() {
+    ReplayLog log;
+    TextBuf err;
+    CHECK(log.parse(kOldKnobLog, &err));
+    CHECK(log.knob_count() == 3 && log.checkpoints().size() == 5);
+    ReplayResult r;
+    CHECK(replay_verify(log, 1, &r));
+    CHECK(r.ok && r.checkpoints_checked == 6);
+    CHECK(replay_verify(log, 4, &r) && r.ok);
+    CHECK_EQ_U64(log.end().hash, 0xbee92e82e15ae314ull);
+    // The knobs mattered: without them the run diverges after the first.
+    TextBuf bare;
+    const Str all(kOldKnobLog);
+    usize at = 0;
+    for (usize i = 0; i < all.n; ++i) {
+        if (all.p[i] != '\n')
+            continue;
+        const Str line = all.sub(at, i - at + 1);
+        if (!line.starts_with("knob "))
+            bare.append(line);
+        at = i + 1;
+    }
+    ReplayLog nolog;
+    CHECK(nolog.parse(bare.view(), &err));
+    CHECK(!replay_verify(nolog, 2, &r) && r.diverged_at == 60);
+    // A locked run (as nova run and nova view lock theirs) takes no new change.
+    Run run;
+    Config::ParseError pe;
+    CHECK(run.config().parse(log.config_text(), &pe));
+    CHECK(run.init(2, &err));
+    run.lock_knobs();
+    err.clear();
+    CHECK(run.knobs_locked() && !run.schedule_knob(30, "spark.rate", "0.6", &err));
+    CHECK(strstr(err.c_str(), "fixed from its start") != nullptr);
+}
+
 } // namespace
 
 void suite_replay() {
@@ -336,4 +398,5 @@ void suite_replay() {
     test_knob_scheduling_rules();
     test_legacy_config();
     test_legacy_logs();
+    test_old_knob_log();
 }

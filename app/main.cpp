@@ -35,15 +35,20 @@
 //
 //   nova view ...
 //       The analysis UI (Phase 6, view_cmd.cpp): a run watched live, a
-//       snapshot continued, or a finished run's files browsed.
+//       snapshot continued, or a finished run's files browsed; with no config
+//       (or --setup <config>) the setup page, every setting before a run
+//       starts (docs/config-plan.md C2-C5).
 //
 //   nova keys [--md <path>]
 //       The settings registry (nova/keys.h): every setting with its kind,
 //       default, range, group and help, as a table; --md writes the Markdown
 //       reference (docs/keys.md).
 //
-// Any config key that nothing reads is an error (typo protection). Every
-// setting's default and range live in its registry entry (core/src/keys.inc).
+// Any config key with no registry entry is an error (typo protection); one the
+// registry knows that nothing read (its feature off) is accepted, so a setup
+// page's run.cfg, which names every setting, runs. Every setting's default and
+// range live in its registry entry (core/src/keys.inc). A run's settings are
+// fixed from its start (Run::lock_knobs).
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -244,6 +249,9 @@ int usage() {
                     "  nova bench costs                   (this machine's basic operations, for cost tables)\n"
                     "  nova costs [classic | home_v1]     (a cost table: each operation and instruction)\n"
                     "  nova devices                       (what each accelerator accepts)\n"
+                    "  nova view                          (the setup page on the default preset:\n"
+                    "                                      every setting, then Start)\n"
+                    "  nova view --setup <config> [--set key=value]...  (the setup page on that file)\n"
                     "  nova view <config | snapshot> [--threads N] [--set key=value]... [--no-output]\n"
                     "            [--render out.png --ticks N [--size WxH]]\n"
                     "  nova view --run <run directory> [--render out.png [--window K] [--size WxH]]\n"
@@ -889,6 +897,10 @@ int cmd_run(const Args& a) {
         return 1;
     }
     print_budget_notes(run);
+    run.lock_knobs(); // a run's settings are fixed from its start (docs/config-plan.md C3)
+    // A key with no registry entry is a typo; one the registry knows that
+    // nothing read (its feature off, as in a setup page's run.cfg) is not.
+    key_accept_known(cfg);
     Str unused;
     if (cfg.first_unused(&unused)) {
         fprintf(stderr, "nova: config key '%.*s' is not used by anything (typo?)\n",

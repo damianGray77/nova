@@ -613,35 +613,48 @@ void test_viewer_input() {
     CHECK(r->viewer.commands().size() == 1 && r->viewer.commands()[0].kind == kCmdStep);
     r->viewer.commands().clear();
 
-    // Typing a knob's value: click its field, type, Enter.
+    // The knob lock (docs/config-plan.md C3): the toolbar has no knobs. Where
+    // the second row's knob fields and buttons were, clicks and typing issue
+    // nothing; Settings shows the run's settings (the setup page) instead.
     Canvas& c = r->canvas;
-    const i32 fx = c.px(8) + c.px(52) + c.text_w("spark.rate", kFontSmall) + c.px(4) + 10;
-    const i32 fy = c.px(4) + c.px(26) + c.px(6) + 10;
-    r->click(fx, fy);
-    CHECK(r->viewer.knob_editing());
-    UiInput typing;
-    typing.mx = fx;
-    typing.my = fy;
-    for (u32 i = 0; i < 3; ++i) // clear the current value
-        typing.keys[typing.nkeys++] = 0x08;
-    typing.chars[0] = '0';
-    typing.chars[1] = '.';
-    typing.chars[2] = '5';
-    typing.nchars = 3;
-    r->draw(typing);
-    UiInput enter;
-    enter.keys[0] = 0x0D;
-    enter.nkeys = 1;
-    r->draw(enter);
-    CHECK(!r->viewer.knob_editing());
-    CHECK(r->viewer.commands().size() == 1 && r->viewer.commands()[0].kind == kCmdKnob &&
-          strcmp(r->viewer.commands()[0].key, "spark.rate") == 0 && strcmp(r->viewer.commands()[0].text, "0.5") == 0);
+    const i32 old_y = c.px(4) + c.px(26) + c.px(6) + 10; // the old second row
+    for (i32 kx = c.px(8); kx < 1400; kx += 23) {
+        r->click(kx, old_y);
+        UiInput typing;
+        typing.mx = kx;
+        typing.my = old_y;
+        typing.chars[0] = '5';
+        typing.nchars = 1;
+        typing.keys[0] = 0x0D;
+        typing.nkeys = 1;
+        r->draw(typing);
+    }
+    CHECK(r->viewer.commands().size() == 0);
+    // Every toolbar click gives a run control or Settings, never a setting.
+    for (i32 kx = c.px(8); kx < 700; kx += 7) {
+        r->click(kx, 15);
+        for (usize i = 0; i < r->viewer.commands().size(); ++i) {
+            const u32 k = r->viewer.commands()[i].kind;
+            CHECK(k == kCmdPause || k == kCmdResume || k == kCmdStep || k == kCmdSpeed || k == kCmdSnapshot ||
+                  k == kCmdStop || k == kCmdSettings);
+        }
+        r->viewer.commands().clear();
+    }
+    // Settings: 8 + 80 + 52 + 6 + 26 + 88 + 24 + 6 + 88 + 60 at 96 dpi.
+    const i32 sx = c.px(8) + c.px(80) + c.px(52) + c.px(6) + c.px(26) + c.px(88) + c.px(24) + c.px(6) + c.px(84) +
+                   c.px(4) + c.px(56) + c.px(4) + c.px(30);
+    r->click(sx, 15);
+    CHECK(r->viewer.commands().size() == 1 && r->viewer.commands()[0].kind == kCmdSettings);
     r->viewer.commands().clear();
-    // The command is applied between ticks, as the shell does it.
+    // The run itself is locked as a front end locks it: no new change is accepted.
     TextBuf err;
-    CHECK(r->run.schedule_knob(r->run.world().tick(), "spark.rate", "0.5", &err));
+    CHECK(r->run.schedule_knob(r->run.world().tick(), "spark.rate", "0.5", &err)); // (a test's run isn't locked)
+    r->run.lock_knobs();
+    err.clear();
+    CHECK(!r->run.schedule_knob(r->run.world().tick() + 1, "spark.rate", "0.25", &err));
+    CHECK(strstr(err.c_str(), "fixed from its start") != nullptr);
     r->run.step();
-    CHECK(r->run.world().knob_now(0) == 0.5);
+    CHECK(r->run.world().knob_now(0) == 0.5); // the one scheduled before the lock applied
 
     // Every colour mode and strip mode draws; the wheel zooms the map.
     for (u32 m = 0; m < kColorCount; ++m) {
@@ -874,9 +887,12 @@ void suite_view() {
     test_archive();
 }
 
+void setup_page_tests(); // test_setup.cpp: the setup page (docs/config-plan.md C2-C5)
+
 void suite_viewer() {
     test_viewer_input();
     test_viewer_auto_and_render();
     test_viewer_log_cap();
     test_viewer_landscape();
+    setup_page_tests();
 }

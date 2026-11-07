@@ -15,6 +15,12 @@ namespace nova {
 namespace {
 
 // The live knobs. Everything else World::init reads is structural.
+//
+// The knob lock (docs/config-plan.md C3, Damian): a run's settings are fixed
+// from its start. No front end issues knob changes any more (Run::lock_knobs,
+// and the viewer's toolbar has no knobs); the knobs stay, unchanged, so that a
+// replay log with knob records -- written before the lock -- still replays to
+// the same hash (replay_verify schedules them before the first tick).
 enum class Knob {
     none,
     send_rate,
@@ -293,7 +299,8 @@ bool World::init(Config& cfg) {
     disk_folder_.clear();
     if (model_ == Model::soup) {
         const Str dp = key_str(cfg, "disk.path");
-        if (dp.n && (soup_params_.disk > 0 || soup_params_.archive > 0)) { // (W4: the archive shares the files)
+        // (W4: the archive shares the files; the setup page's check creates nothing)
+        if (dp.n && (soup_params_.disk > 0 || soup_params_.archive > 0) && !check_only_) {
             static u32 runs = 0;
             disk_folder_.append(dp);
             disk_folder_.append("\\nova-");
@@ -308,6 +315,8 @@ bool World::init(Config& cfg) {
     }
     if (!cfg.ok())
         return false;
+    if (check_only_) // the setup page's check (config-plan C4): every setting read, nothing built
+        return true;
 
     // --- graph --------------------------------------------------------------
     links_cut_ = long_added_ = 0;
@@ -496,6 +505,15 @@ bool World::init(Config& cfg) {
     }
     last_ = {};
     return true;
+}
+
+// The setup page's check (docs/config-plan.md C4): init() with check_only_
+// set reads and checks every setting, then stops before building anything.
+bool World::check_settings(Config& cfg) {
+    check_only_ = true;
+    const bool ok = init(cfg);
+    check_only_ = false;
+    return ok;
 }
 
 bool World::build_edges(const u64* keys, usize n) {
@@ -1215,7 +1233,7 @@ void World::accel_open(Config& cfg) {
     const Str g = key_str(cfg, "accel.gpu");
     const Str npu = key_choice(cfg, "accel.npu");
     verify_every_ = key_u32(cfg, "accel.verify");
-    if (!accel_async_ || (g.eq("cpu") && !npu.eq("auto")))
+    if (check_only_ || !accel_async_ || (g.eq("cpu") && !npu.eq("auto"))) // (the check opens no device)
         return;
     AccelDevice devs[16];
     const u32 n = accel_list(devs, 16);
@@ -1284,7 +1302,7 @@ void World::warp_open(Config& cfg) {
     // warp.kernel (docs/dxc-plan.md D3): DXC's kernel where it can run (32
     // lanes, Shader Model 6.0), else FXC's; or FXC's always. The same words.
     const Str kern = key_choice(cfg, "warp.kernel");
-    if (!soup_params_.warps || d.eq("cpu"))
+    if (check_only_ || !soup_params_.warps || d.eq("cpu")) // (the check opens no device)
         return;
     AccelDevice devs[16];
     const u32 n = accel_list(devs, 16);

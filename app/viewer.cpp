@@ -4,19 +4,11 @@
 #include <cstdio>
 #include <cstring>
 
+#include "theme.h" // the dark theme and the virtual keys
+
 namespace nova {
 
 namespace {
-
-// A dark theme.
-const u32 kBg = 0x16181D, kPanel = 0x1F2229, kHead = 0x282C35, kText = 0xD8DEE9, kDim = 0x8A91A0,
-          kFaint = 0x4A505E, kAccent = 0x5EA1FF, kWarn = 0xE5A050, kBad = 0xE06060, kGood = 0x60C080,
-          kEdge = 0x3A404D, kEdgeLong = 0x6A5A9A, kEdgeDown = 0xA04848, kCargo = 0xFFD27F, kButton = 0x30343F,
-          kButtonHot = 0x3B4150, kButtonOn = 0x2F5C9A, kRowSel = 0x2F4A70, kRowHot = 0x2A2E38;
-const u32 kSeriesColor[4] = {0x5EA1FF, 0xF2A65A, 0x7BD88F, 0xE06C9F};
-
-// Win32 virtual keys (windows.h stays out of the viewer).
-const u32 kVkBack = 0x08, kVkReturn = 0x0D, kVkEscape = 0x1B;
 
 // The speed limits the - and + buttons step through (0 = flat out, last).
 const double kSpeeds[] = {1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 0};
@@ -353,12 +345,10 @@ bool Viewer::node_screen(u32 n, i32* x, i32* y) const {
     return map_inner_.contains(*x, *y);
 }
 
-void Viewer::command(u32 kind, double value, const char* key, const char* text) {
+void Viewer::command(u32 kind, double value) {
     ViewCommand c = {};
     c.kind = kind;
     c.value = value;
-    snprintf(c.key, sizeof c.key, "%s", key);
-    snprintf(c.text, sizeof c.text, "%s", text);
     cmds_.push(c);
 }
 
@@ -373,7 +363,8 @@ void Viewer::set_tooltip(const char* text) {
 void Viewer::layout(Canvas& c, const RunStatus& st) {
     const i32 W = c.width(), H = c.height();
     const i32 gap = c.px(4);
-    const i32 barh = c.px(st.live ? 66.0f : 36.0f);
+    (void)st;
+    const i32 barh = c.px(36.0f); // one row: a run's settings are fixed, so there are no knobs (config-plan C3)
     bar_ = Rect{0, 0, W, barh};
     auto clampf = [](float v) { return v < 0.2f ? 0.2f : (v > 0.85f ? 0.85f : v); };
     fx_ = clampf(fx_);
@@ -416,20 +407,6 @@ void Viewer::open_popup(u32 kind, u32 owner, const Rect& anchor) {
     popup_r_ = Rect{anchor.x, anchor.bottom(), 0, 0}; // sized when drawn
 }
 
-u32 Viewer::knob_index(const char* key) const {
-    for (u32 k = 0; k < cur_.knobs; ++k)
-        if (strcmp(cur_.knob_key[k], key) == 0)
-            return k;
-    return kNone;
-}
-
-void Viewer::apply_knob_text(u32 k) {
-    if (k >= cur_.knobs)
-        return;
-    edit_buf_[edit_len_] = '\0';
-    command(kCmdKnob, 0, cur_.knob_key[k], edit_buf_);
-}
-
 // --- the frame -----------------------------------------------------------------
 
 void Viewer::frame(const UiInput& input, Canvas& c, const RunStatus& st) {
@@ -442,13 +419,11 @@ void Viewer::frame(const UiInput& input, Canvas& c, const RunStatus& st) {
     c.unclip();
     c.fill(Rect{0, 0, c.width(), c.height()}, kBg);
 
-    // Typing into a knob's field, or the genome browser's filter.
+    // Typing into the genome browser's filter.
     if (edit_ != kNone) {
-        const bool filter = edit_ == kEditFilter;
         for (u32 i = 0; i < in.nchars; ++i) {
             const char ch = in.chars[i];
-            const bool ok = (ch >= '0' && ch <= '9') || ch == '.' || ch == '-' ||
-                            (!filter && (ch == 'e' || ch == 'E' || ch == '+'));
+            const bool ok = (ch >= '0' && ch <= '9') || ch == '.' || ch == '-';
             if (ok && edit_len_ + 1 < sizeof edit_buf_ && edit_len_ + 1 < sizeof filt_)
                 edit_buf_[edit_len_++] = ch;
         }
@@ -456,12 +431,8 @@ void Viewer::frame(const UiInput& input, Canvas& c, const RunStatus& st) {
             if (in.keys[i] == kVkBack && edit_len_ > 0)
                 --edit_len_;
             else if (in.keys[i] == kVkReturn) {
-                if (filter) {
-                    edit_buf_[edit_len_] = '\0';
-                    set_filter(edit_buf_);
-                } else {
-                    apply_knob_text(edit_);
-                }
+                edit_buf_[edit_len_] = '\0';
+                set_filter(edit_buf_);
                 edit_ = kNone;
             } else if (in.keys[i] == kVkEscape) {
                 edit_ = kNone;
@@ -567,6 +538,10 @@ void Viewer::toolbar(const UiInput& in, Canvas& c, const RunStatus& st) {
         if (button(in, c, next, ">") && n && st.window + 1 < n)
             command(kCmdWindow, st.window + 1);
         x = next.right() + gap;
+        const Rect set{x, y, c.px(76), h}; // the settings it ran with (read-only)
+        if (button(in, c, set, "Settings"))
+            command(kCmdSettings, 0);
+        x = set.right() + gap;
         slider_ = Rect{x, y + h / 2 - c.px(4), c.width() / 2, c.px(8)};
         c.fill(slider_, kButton);
         if (n > 1) {
@@ -625,7 +600,11 @@ void Viewer::toolbar(const UiInput& in, Canvas& c, const RunStatus& st) {
     x += c.px(84) + c.px(4);
     if (button(in, c, Rect{x, y, c.px(56), h}, "Stop") && !st.finished)
         command(kCmdStop, 0);
-    x += c.px(56) + c.px(12);
+    x += c.px(56) + c.px(4);
+    // The settings it started with: fixed for the whole run (docs/config-plan.md C3).
+    if (button(in, c, Rect{x, y, c.px(76), h}, "Settings"))
+        command(kCmdSettings, 0);
+    x += c.px(76) + c.px(12);
 
     commas(cur_.tick, num);
     i32 n = snprintf(buf, sizeof buf, "tick %s   %.0f ticks/s   %.0f M instr/s", num, st.tps, st.ips / 1e6);
@@ -639,64 +618,6 @@ void Viewer::toolbar(const UiInput& in, Canvas& c, const RunStatus& st) {
     if (st.note[0])
         c.text(c.width() - c.px(10), y + c.px(4), st.note, kFontUi, kWarn, kAlignRight,
                c.width() / 3);
-
-    // Row 2: the live knobs.
-    const i32 y2 = y + h + c.px(6);
-    x = c.px(8);
-    c.text(x, y2 + c.px(4), "knobs", kFontBold, kDim);
-    x += c.px(52);
-    for (u32 k = 0; k < cur_.knobs; ++k) {
-        const char* key = cur_.knob_key[k];
-        const double v = cur_.knob_value[k];
-        const bool integer = strstr(key, "grant") || strstr(key, "_len");
-        c.text(x, y2 + c.px(4), key, kFontSmall, kDim);
-        x += c.text_w(key, kFontSmall) + c.px(4);
-        const Rect field{x, y2, c.px(72), h};
-        const bool editing = edit_ == k;
-        c.fill(field, editing ? 0x10141A : kBg);
-        c.frame(field, editing ? kAccent : kFaint);
-        if (editing) {
-            edit_buf_[edit_len_] = '\0';
-            snprintf(buf, sizeof buf, "%s|", edit_buf_);
-        } else if (integer) {
-            snprintf(buf, sizeof buf, "%.0f", v);
-        } else {
-            snprintf(buf, sizeof buf, "%.4g", v);
-        }
-        c.text(field.x + c.px(4), y2 + c.px(4), buf, kFontMono, kText, kAlignLeft, field.w - c.px(6));
-        if (in.pressed && field.contains(in.mx, in.my) && !st.finished) {
-            edit_ = k;
-            snprintf(edit_buf_, sizeof edit_buf_, integer ? "%.0f" : "%.6g", v);
-            edit_len_ = static_cast<u32>(strlen(edit_buf_));
-        }
-        x += field.w + c.px(2);
-        char val[40];
-        if (button(in, c, Rect{x, y2, c.px(20), h}, "-") && !st.finished) {
-            if (integer) {
-                const double step = v * 0.25 < 1 ? 1 : floor(v * 0.25 + 0.5);
-                snprintf(val, sizeof val, "%.0f", v - step < 1 ? 1 : v - step);
-            } else {
-                snprintf(val, sizeof val, "%.6g", v / 2 < 1e-9 ? 0 : v / 2);
-            }
-            command(kCmdKnob, 0, key, val);
-        }
-        x += c.px(22);
-        if (button(in, c, Rect{x, y2, c.px(20), h}, "+") && !st.finished) {
-            if (integer) {
-                const double step = v * 0.25 < 1 ? 1 : floor(v * 0.25 + 0.5);
-                snprintf(val, sizeof val, "%.0f", v + step);
-            } else {
-                double nv = v * 2;
-                if (v <= 0)
-                    nv = strstr(key, "spark") ? 0.1 : (strstr(key, "ambient") ? 0.01 : 0.0001);
-                snprintf(val, sizeof val, "%.6g", nv);
-            }
-            command(kCmdKnob, 0, key, val);
-        }
-        x += c.px(20) + c.px(14);
-    }
-    if (cur_.knobs == 0)
-        c.text(x, y2 + c.px(4), "(no live knobs in this world)", kFontSmall, kDim);
 }
 
 // --- the map ---------------------------------------------------------------------

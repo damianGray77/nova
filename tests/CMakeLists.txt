@@ -31,6 +31,7 @@ add_executable(nova_tests
     test_phase4.cpp
     test_phase5.cpp
     test_view.cpp
+    test_setup.cpp
     test_landscape.cpp
     test_budget.cpp
     test_warp.cpp
@@ -43,8 +44,10 @@ add_executable(nova_tests
 )
 target_link_libraries(nova_tests PRIVATE nova::core nova_viewer)
 target_compile_features(nova_tests PRIVATE cxx_std_20)
-# The keys suite loads the presets in configs/.
-target_compile_definitions(nova_tests PRIVATE NOVA_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+# The keys suite loads the presets in configs/. The viewer suite runs nova.exe
+# on a setup page's run.cfg (nova run and nova view must hash as the page's run).
+target_compile_definitions(nova_tests PRIVATE NOVA_SOURCE_DIR="${PROJECT_SOURCE_DIR}" NOVA_EXE="$<TARGET_FILE:nova>")
+add_dependencies(nova_tests nova)
 if(MSVC)
     target_compile_options(nova_tests PRIVATE /W4 /permissive-)
 endif()

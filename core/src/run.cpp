@@ -84,6 +84,12 @@ bool Run::init_from_snapshot(const u8* data, usize n, u32 threads, TextBuf* err,
 }
 
 bool Run::schedule_knob(u64 tick, Str key, Str value, TextBuf* err) {
+    if (knobs_locked_) { // the knob lock (config-plan C3): settings are fixed for the whole run
+        err->append("knob ");
+        err->append(key);
+        err->append(": a run's settings are fixed from its start (set them before it begins)");
+        return false;
+    }
     if (tick < world_.tick()) {
         err->append("knob ");
         err->append(key);

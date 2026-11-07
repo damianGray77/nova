@@ -35,6 +35,8 @@ add_library(nova_core STATIC
     src/cost.cpp
     # Disasters (docs/disasters-plan.md): surges, crashes, burnouts, disk failures, storms.
     src/disaster.cpp
+    # The setup page's check (docs/config-plan.md C4): a config read, not built.
+    src/check.cpp
 )
 add_library(nova::core ALIAS nova_core)
 
