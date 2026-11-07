@@ -1832,8 +1832,9 @@ void SetupPage::check_panel(const UiInput& in, Canvas& c) {
         snprintf(b, sizeof b, "memory: about %s%s, of %s available now (a world may take 90%%)", need,
                  ch.disk_in_file ? "" : " (the disk tier in RAM included)", have);
         text(b, kFontSmall, fits ? kText : kBad);
-        if (ch.disk == 0) {
-            text("disk tier: none (world.disk = 0)", kFontSmall, kDim);
+        // (The disk tier: the fast disk and the archive, docs/world-plan.md W4.)
+        if (ch.disk + ch.archive == 0) {
+            text("disk tier: none (world.disk = 0, world.archive = 0)", kFontSmall, kDim);
         } else if (ch.disk_in_file) {
             char f[32], fr[32];
             bytes_text(ch.disk_file, f, sizeof f);
@@ -1843,8 +1844,9 @@ void SetupPage::check_panel(const UiInput& in, Canvas& c) {
                      static_cast<int>(dp.n), dp.p, fr);
             text(b, kFontSmall, ch.disk_file <= 0.95 * ch.disk_free ? kText : kBad);
         } else {
-            snprintf(b, sizeof b, "disk tier: %llu codons a node, in RAM (disk.path empty)",
-                     static_cast<unsigned long long>(ch.disk));
+            snprintf(b, sizeof b, "disk tier: %llu codons a node (%llu fast disk, %llu archive), in RAM (disk.path empty)",
+                     static_cast<unsigned long long>(ch.disk + ch.archive), static_cast<unsigned long long>(ch.disk),
+                     static_cast<unsigned long long>(ch.archive));
             text(b, kFontSmall, kDim);
         }
     } else {
@@ -1878,6 +1880,13 @@ void SetupPage::check_panel(const UiInput& in, Canvas& c) {
             snprintf(b, sizeof b, "%u hermits, %u hubs, %u long links; %u bridges (open %u of every %u ticks)",
                      L.hermits, L.hubs, L.long_links, L.bridges, L.open_ticks, L.open_every);
             text(b, kFontSmall, kText);
+            // Substrates (docs/world-plan.md W2, W8), as nova land counts them.
+            if (L.substrates)
+                snprintf(b, sizeof b, "substrates: %u distinct over %u nodes (of 390625 possible)",
+                         L.substrates_distinct, L.nodes);
+            else
+                snprintf(b, sizeof b, "substrates: off (substrate.enabled = false)");
+            text(b, kFontSmall, L.substrates ? kText : kDim);
         }
     }
 

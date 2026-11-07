@@ -113,7 +113,7 @@ Steps 2 to 4 of `docs/config-plan.md` (revision 1): calls C2 (the page), C3 (bef
 
 ## Deviations and limits
 
-- **No count of distinct substrates** in the landscape summary: substrates aren't built in this base (the world plan's W1, the world agent's work).
+- **No count of distinct substrates** in the landscape summary: substrates aren't built in this base (the world plan's W1, the world agent's work). *(Added at the integration: the summary counts them as `nova land` does, and the fit check's sums are now one shared function, `world_footprint`, that counts the archive: `docs/results/integration.md`.)*
 - **What the check can't see:** only settings read in `World::init` before it starts building, in the reading part. A key that other work reads later, during the build, would have no effective value or range check on the page. None does today. When merging: new reads belong before `if (check_only_) return true;`, and any new device or folder opening in `init` should respect `check_only_`.
 - **Two places that must keep in step:**
   - `check.cpp` repeats the sums that `resolve_budgets`' fit check makes (a few lines). When the disk tiers change the fit check, the page's numbers need the same change.

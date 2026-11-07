@@ -838,11 +838,13 @@ class Soup {
     u32 repair(u64 tick);
     u32 offline_count() const { return static_cast<u32>(offline_.size()); }
     const Array<OfflineCore>& offline() const { return offline_; }
-    // X5: the disk is lost: every codon INERT (codon 0), every holding
-    // released, resting dormant programs' disk reserves gone. Returns the
-    // codons that were held. (One function: the disk tiers' merge makes it
-    // pick a tier by size, docs/world-plan.md W4.)
-    u32 fail_disk();
+    // X5, amended by the disk tiers (docs/world-plan.md W4): one tier is lost,
+    // chosen by size -- the archive with chance archive / (disk + archive),
+    // drawn from `r` (the disaster's own stream) only where the node has both
+    // -- through fail_disk_tier: every codon of it INERT (codon 0), every
+    // holding on it released, resting dormant programs' reserve on it gone.
+    // Returns the codons that were held there; *archive: which tier.
+    u32 fail_disk(Rng& r, bool* archive);
     // X6: lightning: `len` codons from `at` (clipped at the end) become
     // random; ownership stays. Returns the codons struck.
     u32 strike(u32 at, u32 len, Rng& r);

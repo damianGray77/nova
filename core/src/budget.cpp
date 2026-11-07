@@ -456,17 +456,11 @@ bool resolve_budgets(Config& cfg, u32 threads, TextBuf* notes, TextBuf* err) {
     }
 
     // --- does it fit? (C9) ------------------------------------------------------------
+    // (The sums are world_footprint's, which the setup page shows too.)
     if (soup) {
-        const double size = static_cast<double>(key_peek_u64(cfg, "world.soup_size"));
-        // Disk tiers (docs/world-plan.md W4): the archive shares the disk
-        // tier's storage, on top of world.disk (a quarter more by default).
-        const u64 fast = key_peek_u64(cfg, "world.disk");
-        const u32 archive = key_u32(cfg, "world.archive", key_default(static_cast<double>(fast / 4)));
-        const double disk = static_cast<double>(fast) + static_cast<double>(archive);
-        const bool in_file = dpath.size() > 0;
-        double ram = static_cast<double>(nodes) * size * kRamPerCodon;
-        if (!in_file)
-            ram += static_cast<double>(nodes) * disk * disk_bytes_per_codon(salvage);
+        WorldFootprint fp;
+        world_footprint(cfg, &fp);
+        const double ram = fp.ram;
         const double avail = static_cast<double>(memory_available());
         if (avail > 0 && ram > 0.9 * avail) {
             TextBuf t;
@@ -477,11 +471,11 @@ bool resolve_budgets(Config& cfg, u32 threads, TextBuf* notes, TextBuf* err) {
             t.append(" are available: lower world.nodes or world.soup_size, or use budget.memory");
             return fail("world.soup_size", t.c_str());
         }
-        if (in_file && disk > 0) {
+        if (fp.in_file && fp.disk + fp.archive > 0) {
             u64 free_b = 0;
             if (!volume_free(dpath.c_str(), &free_b))
                 return fail("disk.path", "not a folder that exists");
-            const double need = static_cast<double>(nodes) * disk * disk_bytes_per_codon(salvage);
+            const double need = fp.disk_file;
             if (need > 0.95 * static_cast<double>(free_b)) {
                 TextBuf t;
                 t.append("the disk tier needs about ");
@@ -494,6 +488,27 @@ bool resolve_budgets(Config& cfg, u32 threads, TextBuf* notes, TextBuf* err) {
         }
     }
     return true;
+}
+
+void world_footprint(Config& cfg, WorldFootprint* out) {
+    *out = WorldFootprint{};
+    out->soup = key_peek_str(cfg, "world.model").eq("soup");
+    out->nodes = static_cast<double>(key_peek_u64(cfg, "world.nodes"));
+    out->soup_size = static_cast<double>(key_peek_u64(cfg, "world.soup_size"));
+    out->in_file = key_peek_str(cfg, "disk.path").n > 0;
+    if (!out->soup)
+        return;
+    // Disk tiers (docs/world-plan.md W4): the archive shares the disk tier's
+    // storage, on top of world.disk (a quarter more by default). (The salvage
+    // stamp is assumed off when salvage.ratio isn't set, as before:
+    // docs/results/registry.md.)
+    const u64 fast = key_peek_u64(cfg, "world.disk");
+    out->disk = static_cast<double>(fast);
+    out->archive = static_cast<double>(key_u32(cfg, "world.archive", key_default(static_cast<double>(fast / 4))));
+    const bool salvage = key_peek_f64_assuming(cfg, "salvage.ratio", 0.0) > 0;
+    const double tier = out->nodes * (out->disk + out->archive) * disk_bytes_per_codon(salvage);
+    out->ram = out->nodes * out->soup_size * kRamPerCodon + (out->in_file ? 0.0 : tier);
+    out->disk_file = out->in_file ? tier : 0.0;
 }
 
 } // namespace nova

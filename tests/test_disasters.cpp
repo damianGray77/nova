@@ -13,6 +13,10 @@
 
 #include "check.h"
 #include "helpers.h"
+#include "nova/keys.h"
+#include "nova/landscape.h"
+#include "nova/lineage.h"
+#include "nova/snapshot.h"
 #include "soup_helpers.h"
 
 using namespace nova;
@@ -911,6 +915,292 @@ void test_defaults() {
     CHECK(Config::set_fallback(kLegacyDefaults, nullptr));
 }
 
+// --- with the other merged builds (docs/results/integration.md) ---------------------------
+
+// Whether every codon of one tier of s's disk is INERT and no one holds any of it.
+bool tier_gone(const Soup& s, bool archive) {
+    const DiskLedger& d = s.disk();
+    const u32 lo = archive ? d.fast : 0, hi = archive ? d.size() : d.fast;
+    bool ok = true;
+    for (u32 a = lo; a < hi; ++a)
+        ok = ok && d.mem[a] == 0 && d.owner[a] == kNone;
+    for (usize k = 0; k < s.body_count(); ++k) {
+        const u32 b = s.body_at(k);
+        ok = ok && (!d.tiered() || d.held_in(b, archive) == 0);
+        if (s.dormant(b))
+            ok = ok && (archive ? s.dormant_state(b).archive_reserve : s.dormant_state(b).disk_reserve) == 0;
+    }
+    return ok;
+}
+
+// X5 with the disk tiers (docs/world-plan.md W4): a failure takes one tier,
+// chosen by size -- the archive with chance archive / (disk + archive), from
+// the disaster's own stream -- and leaves the other as it was.
+void test_diskfail_tiers() {
+    // The draw: 4,000 failures of one soup, at two splits of fast disk and archive.
+    const u32 splits[2][2] = {{768, 256}, {256, 256}};
+    for (const auto& sp : splits) {
+        SoupParams p;
+        TextBuf cfg;
+        cfg.append(kQuiet);
+        cfg.append("world.disk = ");
+        cfg.append_u64(sp[0]);
+        cfg.append("\nworld.archive = ");
+        cfg.append_u64(sp[1]);
+        cfg.append_char('\n');
+        CHECK(make_params(&p, cfg.c_str(), 1024));
+        Soup s;
+        s.init(&p, 5, 0);
+        const u32 n = 4000;
+        u32 arch = 0;
+        for (u32 i = 0; i < n; ++i) {
+            Rng r(31, Rng::kWorldNode, i);
+            bool a = false;
+            s.fail_disk(r, &a);
+            arch += a ? 1 : 0;
+        }
+        const double share = static_cast<double>(sp[1]) / (sp[0] + sp[1]);
+        const double want = n * share, sd = sqrt(n * share * (1 - share));
+        CHECK(arch > 0 && arch < n && fabs(arch - want) < 4 * sd);
+        printf("  disk failure by tier: %u of %u on the archive (%u fast, %u archive codons: %.0f expected)\n", arch, n,
+               sp[0], sp[1], want);
+    }
+    // One tier only: what was held and stored on the other stays.
+    {
+        SoupParams p;
+        CHECK(make_params(&p, "heat.enabled = false\nhazard.copy = 0\nhazard.flaw = 0\nhazard.rot = 0\nmem.upkeep = 0\n"
+                              "world.millicores = 1000\nworld.disk = 256\nworld.archive = 256\n",
+                          1024));
+        bool seen[2] = {false, false}, kept = true, gone = true;
+        for (u32 i = 0; i < 40 && !(seen[0] && seen[1]); ++i) {
+            Soup s;
+            s.init(&p, 5, 0);
+            const u32 b = plant(s, 100, "INC INC INC INC", 100);
+            CHECK(b != kNone);
+            Rng cr(9, 0, 0);
+            s.disk_mut().alloc_run(cr, b, 32, false);
+            s.disk_mut().alloc_run(cr, b, 32, true);
+            for (u32 a = 0; a < s.disk().size(); ++a)
+                s.disk_mut().mem[a] = static_cast<u8>(1 + a % 60);
+            Rng r(32, Rng::kWorldNode, i);
+            bool arch = false;
+            const u32 held = s.fail_disk(r, &arch);
+            seen[arch ? 1 : 0] = true;
+            gone = gone && held == 32 && tier_gone(s, arch);
+            const u32 lo = arch ? 0 : s.disk().fast, hi = arch ? s.disk().fast : s.disk().size();
+            for (u32 a = lo; a < hi; ++a)
+                kept = kept && s.disk().mem[a] == 1 + a % 60;
+            kept = kept && s.disk().held_in(b, !arch) == 32 && soup_ok(s);
+        }
+        CHECK(seen[0] && seen[1] && gone && kept);
+    }
+    // In a world: each failure's tier INERT and unheld after, and both tiers hit.
+    TextBuf cfg;
+    cfg.append(kSoupWorldProc);
+    cfg.append(kDormancy); // (a disk of 1,024)
+    only(cfg, "diskfail");
+    cfg.append("disaster.diskfail_every = 8\nworld.archive = 256\n");
+    Run run;
+    CHECK(make_run(run, cfg.c_str(), 4));
+    World& w = run.world();
+    u32 fails[2] = {}, clean = 0;
+    usize seen = 0;
+    for (u64 t = 0; t < 400; ++t) {
+        run.step();
+        for (; seen < run.event_count(); ++seen) {
+            const Str e = run.event_text(seen);
+            if (!e.starts_with("diskfail "))
+                continue;
+            const bool arch = e.n >= 13 && memcmp(e.p + e.n - 13, " tier=archive", 13) == 0; // (its last field)
+            ++fails[arch ? 1 : 0];
+            clean += tier_gone(w.node_soup(ev_node(e)), arch) ? 1 : 0;
+        }
+    }
+    CHECK(fails[0] > 0 && fails[1] > 0 && clean == fails[0] + fails[1]);
+    CHECK(all_ok(w));
+    printf("  disk failures by tier in a world (1,024 fast, 256 archive): %u fast, %u archive, each tier INERT and "
+           "unheld after\n",
+           fails[0], fails[1]);
+}
+
+// A run.cfg with the disasters off may still name every disaster setting (the
+// setup page writes them all, docs/config-plan.md C3): nothing reads them, and
+// key_accept_known (nova run, nova view) takes them as known settings, while a
+// key with no entry still fails as a typo.
+void test_unread_keys() {
+    TextBuf cfg;
+    cfg.append(kSoupWorldProc);
+    cfg.append("disaster.enabled = false\n");
+    u32 named = 0;
+    for (usize i = 0; i < key_count(); ++i) {
+        const Key& k = key_at(i);
+        if (strncmp(k.name, "disaster.", 9) != 0 || strcmp(k.name, "disaster.enabled") == 0)
+            continue;
+        cfg.append(k.name);
+        cfg.append(" = ");
+        cfg.append(k.def_text);
+        cfg.append_char('\n');
+        ++named;
+    }
+    Run run;
+    CHECK(make_run(run, cfg.c_str(), 1));
+    CHECK(!run.world().disasters() && named >= 60);
+    Str unused;
+    CHECK(run.config().first_unused(&unused) && unused.starts_with("disaster.")); // nothing read them
+    key_accept_known(run.config());
+    CHECK(!run.config().first_unused(&unused));
+    Config typo;
+    Config::ParseError pe;
+    CHECK(typo.parse("disaster.surge_evry = 5\n", &pe));
+    key_accept_known(typo);
+    CHECK(typo.first_unused(&unused) && unused.eq("disaster.surge_evry"));
+}
+
+// Every feature of this build at once: a busy landscape with substrates, the
+// archive, sparks by activity, every disaster frequent (symptoms and sounds),
+// dormancy, dispersal and the lifecycle, and the detector linking by descent.
+// The same hash and the same events (the detector's among them) at 1, 4 and
+// 20 threads and under shuffled dispatch, and through a snapshot taken during
+// a reboot, resumed on 20 threads.
+const char* const kEverythingLand =
+    "seed = 7\nworld.model = soup\nworld.graph = landscape\nworld.nodes = 48\nland.scale = 4\nland.resolution = 96\n"
+    "paths.hubs = 0.05\nbridge.count = 2\nbridge.max_length = 0.6\nworld.soup_size = 2048\nworld.millicores = 600\n"
+    "world.disk = 512\nworld.archive = 256\nres.disk.spread = 0.6\nres.archive.spread = 0.8\nres.archive.smooth = 0.5\n"
+    "res.archive.barren = 0.2\ndisk.rot = 0.0001\nsalvage.ratio = 4\nedge.bandwidth = 8\n"
+    "node.endurance = 4000\nnode.fallow_min = 60\nnode.recover_every = 10\nlife.frozen_ticks = 40\n"
+    "life.dormancy = true\nmem.upkeep = 6\ncpu.instr_per_core = 2500\ncpu.wear = 0.002\nspark.timing = last\n"
+    "spark.initial = 20\nspark.rate = 0.5\nspark.grant = 20\nspark.min_len = 8\nspark.max_len = 24\n"
+    "seed.genome = ZERO ROTB SENSE ALLOC NOP1 COPY DJNZ NOP0 ZERO INC ROTB SENSE DIVIDE\nseed.at = 600\n"
+    "seed.millicores = 200\nhazard.copy = 0.005\nhazard.flaw = 0.001\nhazard.rot = 0.00005\n"
+    // the varied world (off in the test runner's legacy defaults)
+    "substrate.enabled = true\nspark.activity = 2\n"
+    // the detector, linking by descent (X12)
+    "detect.enabled = true\ndetect.shift = 8\n"
+    // every disaster, frequent, with symptoms and sounds
+    "disaster.enabled = true\nsignal.channels = 16\ndisaster.surge_every = 150\ndisaster.crash_every = 40\n"
+    "disaster.burnout_every = 30\ndisaster.diskfail_every = 40\ndisaster.storm_every = 100\n"
+    "disaster.false_alarms = 0.3\ndisaster.surge_lead_min = 20\ndisaster.surge_lead_max = 60\n"
+    "disaster.crash_lead_min = 20\ndisaster.crash_lead_max = 60\ndisaster.burnout_lead_min = 20\n"
+    "disaster.burnout_lead_max = 60\ndisaster.diskfail_lead_min = 20\ndisaster.diskfail_lead_max = 60\n"
+    "disaster.reboot_min = 20\ndisaster.reboot_max = 50\ndisaster.repair_min = 60\ndisaster.repair_max = 200\n"
+    "disaster.storm_life_min = 100\ndisaster.storm_life_max = 300\ndisaster.storm_move_min = 20\n"
+    "disaster.storm_move_max = 60\ndisaster.strike_every_min = 10\ndisaster.strike_every_max = 30\n";
+
+void test_everything_merged() {
+    const u64 ticks = 300;
+    u64 hashes[4] = {};
+    const u32 threads[4] = {1, 4, 20, 4};
+    Array<u32> order;
+    SoupTally sum = {};
+    ByteWriter snap;
+    u64 snap_tick = 0, snap_down = 0, snap_off = 0, founded = 0, links = 0, held_max = 0, arch_fails = 0;
+    u32 subs = 0;
+    Array<u64> ev_tick[4];
+    Array<char> ev_text[4];
+    for (u32 v = 0; v < 4; ++v) {
+        Run run;
+        CHECK(make_run(run, kEverythingLand, threads[v]));
+        const World& w = run.world();
+        if (v == 0) {
+            CHECK(w.substrates() && w.disasters() && w.lifecycle() && w.node_params(0).spark_activity == 2.0);
+            Array<u64> keys;
+            for (u32 n = 0; n < w.node_count(); ++n) {
+                u64 key = 0;
+                for (u32 t = 0; t < kSubstrateTypes; ++t)
+                    key = key << 8 | w.substrate_level(n, t);
+                keys.push(key);
+            }
+            sort_u64(keys.data(), keys.size());
+            for (usize i = 0; i < keys.size(); ++i)
+                subs += i == 0 || keys[i] != keys[i - 1];
+        }
+        if (v == 3) {
+            const u32 n = w.node_count();
+            order.resize(n);
+            for (u32 i = 0; i < n; ++i)
+                order[i] = i;
+            Rng r(99, 0, 0);
+            for (u32 i = n - 1; i > 0; --i) {
+                const u32 j = static_cast<u32>(r.below(i + 1));
+                const u32 x = order[i];
+                order[i] = order[j];
+                order[j] = x;
+            }
+            run.set_dispatch_order(order.data());
+        }
+        for (u64 t = 1; t <= ticks; ++t) {
+            run.run_until(t);
+            if (v != 0)
+                continue;
+            const u64* s = reinterpret_cast<const u64*>(&w.last_soup_tick());
+            u64* d = reinterpret_cast<u64*>(&sum);
+            for (usize i = 0; i < sizeof(SoupTally) / sizeof(u64); ++i)
+                d[i] += s[i];
+            u64 held = 0; // the archive held (holdings; the DISK ops on it are rare with nearest selectors)
+            for (u32 n = 0; n < w.node_count(); ++n)
+                held += w.node_params(n).archive - w.node_soup(n).free_archive();
+            held_max = held > held_max ? held : held_max;
+            if (snap.size() == 0 && t > 60 && w.rebooting_count() > 0) {
+                run.snapshot(snap); // during a reboot
+                snap_tick = t;
+                snap_down = w.rebooting_count();
+                snap_off = w.cores_offline();
+            }
+        }
+        hashes[v] = w.hash();
+        for (usize i = 0; i < run.event_count(); ++i) { // every event, the detector's and the disasters'
+            ev_tick[v].push(run.event_tick(i));
+            const Str e = run.event_text(i);
+            ev_text[v].append(e.p, e.n);
+            ev_text[v].push('\n');
+            if (v == 0 && e.starts_with("diskfail ") && e.n >= 13 && memcmp(e.p + e.n - 13, " tier=archive", 13) == 0)
+                ++arch_fails;
+        }
+        if (v == 0) {
+            CHECK(all_ok(w));
+            for (u32 n = 0; n < w.node_count(); ++n)
+                if (const Lineages* L = w.node_lineages(n)) {
+                    founded += L->founded();
+                    links += L->links();
+                }
+        }
+    }
+    CHECK_EQ_U64(hashes[1], hashes[0]);
+    CHECK_EQ_U64(hashes[2], hashes[0]);
+    CHECK_EQ_U64(hashes[3], hashes[0]);
+    bool same_events = true;
+    for (u32 v = 1; v < 4; ++v)
+        same_events = same_events && ev_tick[v].size() == ev_tick[0].size() &&
+                      ev_text[v].size() == ev_text[0].size() &&
+                      memcmp(ev_tick[v].data(), ev_tick[0].data(), ev_tick[0].size() * sizeof(u64)) == 0 &&
+                      memcmp(ev_text[v].data(), ev_text[0].data(), ev_text[0].size()) == 0;
+    CHECK(same_events && ev_tick[0].size() > 0);
+    CHECK(sum.crashes > 0 && sum.burnouts > 0 && sum.disk_failures > 0 && sum.strikes > 0 && sum.episodes > 0);
+    CHECK(held_max > 0 && arch_fails > 0 && founded > 0 && links > 0 && subs > 1);
+    CHECK(snap.size() > 0);
+    if (snap.size() > 0) {
+        Run b;
+        TextBuf err;
+        CHECK(b.init_from_snapshot(snap.data(), snap.size(), 20, &err));
+        CHECK(b.world().rebooting_count() == snap_down && b.world().cores_offline() == snap_off);
+        b.run_until(ticks);
+        CHECK_EQ_U64(b.world().hash(), hashes[0]);
+    }
+    printf("  everything merged, %llu ticks on 48 nodes: %u distinct substrates; archive held up to %llu codons; %llu "
+           "surges, %llu crashes, %llu burnouts, %llu disk failures (%llu of the archive), %llu strikes, %llu episodes; "
+           "%llu lineages founded, %llu links; %llu events the same at 1, 4 and 20 threads and shuffled; snapshot at "
+           "tick %llu with %llu rebooting resumed exactly on 20 threads; hash %016llx\n",
+           static_cast<unsigned long long>(ticks), subs, static_cast<unsigned long long>(held_max),
+           static_cast<unsigned long long>(sum.surges),
+           static_cast<unsigned long long>(sum.crashes), static_cast<unsigned long long>(sum.burnouts),
+           static_cast<unsigned long long>(sum.disk_failures), static_cast<unsigned long long>(arch_fails),
+           static_cast<unsigned long long>(sum.strikes),
+           static_cast<unsigned long long>(sum.episodes), static_cast<unsigned long long>(founded),
+           static_cast<unsigned long long>(links), static_cast<unsigned long long>(ev_tick[0].size()),
+           static_cast<unsigned long long>(snap_tick), static_cast<unsigned long long>(snap_down),
+           static_cast<unsigned long long>(hashes[0]));
+}
+
 } // namespace
 
 void suite_disasters() {
@@ -926,4 +1216,7 @@ void suite_disasters() {
     test_sounds();
     test_determinism();
     test_defaults_world();
+    test_diskfail_tiers();
+    test_unread_keys();
+    test_everything_merged();
 }

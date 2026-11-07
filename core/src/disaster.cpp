@@ -279,30 +279,30 @@ u32 Soup::repair(u64 tick) {
     return back;
 }
 
-// X5. The disk itself is lost: every holding released (in schedule order),
-// then every codon INERT (codon 0 under nova_v2) with no stamp, and resting
-// dormant programs' disk reserves gone. Nobody dies directly.
-// (The disk tiers, docs/world-plan.md W4: this becomes "one tier, chosen by
-// size" -- the caller's draw picks it -- through fail_disk_tier.)
-u32 Soup::fail_disk() {
-    if (!p_->disk)
+// X5, as amended by the disk tiers (docs/world-plan.md W4): one tier of the
+// disk is lost, chosen by size -- the archive with chance archive / (disk +
+// archive), drawn from the disaster's own stream `r`, and only when the node
+// has both tiers (with one, it is that one, and nothing is drawn, so a world
+// without an archive draws as before). Every holding on that tier is released
+// (in schedule order), every codon of it becomes INERT (codon 0 under
+// nova_v2) with no stamp, and resting dormant programs lose that tier's
+// reserve (fail_disk_tier). Nobody dies directly. Returns the codons that
+// were held on it; *archive says which tier it was.
+u32 Soup::fail_disk(Rng& r, bool* archive) {
+    *archive = false;
+    if (!disk_on())
         return 0;
-    const u32 held = disk_.size() - disk_.free;
-    for (usize k = 0; k < order_.size(); ++k) {
-        const u32 b = order_[k];
-        if (bodies_[b].alive && disk_.total[b])
-            disk_.release_tail(b, disk_.total[b], 0);
-    }
-    for (u32 a = 0; a < disk_.size(); ++a)
-        disk_.mem[a] = 0;
-    for (u32 a = 0; a < disk_.stamp.size(); ++a)
-        disk_.stamp[a] = 0;
-    if (p_->dormancy)
-        for (usize k = 0; k < order_.size(); ++k)
-            if (dorm_[order_[k]].on)
-                dorm_[order_[k]].disk_reserve = 0;
+    const u32 fast_n = disk_.fast, arch_n = disk_.size() - disk_.fast;
+    if (fast_n + arch_n == 0)
+        return 0;
+    bool arch = fast_n == 0; // (an archive alone)
+    if (fast_n > 0 && arch_n > 0)
+        arch = r.below(static_cast<u64>(fast_n) + arch_n) < arch_n;
+    const u32 held = arch ? arch_n - disk_.afree : fast_n - disk_.fast_free();
+    fail_disk_tier(arch);
     ++tally_.disk_failures;
     tally_.disk_lost += held;
+    *archive = arch;
     return held;
 }
 
@@ -328,10 +328,11 @@ u32 Soup::strike(u32 at, u32 len, Rng& r) {
 }
 
 // X10, at the end of the tick: a failing disk's extra rot (counted with the
-// disk's own), and a storm's static -- single-bit flips anywhere in memory,
-// sampled as a Poisson process over the soup like rot.
+// disk's own; over both tiers, since which one fails is drawn at the strike,
+// docs/world-plan.md W4), and a storm's static -- single-bit flips anywhere
+// in memory, sampled as a Poisson process over the soup like rot.
 void Soup::weather_hazards() {
-    if (weather_.disk_rot > 0 && p_->disk)
+    if (weather_.disk_rot > 0 && disk_on())
         tally_.disk_rot += disk_.rot(rng_, weather_.disk_rot);
     if (weather_.static_rot > 0) {
         const double rate = weather_.static_rot, n = static_cast<double>(p_->size);
@@ -746,15 +747,18 @@ bool World::dis_strike(u32 kind, const Episode& e) {
         kv_u64(t, "graced", c.c);
         kv_u64(t, "died", c.d);
         kv_u64(t, "repair", repair);
-    } else if (kind == kDisDiskfail) { // X5
+    } else if (kind == kDisDiskfail) { // X5 (W4: one tier, chosen by size, from this disaster's stream)
         const u32 n = e.node;
-        if (!live(n) || node_params_[n].disk == 0)
+        if (!live(n) || (node_params_[n].disk == 0 && node_params_[n].archive == 0))
             return false;
-        const u32 lost = soups_[n].fail_disk();
+        bool archive = false;
+        const u32 lost = soups_[n].fail_disk(r, &archive);
         ++node_struck_[n];
         t.append("diskfail node=");
         t.append_u64(n);
         kv_u64(t, "codons", lost);
+        if (node_params_[n].archive) // (which tier, where there are two)
+            t.append(archive ? " tier=archive" : " tier=fast");
     } else {
         return false;
     }

@@ -43,6 +43,11 @@ struct LandSummary {
     double paths_mean = 0;                  // land paths per node
     u32 hermits = 0, hubs = 0, long_links = 0, bridges = 0;
     u32 open_every = 0, open_ticks = 0;
+    // Substrates (docs/world-plan.md W2), as nova land reports them: whether
+    // they're on, and how many distinct ones (each node's eight levels
+    // together) the nodes have.
+    bool substrates = false;
+    u32 substrates_distinct = 0;
 };
 
 struct SettingsCheck {
@@ -56,17 +61,21 @@ struct SettingsCheck {
         return key < read.size() && read[key] ? Str(text.data() + val_off[key], val_len[key]) : Str();
     }
     // The world's size against the machine (budget.h, C9): RAM for the soups
-    // (and the disk tier when it is in RAM), the disk tier's files.
+    // (and the disk tier when it is in RAM), the disk tier's files -- the fit
+    // check's own sums (world_footprint), the archive (W4) included.
     bool soup = false, disk_in_file = false;
-    u64 nodes = 0, soup_size = 0, disk = 0;
+    u64 nodes = 0, soup_size = 0, disk = 0, archive = 0; // disk, archive: codons a node
     double ram = 0, ram_avail = 0, disk_file = 0, disk_free = 0;
     TextBuf notes; // what the budgets resolved to, a line each
     bool landscape = false;
     LandSummary land;
-    // The landscape is generated again only when its settings change.
+    // The landscape is generated again only when its settings change (its
+    // own, or the substrates', whose count the summary gives).
     bool land_cached = false;
     u64 land_seed = 0;
     LandParams land_params;
+    bool land_subs = false;
+    SubstrateParams land_sub_params;
     TextBuf land_why; // why it couldn't be generated
 };
 

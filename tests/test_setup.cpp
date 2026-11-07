@@ -23,12 +23,16 @@
 
 #include "check.h"
 #include "helpers.h"
+#include "nova/budget.h"
 #include "nova/check.h"
 #include "nova/io.h"
 #include "nova/keys.h"
+#include "nova/landscape.h"
 #include "setup.h"
 
 using namespace nova;
+
+extern const char* const kLegacyDefaults; // test_main.cpp
 
 namespace {
 
@@ -438,6 +442,109 @@ void test_page_check() {
     delete r;
 }
 
+// The distinct substrates over a built world's nodes, as nova land counts them.
+u32 world_substrates(const World& w) {
+    Array<u64> subs;
+    for (u32 n = 0; n < w.node_count(); ++n) {
+        u64 key = 0;
+        for (u32 t = 0; t < kSubstrateTypes; ++t)
+            key = key << 8 | w.substrate_level(n, t);
+        subs.push(key);
+    }
+    sort_u64(subs.data(), subs.size());
+    u32 distinct = 0;
+    for (usize i = 0; i < subs.size(); ++i)
+        distinct += i == 0 || subs[i] != subs[i - 1];
+    return distinct;
+}
+
+// What the merged builds add to the check (docs/results/integration.md): the
+// archive in the world's size, with the fit check's own sums (world_footprint,
+// which resolve_budgets uses too), and the landscape summary's substrates.
+void test_page_check_merged() {
+    // The archive (disk tiers, W4) on top of the fast disk, in RAM.
+    TextBuf t;
+    t.append(kWorld);
+    t.append("world.disk = 1000\nworld.archive = 500\n");
+    SettingsCheck dc;
+    check_settings(t.view(), &dc, run_keys_here, false);
+    const double tier = 6.0 * 1500.0 * disk_bytes_per_codon(false);
+    CHECK(dc.problems.size() == 0 && dc.disk == 1000 && dc.archive == 500 && dc.ram == 6.0 * 2048.0 * 20.0 + tier);
+    Config c;
+    Config::ParseError pe;
+    CHECK(c.parse(t.view(), &pe));
+    WorldFootprint fp;
+    world_footprint(c, &fp);
+    CHECK(fp.ram == dc.ram && fp.archive == 500 && fp.disk_file == 0);
+    // ... and by default a quarter of the disk (the engine's defaults: the test
+    // runner's legacy ones have no archive).
+    CHECK(Config::set_fallback(nullptr, nullptr));
+    t.clear();
+    t.append(kWorld);
+    t.append("world.disk = 1000\naccel.gpu = cpu\naccel.npu = cpu\nwarp.device = cpu\n");
+    SettingsCheck dq;
+    check_settings(t.view(), &dq, run_keys_here, false);
+    CHECK(dq.archive == 250 && dq.ram == 6.0 * 2048.0 * 20.0 + 6.0 * 1250.0 * disk_bytes_per_codon(false));
+    CHECK(Config::set_fallback(kLegacyDefaults, nullptr));
+    // The landscape summary counts the substrates as nova land does, and the
+    // cache follows the substrates' own settings.
+    const char* land = "seed = 3\nworld.model = soup\nworld.graph = landscape\nworld.nodes = 150\nland.scale = 5\n"
+                       "land.fraction = 0.3\nland.resolution = 96\nworld.soup_size = 1024\nsubstrate.enabled = true\n";
+    SettingsCheck lc;
+    check_settings(land, &lc, run_keys_here, false);
+    Run a;
+    CHECK(make_run(a, land, 1));
+    const u32 want = world_substrates(a.world());
+    CHECK(lc.land.built && lc.land.substrates && want > 1 && lc.land.substrates_distinct == want);
+    t.clear();
+    t.append(land);
+    t.append("substrate.smooth = 0.3\n");
+    check_settings(t.view(), &lc, run_keys_here, false); // (the same landscape: only the substrates changed)
+    Run b;
+    CHECK(make_run(b, t.c_str(), 1));
+    const u32 want2 = world_substrates(b.world());
+    CHECK(lc.land.substrates_distinct == want2 && want2 != want);
+    // Every setting the merged builds added is read before the check stops
+    // (World::init's check-only return), so the page shows its value and
+    // checks it: their ranges and cross-checks come back by setting.
+    t.clear();
+    t.append(land);
+    t.append("disaster.enabled = true\nworld.disk = 512\ndetect.shift = 65\ndisaster.reboot_min = 200\n");
+    SettingsCheck nk;
+    check_settings(t.view(), &nk, run_keys_here, false);
+    const char* const added[] = {"substrate.smooth", "substrate.scale",      "substrate.share_two", "spark.activity",
+                                 "world.archive",    "archive.slow",         "archive.rot",         "res.archive.spread",
+                                 "detect.shift",     "disaster.surge_every", "disaster.grace",      "disaster.sounds"};
+    bool all_read = true;
+    for (const char* k : added) {
+        bool found = false;
+        for (usize i = 0; i < key_count() && !found; ++i)
+            if (strcmp(key_at(i).name, k) == 0) {
+                found = true;
+                all_read = all_read && nk.effective(i).n > 0;
+                if (!nk.effective(i).n)
+                    fprintf(stderr, "  the check didn't read %s\n", k);
+            }
+        all_read = all_read && found;
+    }
+    CHECK(all_read);
+    bool shift = false, reboot = false;
+    for (usize i = 0; i < nk.problems.size(); ++i) {
+        shift = shift || (strcmp(nk.problems[i].key, "detect.shift") == 0 && strstr(nk.problems[i].what, "64"));
+        reboot = reboot || (strcmp(nk.problems[i].key, "disaster.reboot_min") == 0 &&
+                            strstr(nk.problems[i].what, "must not exceed disaster.reboot_max"));
+    }
+    CHECK(shift && reboot);
+    // Off (the test runner's legacy defaults), the summary says so.
+    SettingsCheck off;
+    check_settings("seed = 3\nworld.model = soup\nworld.graph = landscape\nworld.nodes = 150\nland.scale = 5\n"
+                   "land.fraction = 0.3\nland.resolution = 96\nworld.soup_size = 1024\n",
+                   &off, run_keys_here, false);
+    CHECK(off.land.built && !off.land.substrates && off.land.substrates_distinct == 0);
+    printf("  setup check: archive counted (%.0f bytes of RAM for 6 nodes); landscape substrates %u, %u at smooth 0.3\n",
+           dc.ram, want, want2);
+}
+
 // --- files ---------------------------------------------------------------------------------
 
 void test_page_save_load() {
@@ -657,6 +764,7 @@ void test_page_render() {
 void setup_page_tests() {
     test_page_widgets();
     test_page_check();
+    test_page_check_merged();
     test_page_save_load();
     test_page_start_hash();
     test_page_render();

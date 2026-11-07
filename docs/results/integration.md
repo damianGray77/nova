@@ -1,6 +1,10 @@
-# Results: integrating substrates with the disk tiers
+# Results: integrating the next build
 
-Branch `next`, from the settings registry (`4daa357`), 2026-11-07. Two approved builds, each kept as its own commit with its own message, then one integration commit:
+Branch `next`, from the settings registry (`4daa357`), 2026-11-07, in two rounds. Round 1 (below) brought in substrates and the disk tiers; round 2 (after it, from "Round 2") brought in the lineage tracker, the disasters, the configuration page and the offline analysis.
+
+## Round 1: substrates and the disk tiers
+
+Two approved builds, each kept as its own commit with its own message, then one integration commit:
 
 1. `Substrates, sparks by activity and resource speed multipliers` (from `wt/world`, `b6060d3`; `docs/results/world.md`): `docs/world-plan.md` W1, W2, W5.
 2. `Disk tiers: an archival tier beside the disk` (from `wt/disk`, `41f95a0`; `docs/results/disk.md`): W4.
@@ -8,7 +12,7 @@ Branch `next`, from the settings registry (`4daa357`), 2026-11-07. Two approved 
 
 The world build applied cleanly: its commit's tree is `b6060d3`'s exactly, since both sit on `4daa357`. The disk build conflicted in six files, and five more places needed work although git merged them as text. Every conflict was resolved inside the disk build's commit, which passed `verify.ps1` on its own (42 tests, all green) before the integration commit went on top.
 
-## Conflicts and how they were resolved
+### Conflicts and how they were resolved
 
 **Textual conflicts** (git stopped):
 
@@ -30,7 +34,7 @@ The world build applied cleanly: its commit's tree is `b6060d3`'s exactly, since
 - **The substrates suite's `test_old_snapshot`** turns a snapshot into v3. Its world had no disk, so the archive played no part. It now gets a 256-codon disk under the full legacy fallback, so it has no archive and its disk section is v3's shape. The resumed run's fallback drops all three switches, so the registry's defaults (substrates on, sparks by activity 2, an archive of a quarter of the disk) would apply if the pre-v4 block didn't turn them off. The test checks that all three are off (`archive == 0`, `world.archive = 0` in the effective config) and that the run resumes on the same hash.
 - **Stats columns, `SoupTally`, the CSV header tests (`test_dispersal`, `test_view`) and `view.cpp`'s columns** didn't conflict. The world build adds per-node columns to `nodes.csv` only. The disk build's three `stats.csv` columns (`archive_held`, `archive_stores`, `archive_loads`), its two `SoupTally` fields, `stats_column_is_sum` and both header tests merged as they were and pass. `keys.inc` merged cleanly with both groups.
 
-## The wiring: substrates divide the disk tiers' costs
+### The wiring: substrates divide the disk tiers' costs
 
 - *The world end:* `World::derive_node` sets each node's `disk_speed` from its fast-disk level (`kSubDiskFast`) and `archive_speed` from its slow-disk level (`kSubDiskSlow`).
 - *The disk end:* `Exec::disk_scale` divides each tier's DISK access and per-codon costs by those speeds, for classic costs and timed ones (`disk_time`).
@@ -54,7 +58,7 @@ The world build applied cleanly: its commit's tree is `b6060d3`'s exactly, since
   - Over 300 ticks: 5,489 sparks, 169 DISK stores (151 touching the archive) and 13 loads (9). 42 of 48 nodes have a disk tier off 1×.
   - The same hash (`a8a88cd3038c22a1`) at 1, 4 and 20 threads, under shuffled dispatch, and through a snapshot taken at tick 150 and resumed on 20 threads.
 
-## Smoother substrate map: new defaults
+### Smoother substrate map: new defaults
 
 `substrate.smooth` 0.7 → **1**, `substrate.scale` 3 → **1.5**, in the registry and in `SubstrateParams`' own defaults (the neighbours test checks the two agree). On a 1,000-node landscape (seed 5):
 
@@ -65,7 +69,7 @@ The world build applied cleanly: its commit's tree is `b6060d3`'s exactly, since
 
 `test_neighbours` now asserts that the defaults stay under 30% of random pairs and under 2.5 types differing. The old defaults stay in its table for the record. `docs/results/world.md` has the full table and the reasons. The change touches no pinned hash, since the legacy fallback keeps substrates off. The everything-on worlds, which run on engine defaults, changed and are still the same at every thread count.
 
-## Old replay logs replay as they were recorded
+### Old replay logs replay as they were recorded
 
 - **The problem:** a replay log records the config it was given, so a setting it doesn't name takes the engine's default when replayed. With substrates, sparks by activity and the archive on by default, a log written before this build would replay a different world. Its first checkpoint already differs, because the hash covers the substrate levels and the archive's ledger.
 - **The fix, once for every feature:**
@@ -102,7 +106,7 @@ The world build applied cleanly: its commit's tree is `b6060d3`'s exactly, since
   A v3 log is refused by the old binary ("unsupported replay version 3"), as any newer format is.
 - **Not covered:** a v3 log replayed by a later build whose defaults change again. That needs another version bump with its own text (`legacy.h` says so). Adding a line for the disasters and the memory tiers to the same text works only if they land before any run is recorded with a v3 build. A v3 log recorded before they land doesn't name their switches, so a build with them would replay it with them on (their engine defaults) and diverge. Their lines only cover v2 and v1 logs.
 
-## Determinism
+### Determinism
 
 All three in `verify.ps1`'s suites:
 
@@ -112,7 +116,7 @@ All three in `verify.ps1`'s suites:
 
 Every pinned and gate hash from `4daa357` holds, because the test runner's legacy fallback has all three switches off.
 
-## Verify
+### Verify
 
 `powershell -NoProfile -File .claude\verify.ps1` on the integration commit: 42 tests (41 suites, including `substrates`, 151 checks, `tiers`, 281, and `replay`, 80, and the include check). It ended:
 
@@ -126,7 +130,7 @@ verify: OK - green in 107,816 ms
 
 The everything-on world's hash in that build is `af6726f0481b4692` (suite `substrates`), and the varied archive world's `a8a88cd3038c22a1` (suite `tiers`).
 
-## Files
+### Files
 
 - New:
   - `core/include/nova/legacy.h`, `core/src/legacy.cpp`: the legacy defaults and `apply_legacy_defaults`;
@@ -142,3 +146,168 @@ The everything-on world's hash in that build is `af6726f0481b4692` (suite `subst
   - `core/src/soup.cpp`, `core/src/run.cpp`, `core/src/world.cpp`, `core/src/landscape.cpp`;
   - `tests/CMakeLists.txt`, `tests/test_main.cpp`, `tests/test_snapshot.cpp`, `tests/test_substrates.cpp`, `tests/test_tiers.cpp`;
   - `docs/keys.md`.
+
+## Round 2: the lineage tracker, the disasters, the configuration page and the analysis
+
+Four more approved builds, cherry-picked in this order, each kept as its own commit with its own message, then one integration commit:
+
+1. `Lineage tracker: link by descent, fix the dormancy leak; founders by origin` (from `wt/lineage`, `887bee9`; `docs/results/lineage.md`): disasters plan X12 and world plan W7.
+2. `Natural disasters: surges, crashes, burnouts, disk failures and storms` (from `wt/disasters`, `ab13e81`; `docs/results/disasters.md`): X1–X11.
+3. `The configuration page; runs' settings fixed from their start` (from `wt/configui`, `3161aae`; `docs/results/configui.md`): config plan C2–C5.
+4. `Offline analysis: novelty meter, family trees and settings search` (from `wt/analysis`, `7f12aa4`; `docs/results/analysis.md`): analysis plan A0, A2, A4, A1.
+5. `Integrate lineage, disasters, configuration page and analysis`: the fixes below, their tests, and this section.
+
+Every conflict was resolved inside the commit that brought it, and each of the four commits passed `verify.ps1` on its own before the next went on (42, 43, 43 and 44 tests, all green).
+
+### Conflicts and how they were resolved
+
+**The lineage tracker** (based on `98c2a3c`, before the registry):
+
+| where | what clashed | resolution |
+|---|---|---|
+| `core/src/lineage.cpp` | its `detect_params_from_config` (raw getters with their own range checks) against the registry's rewrite | the registry's readers kept. `detect.shift` is a new `keys.inc` entry: whole, default 8, range 0–64, group Detection and lineages, needs `detect.enabled`, read with `key_u32`. Its test ("accepts 64, rejects 65") passes on the registry's range check |
+| `stats.h`, `stats.cpp` | both builds put their columns after `resting` | the archive's three first (merge order), then `founded_spark`, `founded_daughter`, `founded_arrival`, `founded_wake` |
+| `view.cpp` | `stats_column_is_sum`, and `RunArchive::load_stats`' field buffer | both: the archive's sums (91, 92) and the founded columns (then 93–96); one `kMaxFields` buffer |
+| `test_view.cpp`, `test_dispersal.cpp` | the header strings | the merged header; the column-index checks moved to 93–96, with the archive's gauge and sums checked too |
+| `docs/keys.md` | regenerated (286 settings) | |
+
+Everything else merged by itself: the origin byte and `CargoTag` in `soup.h`, the hooks in `soup.cpp` and `interp.cpp`, `founder_origin` in `run.cpp`, and the new tests.
+
+**The disasters:**
+
+| where | what clashed | resolution |
+|---|---|---|
+| `snapshot.h` | a third v4 | still one v4. The comment lists every v4 part: the substrate levels, the archive in the disk section and in cargo, and the disasters' offline cores and world state; and the legacy defaults for older snapshots |
+| `soup.h`: `SoupParams` | `disasters` beside the varied world's block | both |
+| `soup.h`: `SoupTally` | both appended after `dormant_hops` | the archive's two, then the disasters' 22 (the stats code indexes them in that order) |
+| `soup.h`: `Dormant` | both claimed the padding word | see "The `Dormant` decision" below |
+| `stats.h`, `stats.cpp`, `view.cpp` | the disasters put their 26 columns after `ambient`, in a separate `StatsRow::x` | moved before `compress` and `ambient`, which are last again. `StatsRow::x` is gone; the 26 are ordinary integer columns (`kStatsIntColumns` 123, `kStatsColumns` 125, `kStatsDisasterFirst` 97). `stats_column_is_sum` covers their 22 sums (97–118); the four gauges (119–122) aren't. `RunArchive::load_stats` reads them like any column, by name. The viewer's chart list comes from `kStatsColumns` and the names, so it follows |
+| `stats.cpp`: `nodes.csv` | both added columns after `born` | the substrates' eight and `occupancy` first, then `symptom_ticks`, `struck`, `cores_offline` (41 columns; the substrates suite's file test now reads 41) |
+| `soup.cpp`: `Soup::init` | the origin array and the disasters' resets | both |
+| `soup.cpp`: `go_dormant` | the archive's reserve split against the disasters' grace and flags | both: a burnout victim's memory reserve is its grace when bare, the disk reserve splits into fast and archive, and the flags are set |
+| `soup.cpp`: end of tick | the archive's rot and decay against the disasters' weather hazards | the archive's draws, then the weather's, both after every earlier draw |
+| `world.cpp` | `is_structural` | `substrate.`, `archive.` and `disaster.` |
+| tests | `CMakeLists.txt`, `test_main.cpp` (the suites and the fallback), `test_snapshot.cpp` (the future version) | all suites; the fallback gains `disaster.enabled = false`; the computed future-version check kept |
+
+Also in that commit, to keep it green:
+
+- `disaster.enabled = false` joined `legacy.h`'s `kLegacyFormatDefaults`, so v3 snapshots and v2 replay logs keep the disasters off. Without it the old binary's embedded log diverged.
+- The tiers suite's `test_old_snapshot` world now sets `disaster.enabled = false` too: a v3 build had no disasters.
+- The substrates suite's `test_old_snapshot` drops all four switches from its resumed run's fallback, and checks the disasters come back off.
+- The replay suite's explicitly-off world also turns the disasters off, and its legacy-config checks count lines from the text rather than hard-coding three.
+
+**The configuration page:**
+
+| where | what clashed | resolution |
+|---|---|---|
+| `core/CMakeLists.txt` | `disaster.cpp` against `check.cpp` | both |
+| `world.cpp` | the disk folder: the archive's condition against `!check_only_` | both: `disk > 0 \|\| archive > 0`, and never in check-only mode |
+| `test_replay.cpp` | the legacy-log tests against its old knob-log test | all of them |
+| `docs/keys.md` | regenerated (348 settings) | its help-string edits for the locked knobs kept |
+
+`keys.inc`'s help strings merged by themselves: the seven locked soup knobs no longer say "a live knob". The demo world's four still do, as the configuration build left them. Its own v2 knob log still replays to every hash: it is a v2 log, so it gets the legacy defaults, which match the build that recorded it.
+
+**The analysis:**
+
+| where | what clashed | resolution |
+|---|---|---|
+| `app/main.cpp` | the header comment | both: the analysis commands and the accepted-keys rule |
+| `core/CMakeLists.txt` | the source lists | all sources |
+| `tests/CMakeLists.txt`, `test_main.cpp` | the suites | all suites. One `add_dependencies(nova_tests nova)` serves both the viewer suite and the analysis suite |
+
+Its CSV readers find columns by name, so the moved columns need nothing.
+
+### The `Dormant` decision
+
+`Dormant` is hashed and saved as its raw 48 bytes, so its layout is part of the snapshot format. The disk tiers turned its padding word into `archive_reserve`; the disasters put their burnout flags in the same word.
+
+- **Kept:** `archive_reserve` in the old padding word.
+- **Moved:** the flags into the byte after `kind`:
+  - `kind`, a `u32`, became `u8 kind; u8 flags; u16 spare;`;
+  - `kind` only ever holds 0 or 1 (`kKindP`, `kKindE`), so in what was a little-endian `u32` those three bytes were always 0;
+  - the flags became `u8` (`kDormantBurnt`, `kDormantGraced`).
+- **Nothing else moved.** `static_assert`s pin the size (48) and the offsets: `kind` 36, `flags` 37, `hops` 40, `archive_reserve` 44.
+- **Why this is safe:**
+  - With no archive and no burnout, every byte of every `Dormant` is what it was before either build. So the dormant hash is unchanged: every pinned and gate hash holds, dormancy's included.
+  - A v3 snapshot's `Dormant` arrays load unchanged: its `kind` word reads as `kind`, with `flags` and `spare` 0.
+  - The tiers suite's v3 snapshot test (a world with dormancy) resumes exactly.
+- **What it costs:** the disasters build's own v4 layout, with the flags in the padding, was never released, so no file depends on it.
+
+### The integration commit
+
+- **X5, one tier chosen by size.**
+  - `Soup::fail_disk(Rng& r, bool* archive)` now takes the archive with chance archive / (disk + archive), as `r.below(disk + archive) < archive`.
+  - `r` is the disaster's own stream, `dis_strike`'s, keyed by the episode's serial.
+  - It then calls `fail_disk_tier`.
+  - It draws only when the node has both tiers. So a world without an archive draws nothing new, and the disasters suite's numbers and hashes are unchanged; `fail_disk_tier` on a lone fast disk does exactly what the old `fail_disk` did.
+  - A node with an archive alone fails it. `dis_strike` no longer skips a node with no fast disk but an archive.
+  - The event gains ` tier=fast` or ` tier=archive` where a node has both.
+  - The failing-disk symptom's extra rot covers both tiers, since the tier is drawn at the strike.
+  - Tests (suite `disasters`, `test_diskfail_tiers`):
+    - 4,000 failures of one soup: 1,008 on the archive at 768 fast to 256 archive (1,000 expected), and 2,026 at 256 to 256 (2,000 expected). Each is within 4 standard deviations.
+    - One failure of each tier leaves the other's codons and holdings exactly as they were.
+    - In a world with a 1,024-codon disk and a 256-codon archive: 40 fast and 11 archive failures, each one's tier INERT and unheld after.
+- **The fit check's sums, shared.**
+  - `world_footprint` (`budget.h`) is now the one place the world's RAM and disk-file sizes are summed: soups at `kRamPerCodon`, plus the fast disk and the archive at `disk_bytes_per_codon`, in RAM or in `disk.path`'s files.
+  - `resolve_budgets`' fit check and the setup page's check (`check.cpp`) both call it, so the page counts the archive, as the fit check has since the disk tiers, and the two can't drift again.
+  - The page shows the archive beside the fast disk.
+  - Test (suite `viewer`): with a 1,000-codon disk and a 500-codon archive, the page's RAM is the soups plus 1,500 codons a node, equal to `world_footprint`'s; on the engine's defaults the archive is a quarter of the disk (250).
+- **`same_land`:** none of the merged builds added a `LandParams` field. The landscape cache's key now also holds the substrates' switch and settings, because the summary counts substrates.
+- **The check sees every new setting.**
+  - Every read the merged builds added happens in `World::init` before `if (check_only_) return true;`:
+    - `spark.activity`, `world.archive`, `archive.*` in `soup_params_from_config`;
+    - `detect.shift` in `detect_params_from_config`;
+    - `res.archive.*` in `read_spreads`;
+    - `substrate.*` in `read_substrates`;
+    - `disaster.*` in `read_disasters`.
+  - Nothing new opens a device or a folder in check-only mode. The disk folder honours `check_only_` with the archive's condition; the disasters and substrates open nothing.
+  - Test (suite `viewer`): twelve of the new settings come back with effective values, and `detect.shift = 65` and `disaster.reboot_min = 200` come back as problems by setting.
+- **The landscape summary** gives the distinct substrates, as `nova land` does, or "off". Test: on a 150-node landscape the page's count equals a built world's (141), and follows `substrate.smooth` (150 at 0.3) through the cache.
+- **Unread keys.** `key_accept_known` covers the disasters' keys behind `disaster.enabled`. Test (suite `disasters`, `test_unread_keys`):
+  - a world with the disasters off that names every other `disaster.*` setting leaves them unread;
+  - `key_accept_known` then accepts them;
+  - a misspelt `disaster.surge_evry` still fails.
+
+  End to end, the viewer suite already runs `nova.exe run` on a page's `run.cfg`, which names every setting, the disasters' included, with the disasters off.
+- **Everything at once** (suite `disasters`, `test_everything_merged`): a 48-node landscape with every new feature on:
+  - substrates and sparks by activity;
+  - the archive (spread with barren sites);
+  - every disaster frequent, with symptoms and sounds;
+  - dormancy, dispersal and the lifecycle;
+  - the detector linking by descent.
+
+  Over 300 ticks:
+  - 48 distinct substrates, and up to 538 archive codons held;
+  - 1 surge, 6 crashes, 8 burnouts, 8 disk failures (2 of the archive), 23 strikes and 43 episodes;
+  - 46 lineages founded and 183 inheritance links.
+
+  It passes these checks:
+  - the same hash at 1, 4 and 20 threads and under shuffled dispatch;
+  - the same 210 events, the detector's and the disasters', in the same order;
+  - a snapshot taken during a reboot (tick 95, 1 node rebooting) resumes on 20 threads to the same hash.
+
+  The substrates suite's everything-on world runs on the engine's defaults, which now include the disasters and the archive. It still matches at 1, 4 and 20 threads, shuffled, through a snapshot, and on the RTX 5080.
+- **Old replay logs.** The embedded v2 log from the `4daa357` binary still replays to its hashes (suite `replay`). `nova replay` on that log with this build: "replay OK: 6 checkpoints match".
+- `docs/keys.md` was regenerated and is unchanged by the integration commit (348 settings).
+
+### Verify
+
+`powershell -NoProfile -File .claude\verify.ps1` on the integration commit: 44 tests (43 suites and the include check), all green. It ended:
+
+```
+100% tests passed, 0 tests failed out of 44
+
+Total Test time (real) = 113.22 sec
+verify: clang-format not found in C:\Program Files\Microsoft Visual Studio\18\Community (advisory step skipped)
+verify: OK - green in 114,628 ms
+```
+
+The merged everything-on world's hash in that build is `295095e639e94809` (suite `disasters`). The substrates suite's engine-default world is `ef48a94c61e13fc5`, the same on the RTX 5080 (160 of 160 rounds verified).
+
+### Doubtful or open
+
+- **Disk-failure symptoms don't say which tier.** The failing-disk rot covers both tiers, and the tier is drawn at the strike. If the symptom should point at the tier that will fail, the draw belongs at the episode's start: a keyed draw either way, but a change to the plan's wording.
+- **The `Dormant` flags moved.** They no longer sit where the disasters build put them. Anything outside this tree reading raw `Dormant` bytes, in that build's own snapshots, wouldn't match; there is none that I know of.
+- **The stats columns moved for the disasters.** Their 26 columns now sit before `compress` and `ambient`, at 97–122. Readers by name (the viewer, `RunArchive`, the analysis) are unaffected. A reader by position written against the disasters build's layout would be.
+- **The merged everything-on test uses nearest selectors,** so the seeded replicator links and lineages form. Random code then rarely runs DISK, so the archive shows up there as holdings and as failures, not as DISK ops. The tiers suite's shuffled world covers the archive's DISK ops.
+- **Not updated:** `docs/design.md` (none of the builds updated it) and the README's sections for the disasters and the analysis.

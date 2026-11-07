@@ -61,7 +61,7 @@ Built from disasters plan X12 and world plan W7, both approved by Damian. Branch
 
 **Not changed.**
 - `on_inject` is unchanged. Its match is counted inside the interpreter at fixed offsets, so the new rule doesn't drop in without touching `interp.cpp`.
-- The presets don't list `detect.shift`. The default applies, and the key moves into the registry at merge.
+- The presets don't list `detect.shift`. The default applies, and the key moves into the registry at merge. *(Done at the integration: a `keys.inc` entry in Detection and lineages, read with `key_u32`.)*
 
 ## 3. Deviation from the plan: at least 4 matching codons
 

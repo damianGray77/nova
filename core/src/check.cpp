@@ -73,8 +73,9 @@ void text_without(const Config& c0, const Array<u32>& left_out, TextBuf* out) {
 
 bool is_off(Str s) { return s.eq("off") || s.eq("0") || s.n == 0; }
 
-// LandParams field by field (keep in step with landscape.h): the landscape
-// cache's key.
+// LandParams field by field (keep in step with landscape.h; unchanged by the
+// builds merged since: substrates, disk tiers, disasters and the lineage
+// tracker add none): the landscape cache's key.
 bool same_land(const LandParams& a, const LandParams& b) {
     return a.nodes == b.nodes && a.aspect == b.aspect && a.fraction == b.fraction && a.scale == b.scale &&
            a.warp == b.warp && a.border == b.border && a.resolution == b.resolution && a.paths_mean == b.paths_mean &&
@@ -84,6 +85,36 @@ bool same_land(const LandParams& a, const LandParams& b) {
            a.bridge_isolated == b.bridge_isolated && a.bridge_max_length == b.bridge_max_length &&
            a.bridge_latency_scale == b.bridge_latency_scale && a.bridge_bandwidth == b.bridge_bandwidth &&
            a.open_every == b.open_every && a.open_ticks == b.open_ticks && a.phase == b.phase;
+}
+
+// SubstrateParams field by field (landscape.h): the substrates' part of the
+// landscape cache's key, since the summary counts them.
+bool same_subs(const SubstrateParams& a, const SubstrateParams& b) {
+    bool same = a.smooth == b.smooth && a.scale == b.scale && a.floor_mult == b.floor_mult;
+    for (u32 l = 0; l < kSubstrateLevels; ++l)
+        same = same && a.share[l] == b.share[l];
+    return same;
+}
+
+// The distinct substrates over a landscape's nodes (each node's eight levels
+// together), as nova land counts them: a landscape's substrate fields are
+// static, so its nodes take them at their sites (World::derive_node).
+u32 distinct_substrates(u64 seed, const SubstrateParams& sp, const Landscape& L) {
+    Array<u8> lv;
+    substrate_levels(seed, sp, L.x, L.y, -1.0, &lv);
+    const usize n = L.x.size();
+    Array<u64> subs;
+    for (usize i = 0; i < n; ++i) {
+        u64 key = 0;
+        for (u32 t = 0; t < kSubstrateTypes; ++t)
+            key = key << 8 | lv[i * kSubstrateTypes + t];
+        subs.push(key);
+    }
+    sort_u64(subs.data(), subs.size());
+    u32 distinct = 0;
+    for (usize i = 0; i < subs.size(); ++i)
+        distinct += i == 0 || subs[i] != subs[i - 1];
+    return distinct;
 }
 
 // nova land's summary of a generated landscape.
@@ -149,7 +180,7 @@ void check_settings(Str config_text, SettingsCheck* out, FrontEndReader front_en
     out->val_off.resize(nk);
     out->val_len.resize(nk);
     out->soup = out->disk_in_file = out->landscape = false;
-    out->nodes = out->soup_size = out->disk = 0;
+    out->nodes = out->soup_size = out->disk = out->archive = 0;
     out->ram = out->ram_avail = out->disk_file = out->disk_free = 0;
 
     Config c0;
@@ -175,9 +206,10 @@ void check_settings(Str config_text, SettingsCheck* out, FrontEndReader front_en
     // end's. One problem per pass: its setting is left out (back to its
     // default) and the reads run again.
     Array<u32> left_out;
-    bool land = false;
+    bool land = false, subs = false;
     u64 land_seed = 0;
     LandParams lp;
+    SubstrateParams sp;
     for (u32 pass = 0; pass < 32; ++pass) {
         TextBuf t;
         text_without(c0, left_out, &t);
@@ -202,6 +234,8 @@ void check_settings(Str config_text, SettingsCheck* out, FrontEndReader front_en
             land = w->landscape();
             land_seed = w->seed();
             lp = w->land_params();
+            subs = w->substrates(); // (docs/world-plan.md W2: read before the check returns)
+            sp = w->substrate_params();
             out->soup = w->model() == Model::soup;
         }
         delete w;
@@ -254,27 +288,23 @@ void check_settings(Str config_text, SettingsCheck* out, FrontEndReader front_en
                 }
                 out->notes.append(notes.view());
             }
-            // The sums resolve_budgets' fit check makes (C9; keep in step with
-            // it): RAM for the soups at kRamPerCodon a codon, plus the disk
-            // tier when it lives in RAM; the disk tier's files otherwise. (The
-            // salvage stamp is assumed off when salvage.ratio isn't set, as
-            // the fit check assumes: docs/results/registry.md.)
-            const double nodes = static_cast<double>(key_peek_u64(c, "world.nodes"));
-            const double size = static_cast<double>(key_peek_u64(c, "world.soup_size"));
-            const double disk = static_cast<double>(key_peek_u64(c, "world.disk"));
+            // The fit check's own sums (world_footprint, budget.h, shared with
+            // resolve_budgets so they can't drift): RAM for the soups at
+            // kRamPerCodon a codon, plus the disk tier -- the fast disk and the
+            // archive (docs/world-plan.md W4) -- when it lives in RAM; its
+            // files otherwise.
+            WorldFootprint fp;
+            world_footprint(c, &fp);
             TextBuf dpath;
             dpath.append(key_peek_str(c, "disk.path"));
-            const bool salvage = key_peek_f64_assuming(c, "salvage.ratio", 0.0) > 0;
-            out->nodes = static_cast<u64>(nodes);
-            out->soup_size = static_cast<u64>(size);
-            out->disk = static_cast<u64>(disk);
-            out->disk_in_file = dpath.size() > 0;
+            out->nodes = static_cast<u64>(fp.nodes);
+            out->soup_size = static_cast<u64>(fp.soup_size);
+            out->disk = static_cast<u64>(fp.disk);
+            out->archive = static_cast<u64>(fp.archive);
+            out->disk_in_file = fp.in_file;
             if (out->soup) {
-                out->ram = nodes * size * kRamPerCodon;
-                if (!out->disk_in_file)
-                    out->ram += nodes * disk * disk_bytes_per_codon(salvage);
-                else
-                    out->disk_file = nodes * disk * disk_bytes_per_codon(salvage);
+                out->ram = fp.ram;
+                out->disk_file = fp.disk_file;
             }
             out->ram_avail = static_cast<double>(memory_available());
             u64 free_b = 0;
@@ -286,7 +316,8 @@ void check_settings(Str config_text, SettingsCheck* out, FrontEndReader front_en
     // --- the landscape (nova land) -----------------------------------------------
     out->landscape = land;
     if (land) {
-        if (!out->land_cached || out->land_seed != land_seed || !same_land(out->land_params, lp)) {
+        if (!out->land_cached || out->land_seed != land_seed || !same_land(out->land_params, lp) ||
+            out->land_subs != subs || (subs && !same_subs(out->land_sub_params, sp))) {
             out->land = LandSummary{};
             Landscape* L = new Landscape;
             TextBuf why;
@@ -294,6 +325,8 @@ void check_settings(Str config_text, SettingsCheck* out, FrontEndReader front_en
             out->land_why.clear();
             if (generate_landscape(land_seed, lp, L, &why)) {
                 summarise(*L, lp, &out->land);
+                out->land.substrates = subs; // (nova land's count, docs/world-plan.md W8)
+                out->land.substrates_distinct = subs ? distinct_substrates(land_seed, sp, *L) : 0;
                 out->land.ms = (clock_seconds() - t0) * 1000.0;
             } else {
                 out->land.built = false;
@@ -303,6 +336,8 @@ void check_settings(Str config_text, SettingsCheck* out, FrontEndReader front_en
             out->land_cached = true;
             out->land_seed = land_seed;
             out->land_params = lp;
+            out->land_subs = subs;
+            out->land_sub_params = sp;
         }
         if (!out->land.built && !has_problem(*out, "world.nodes"))
             add_problem(out, "world.nodes", out->land_why.view());

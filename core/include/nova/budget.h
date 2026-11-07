@@ -47,6 +47,23 @@ double disk_bytes_per_codon(bool salvage);
 // An amount: "P%" (of `whole`), or bytes with an optional KB/MB/GB/TB.
 bool parse_amount(Str s, double whole, double* bytes);
 
+// The world's footprint, as the fit check (C9, resolve_budgets) sums it and
+// the setup page's check shows it (check.cpp): one function, so the two
+// can't drift. RAM for the soups at kRamPerCodon a codon, plus the disk tier
+// -- the fast disk and the archive (docs/world-plan.md W4), at
+// disk_bytes_per_codon -- when it lives in RAM; otherwise that much in
+// disk.path's files. It peeks the settings, but reads world.archive
+// (marking it used), whose default is computed: a quarter of world.disk.
+struct WorldFootprint {
+    bool soup = false;            // world.model = soup (otherwise nothing below counts)
+    bool in_file = false;         // disk.path set: the disk tier lives in files there
+    double nodes = 0, soup_size = 0;
+    double disk = 0, archive = 0; // codons a node: world.disk (the fast disk), world.archive
+    double ram = 0;               // bytes of RAM the world needs
+    double disk_file = 0;         // bytes of the disk tier's files
+};
+void world_footprint(Config& cfg, WorldFootprint* out);
+
 // Resolves budget.* in cfg (marking the keys used) and checks the world fits
 // the machine. `threads` is what the run will use (for the device budgets'
 // CPU estimate). `notes` gets one line per budget resolved.
