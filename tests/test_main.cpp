@@ -47,6 +47,7 @@ void suite_keys();
 void suite_substrates(); // a varied world (docs/world-plan.md W1, W2, W5)
 void suite_tiers();      // disk tiers (docs/world-plan.md W4)
 void suite_disasters();  // docs/disasters-plan.md
+void suite_analysis(); // learning from the runs (docs/analysis-plan.md)
 
 namespace {
 
@@ -98,6 +99,7 @@ const Suite kSuites[] = {
     {"substrates", suite_substrates},
     {"tiers", suite_tiers},
     {"disasters", suite_disasters},
+    {"analysis", suite_analysis},
 };
 
 } // namespace

@@ -44,6 +44,11 @@
 //       default, range, group and help, as a table; --md writes the Markdown
 //       reference (docs/keys.md).
 //
+//   nova analyse novelty | tree | scores <run> ...,  nova search <file>
+//       Learning from the runs (docs/analysis-plan.md, analyse_cmd.cpp):
+//       the novelty meter, family trees and a run's scores from its files,
+//       and the settings search.
+//
 // Any config key with no registry entry is an error (typo protection); one the
 // registry knows that nothing read (its feature off) is accepted, so a setup
 // page's run.cfg, which names every setting, runs. Every setting's default and
@@ -73,6 +78,9 @@ int cmd_bench(double seconds, u32 threads); // bench.cpp
 int cmd_bench_devices(u32 threads);          // bench.cpp
 int cmd_bench_costs();                       // bench_costs.cpp
 int cmd_bench_warp(int argc, char** argv);   // bench_warp.cpp
+// Learning from the runs (docs/analysis-plan.md): analyse_cmd.cpp.
+int cmd_analyse(int argc, char** argv); // nova analyse novelty | tree | scores <run>
+int cmd_search(int argc, char** argv);  // nova search <search file>
 
 // nova devices: the GPUs and NPU this machine offers, and what each accepts
 // (Phase 5, design.md 6.11).
@@ -258,6 +266,10 @@ int usage() {
                     "  nova land <config> [--set key=value]...  (what a landscape's settings generate)\n"
                     "  nova keys [--md <path>]            (every setting: kind, default, range, help;\n"
                     "                                      --md writes the reference, docs/keys.md)\n"
+                    // Learning from the runs (docs/analysis-plan.md): analyse_cmd.cpp.
+                    "  nova analyse novelty | tree | scores <run directory> [options]\n"
+                    "                                     (reads a run's files; nova analyse alone for the options)\n"
+                    "  nova search <search file> [--dry-run]  (the settings search: trials, scores, a model)\n"
                     "  (threads 0 = all hardware threads)\n");
     return 2;
 }
@@ -1395,6 +1407,11 @@ int nova_main(int argc, char** argv) {
         return cmd_land(argc, argv);
     if (argc >= 2 && strcmp(argv[1], "keys") == 0)
         return cmd_keys(argc, argv);
+    // Learning from the runs (docs/analysis-plan.md): analyse_cmd.cpp.
+    if (argc >= 2 && strcmp(argv[1], "analyse") == 0)
+        return cmd_analyse(argc, argv);
+    if (argc >= 2 && strcmp(argv[1], "search") == 0)
+        return cmd_search(argc, argv);
     Args a;
     if (!parse_args(argc, argv, &a))
         return usage();

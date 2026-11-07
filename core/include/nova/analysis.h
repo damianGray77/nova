@@ -1,0 +1,349 @@
+#pragma once
+
+// Reading what runs produce (docs/analysis-plan.md; docs/results/analysis.md):
+// a run's files as streams, the novelty meter (A2), family trees from genomes (A4), a
+// run's scores and the settings search (A1). Nothing here writes into a run
+// folder or changes a world: the tools read files, and `nova search` runs its
+// trials as ordinary `nova run` processes.
+//
+//   nova analyse novelty <run>   innovation per window from genebank.txt
+//   nova analyse tree <run>      a tree by alignment and neighbour joining
+//   nova analyse scores <run>    the search's scores for any run folder
+//   nova search <search file>    the autopilot for tuning settings
+#include "nova/array.h"
+#include "nova/config.h"
+#include "nova/hashmap.h"
+#include "nova/isa.h"
+#include "nova/keys.h"
+#include "nova/learn.h"
+#include "nova/str.h"
+#include "nova/types.h"
+
+namespace nova {
+
+// --- run files, streamed --------------------------------------------------------
+
+// A text file a line at a time, opened with shared read and write access
+// (FILE_SHARE_READ | FILE_SHARE_WRITE), so a live run can keep writing it. A
+// last line with no newline yet (still being written) is left out.
+class LineReader {
+  public:
+    LineReader() = default;
+    ~LineReader() { close(); }
+    LineReader(const LineReader&) = delete;
+    LineReader& operator=(const LineReader&) = delete;
+
+    bool open(const char* path);
+    bool is_open() const { return h_ != nullptr; }
+    // The next complete line without its line end, valid until the next
+    // call; false at the end.
+    bool next(Str* line);
+    u64 size() const { return size_; }         // the file's size when opened
+    u64 consumed() const { return consumed_; } // bytes handed out so far
+    void close();
+
+  private:
+    void* h_ = nullptr;
+    Array<char> buf_;
+    usize pos_ = 0, end_ = 0;
+    bool eof_ = false;
+    u64 size_ = 0, consumed_ = 0;
+};
+
+// A CSV header's columns, found by name, so added or reordered columns (other
+// work adds stats columns and lineages.csv's founder_origin) don't matter.
+class CsvHeader {
+  public:
+    bool parse(Str line);
+    i32 find(Str name) const; // the column's index, or -1
+    u32 count() const { return static_cast<u32>(off_.size()); }
+
+  private:
+    Array<char> text_;
+    Array<u32> off_, len_;
+};
+
+// Splits a line at its commas (Nova's CSVs never quote). Returns how many
+// fields it found, at most max.
+u32 csv_split(Str line, Str* fields, u32 max);
+
+// A lineage id written "node.count" (design.md 6.6), and back.
+bool parse_lineage_id(Str s, u64* id);
+void append_lineage_id(TextBuf& out, u64 id);
+// Exactly 1 to 16 hex digits, no prefix.
+bool parse_hex(Str s, u64* out);
+
+// One genebank.txt entry (design.md 6.6). The views are valid until the next
+// read.
+struct BankEntry {
+    Str name;   // "0031aaa": length, then letters; unique within its node only
+    Str parent; // the parent's name, "unsaved" or "none"
+    Str genome; // op names, space separated
+    u64 tick = 0, lineage = 0, hash = 0;
+    u64 parent_hash = 0; // 0 for a founder (parent=none)
+    u32 node = 0;
+};
+
+class GenebankReader {
+  public:
+    bool open(const char* path);
+    // The next entry; false at the end or at a malformed entry (then error()
+    // is not empty).
+    bool next(BankEntry* e);
+    u64 entries() const { return entries_; }
+    const char* error() const { return err_; }
+    u64 size() const { return r_.size(); }
+    u64 consumed() const { return r_.consumed(); }
+
+  private:
+    LineReader r_;
+    Array<char> head_; // the entry's first line, copied
+    u64 entries_ = 0;
+    char err_[160] = {};
+};
+
+// A codon table's distinct ops as symbols 0 .. size - 1, in codon order (49
+// for nova_v2: 16 doubled core ops, 32 rich ones and INERT), so a genome's op
+// names become a sequence the n-gram model and the alignment can read.
+class OpAlphabet {
+  public:
+    void init(const CodonTable& t);
+    u32 size() const { return size_; }
+    // Space-separated op names to symbols; false if a name isn't one of the
+    // table's ops.
+    bool encode(Str names, Array<u8>* out) const;
+
+  private:
+    HashMap<u32> by_name_; // hash of the name -> symbol
+    u32 size_ = 0;
+};
+
+// A run folder's config: its run.cfg if there is one (a search trial), else
+// the config lines at the top of its replay.log.
+bool load_run_config(const char* dir, Config* cfg, TextBuf* err);
+// The codon table a run used (isa.table, isa.codons; the registry's default
+// when unset).
+bool run_codon_table(Config& cfg, CodonTable* t, TextBuf* err);
+
+// The lineages that met the gate: lineages.csv's `detected` rows and
+// replay.log's replicator events (a living lineage has no lineages.csv row
+// until it dies or the run ends). Either file may be missing.
+struct GatedSet {
+    HashMap<u8> ids;
+    u64 csv_rows = 0, from_csv = 0, from_replay = 0;
+    bool csv = false, replay = false;
+    bool contains(u64 id) const { return ids.contains(id); }
+};
+bool load_gated(const char* dir, GatedSet* out, TextBuf* err);
+
+// Paths.
+void path_join(TextBuf& out, Str dir, Str leaf);
+bool path_exists(const char* path);
+bool make_dirs(const char* path); // every missing level
+// True if `inner` is `outer` or inside it (both made absolute first): the
+// tools refuse to write into a run folder.
+bool path_inside(const char* inner, const char* outer);
+
+// --- A2: the novelty meter -----------------------------------------------------
+
+struct NoveltyOptions {
+    u64 window = 10000;     // ticks a window
+    double threshold = 3.0; // bits per codon at or above which a genotype is novel
+    u32 order = 4;          // the n-gram length: 4 codons
+    u32 top = 5;            // the most surprising successful genotypes listed per window
+};
+
+struct NoveltyWindow {
+    u64 first = 0, last = 0;     // ticks
+    u64 saves = 0;               // genebank entries
+    u64 fresh = 0;               // ... new genotypes: one saved again (on another node) is a repeat
+    u64 novel = 0;               // fresh, at or above the threshold
+    u64 successful = 0;          // fresh, in a lineage that met the gate
+    u64 novel_success = 0;       // ... and novel
+    double surprise = 0;         // summed over the fresh genotypes (bits per codon each)
+    double success_surprise = 0; // ... over the successful ones
+
+    double innovation() const { return fresh ? surprise / fresh : 0.0; }
+    double novel_share() const { return fresh ? static_cast<double>(novel) / fresh : 0.0; }
+    double success_innovation() const { return successful ? success_surprise / successful : 0.0; }
+};
+
+// Genotypes in save order through a 4-codon n-gram model: each new one's
+// surprise (bits per codon) is measured before the model learns from it.
+// Windows by tick. Shared with the live columns that come later.
+class NoveltyMeter {
+  public:
+    bool init(u32 alphabet, const NoveltyOptions& o);
+    // One genotype: its surprise, or -1 for a repeat of one already scored
+    // (neither scored nor learned again). Saves come in tick order; an
+    // earlier tick joins the current window.
+    double add(u64 tick, u64 hash, const u8* sym, u32 len, bool successful);
+    // Closes the last window.
+    void finish();
+    const Array<NoveltyWindow>& windows() const { return win_; }
+    const NoveltyWindow& total() const { return total_; }
+    const NgramModel& model() const { return model_; }
+    // New genotypes by surprise, in half-bit bins (the last: 9.5 and over);
+    // [1] counts only the successful ones.
+    static constexpr u32 kBins = 20;
+    const u64* histogram(u32 successful) const { return hist_[successful ? 1 : 0]; }
+
+  private:
+    NgramModel model_;
+    HashMap<u8> seen_;
+    NoveltyOptions o_;
+    Array<NoveltyWindow> win_;
+    NoveltyWindow cur_, total_;
+    u64 hist_[2][kBins] = {};
+    bool open_ = false;
+};
+
+struct NoveltyReport {
+    Array<NoveltyWindow> windows;
+    NoveltyWindow total;
+    u64 hist[2][NoveltyMeter::kBins] = {}; // as NoveltyMeter::histogram
+    u64 skipped = 0;   // entries whose genome has an op the table lacks
+    u32 alphabet = 0;
+    char table[16] = {};
+    u64 gated = 0;     // gated lineages known
+    bool csv = false, replay = false;
+    TextBuf top_csv;   // per window, the most surprising successful genotypes
+};
+// Streams a run folder's genebank.txt through a NoveltyMeter.
+bool novelty_analyse(const char* dir, const NoveltyOptions& o, NoveltyReport* out, TextBuf* err);
+void novelty_csv(const NoveltyReport& r, TextBuf& out);
+// The headline: each measure's first and last quarter, its least-squares
+// slope, and whether innovation is falling.
+void novelty_summary(const NoveltyReport& r, TextBuf& out);
+
+// --- A4: family trees -------------------------------------------------------------
+
+inline constexpr u32 kTreeMaxLeaves = 4000; // neighbour joining grows as the cube
+
+struct TreeOptions {
+    bool by_lineage = false;
+    u64 lineage = 0;     // --lineage: its saved genotypes ...
+    u32 neighbours = 20; // ... and its founder's nearest earlier genotypes, as context
+    u32 sample = 0;      // --sample N: N / 2 genotypes at random and their saved parents
+    u32 max = 2000;      // leaves at most (capped at kTreeMaxLeaves)
+    u32 pool = 20000;    // earlier genotypes kept to link founders to
+    u64 seed = 1;        // the sample's own stream
+    u32 threads = 1;     // for the distance matrix
+};
+
+enum : u32 { kLeafMember, kLeafNeighbour, kLeafPool };
+
+struct TreeGenome {
+    u64 hash, parent_hash, lineage, tick;
+    u32 node, len;
+    u32 off;  // its symbols in TreeInput::sym
+    u32 kind; // kLeaf*
+    char name[16];
+};
+
+struct TreeInput {
+    Array<TreeGenome> leaves; // the tree's genotypes
+    Array<TreeGenome> pool;   // earlier ones, only to link founders to
+    Array<u8> sym;
+};
+
+struct TreeReport {
+    u32 leaves = 0;
+    u64 candidates = 0; // genotypes eligible before the cap
+    bool capped = false;
+    u32 links = 0;         // tracker parent links with both ends in the tree
+    u32 agree = 0;         // ... whose parent is the child's nearest leaf along the tree
+    u32 agree3 = 0;        // ... among its three nearest
+    u32 aligned_agree = 0; // ... the nearest by alignment alone
+    double parent_distance = 0; // ... the mean alignment distance from child to parent
+    u32 founders = 0;      // members with no parent: founders, and arrivals on other nodes
+    u32 linked = 0;        // ... given a likely ancestor
+    double mean_confidence = 0;
+    TextBuf newick, links_csv;
+};
+
+// Distances, the tree, the agreement and the founders' likely ancestors.
+bool tree_build(const TreeInput& in, const TreeOptions& o, TreeReport* out, TextBuf* err);
+// Reads a run folder's genebank.txt for tree_build.
+bool tree_analyse(const char* dir, const TreeOptions& o, TreeReport* out, TextBuf* err);
+// The k lineages with the most saved genotypes, a line each (to pick one).
+bool top_lineages(const char* dir, u32 k, TextBuf& out, TextBuf* err);
+
+// --- A1: a run's scores ------------------------------------------------------------
+
+enum : u32 {
+    kScoreLifespan,    // gated lineages' median lifespan, ticks
+    kScoreDepth,       // their 90th-percentile depth
+    kScoreGenotypes,   // distinct genotypes saved
+    kScoreEvenness,    // Pielou's evenness of those genotypes over lineages
+    kScoreNovelty,     // successful novelty: bits per codon per 1,000 ticks, second half
+    kScorePersistence, // the share of stats windows with bodies at or above the floor
+    kScoreSpeed,       // ticks a second
+    kScoreCount
+};
+const char* score_name(u32 i);
+
+struct ScoreOptions {
+    double body_floor = 0;  // bodies a window needs to count as persisting (0: one per node)
+    double novelty_threshold = 3.0;
+};
+
+struct RunScores {
+    double s[kScoreCount] = {};
+    u64 ticks = 0, gated = 0, saves = 0;
+    double min_bodies = 0, body_floor = 0, seconds = 0;
+    u64 hash = 0; // the world hash result.txt gives (0 if none)
+};
+bool score_run(const char* dir, const ScoreOptions& o, RunScores* out, TextBuf* err);
+
+// --- A1: the settings search --------------------------------------------------------
+
+struct SearchRange {
+    const Key* key; // its registry entry
+    double lo, hi;
+    bool log;       // searched on a log scale
+};
+
+// A search file: `key = value` lines parsed with Config. Its keys are the
+// search's own, not world settings, so they aren't in the registry:
+//   search.base, search.out, search.seed, search.trials, search.init,
+//   search.seeds, search.parallel, search.threads, search.ticks,
+//   search.best, search.body_floor, search.floor_penalty, search.threshold
+//   range.<setting> = lo hi [log | linear]  or  = registry [log | linear]
+//   set.<setting> = value
+//   score.<score> = weight      floor.<score> = minimum
+struct SearchSpec {
+    TextBuf path, base, out;
+    Config base_cfg; // the base config, as loaded
+    Config sets;     // set.*, without the prefix
+    u64 seed = 1;
+    u32 trials = 40, init = 20, seeds = 2, parallel = 2, threads = 2, best = 5;
+    u64 ticks = 50000;
+    double weight[kScoreCount] = {};
+    double floor[kScoreCount] = {};
+    double body_floor = 1;    // bodies per node, for persistence
+    double floor_penalty = 2; // the objective lost per whole floor missed
+    double threshold = 3.0;   // novelty's threshold, bits per codon
+    Array<SearchRange> ranges;
+};
+bool search_load(const char* path, SearchSpec* s, TextBuf* err);
+
+struct SearchOptions {
+    const char* nova_exe = nullptr; // the program each run is (`nova run`)
+    bool dry_run = false;           // print the plan and the first trials only
+    bool quiet = false;
+};
+bool search_run(SearchSpec& s, const SearchOptions& o, TextBuf* err);
+
+// The objective: sum of weight x ln(1 + score), less floor_penalty for each
+// floor's shortfall (as a share of the floor). The default weights make it
+// ln((1 + lifespan)(1 + novelty)): lineage length times novelty.
+double search_objective(const SearchSpec& s, const double* scores);
+// The setting's value for a point u in [0, 1] of its range, as config text;
+// *snapped is where that value sits in the range (what the model sees).
+void search_value(const SearchRange& r, double u, TextBuf& text, double* snapped);
+// A trial run's full config (see search.cpp): the base, set.*, the trial's
+// values, its seed and its outputs.
+void search_trial_config(const SearchSpec& s, const double* u, u64 world_seed, TextBuf& out);
+
+} // namespace nova

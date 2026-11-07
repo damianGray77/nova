@@ -12,7 +12,9 @@ if(MSVC)
     target_compile_options(nova_viewer PRIVATE /W4 /permissive-)
 endif()
 
-add_executable(nova main.cpp bench.cpp bench_costs.cpp bench_warp.cpp view_cmd.cpp)
+add_executable(nova main.cpp bench.cpp bench_costs.cpp bench_warp.cpp view_cmd.cpp
+    # Learning from the runs (docs/analysis-plan.md): nova analyse, nova search.
+    analyse_cmd.cpp)
 target_link_libraries(nova PRIVATE nova::core nova_viewer)
 if(MSVC)
     target_compile_options(nova PRIVATE /W4 /permissive-)

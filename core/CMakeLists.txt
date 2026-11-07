@@ -37,6 +37,20 @@ add_library(nova_core STATIC
     src/disaster.cpp
     # The setup page's check (docs/config-plan.md C4): a config read, not built.
     src/check.cpp
+    # Learning from the runs (docs/analysis-plan.md): the hand-rolled models
+    # (A0), and the tools that read run files and search settings (A2, A4, A1).
+    src/learn/linalg.cpp
+    src/learn/pca.cpp
+    src/learn/kmeans.cpp
+    src/learn/ngram.cpp
+    src/learn/align.cpp
+    src/learn/nj.cpp
+    src/learn/gp.cpp
+    src/analysis/runfiles.cpp
+    src/analysis/novelty.cpp
+    src/analysis/tree.cpp
+    src/analysis/scores.cpp
+    src/analysis/search.cpp
 )
 add_library(nova::core ALIAS nova_core)
 

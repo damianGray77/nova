@@ -41,11 +41,14 @@ add_executable(nova_tests
     test_substrates.cpp
     test_tiers.cpp
     test_disasters.cpp
+    # Learning from the runs (docs/analysis-plan.md).
+    test_analysis.cpp
 )
 target_link_libraries(nova_tests PRIVATE nova::core nova_viewer)
 target_compile_features(nova_tests PRIVATE cxx_std_20)
 # The keys suite loads the presets in configs/. The viewer suite runs nova.exe
-# on a setup page's run.cfg (nova run and nova view must hash as the page's run).
+# on a setup page's run.cfg (nova run and nova view must hash as the page's run), and the analysis
+# suite's tiny search runs its trials with it.
 target_compile_definitions(nova_tests PRIVATE NOVA_SOURCE_DIR="${PROJECT_SOURCE_DIR}" NOVA_EXE="$<TARGET_FILE:nova>")
 add_dependencies(nova_tests nova)
 if(MSVC)
@@ -56,7 +59,8 @@ endif()
 # files do so in the build tree (the CTest working directory).
 set(NOVA_SUITES containers str rng config pool world gate snapshot stats replay genebank
     isa interp tierra soup heat contact rules tables detect gpu npu dispersal leak edges disk salvage signals lifecycle async devices
-    view viewer landscape budget warp costs ecology keys substrates tiers disasters)
+    view viewer landscape budget warp costs ecology keys substrates tiers disasters
+    analysis) # learning from the runs (docs/analysis-plan.md)
 foreach(suite IN LISTS NOVA_SUITES)
     add_test(NAME ${suite} COMMAND nova_tests ${suite})
     set_tests_properties(${suite} PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
