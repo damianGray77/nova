@@ -59,6 +59,7 @@ using namespace nova;
 int cmd_bench(double seconds, u32 threads); // bench.cpp
 int cmd_bench_devices(u32 threads);          // bench.cpp
 int cmd_bench_costs();                       // bench_costs.cpp
+int cmd_bench_warp(int argc, char** argv);   // bench_warp.cpp
 
 // nova devices: the GPUs and NPU this machine offers, and what each accepts
 // (Phase 5, design.md 6.11).
@@ -241,6 +242,8 @@ struct Args {
     u64 hashes_from = 0;
     const char* node_hashes = nullptr;
     const char* dump_node = nullptr; // --dump-node N:PREFIX: node N's state at the end, a section a file
+    // --dump-round T:PATH: the first GPU warp round of tick T (or later), for `nova bench warp`
+    const char* dump_round = nullptr;
 };
 
 bool parse_args(int argc, char** argv, Args* a) {
@@ -278,6 +281,8 @@ bool parse_args(int argc, char** argv, Args* a) {
             a->node_hashes = argv[++i];
         } else if (strcmp(argv[i], "--dump-node") == 0) {
             a->dump_node = argv[++i];
+        } else if (strcmp(argv[i], "--dump-round") == 0) {
+            a->dump_round = argv[++i];
         } else if (strcmp(argv[i], "--set") == 0) {
             if (a->set_count == static_cast<int>(sizeof a->sets / sizeof a->sets[0]))
                 return false;
@@ -1115,6 +1120,15 @@ int cmd_resume(const Args& a) {
     StepProfile prof;
     if (a.profile)
         run.world().set_profile(&prof);
+    if (a.dump_round) { // --dump-round T:PATH
+        const char* colon = strchr(a.dump_round, ':');
+        u64 t = 0;
+        if (!colon || !parse_u64(Str(a.dump_round, static_cast<usize>(colon - a.dump_round)), &t)) {
+            fprintf(stderr, "nova: --dump-round expects T:PATH\n");
+            return 2;
+        }
+        run.world().set_warp_dump(colon + 1, t);
+    }
     const u64 plain0 = w.warp_plain_ticks(), split0 = w.warp_split_ticks(), gn0 = w.warp_gpu_bodies(),
               rn0 = w.warp_ref_bodies();
     const double t0 = now_ms();
@@ -1149,15 +1163,32 @@ int cmd_resume(const Args& a) {
                static_cast<unsigned long long>(w.warp_split_ticks() - split0),
                static_cast<unsigned long long>(w.warp_plain_ticks() - plain0),
                gn + rn ? 100.0 * static_cast<double>(gn) / static_cast<double>(gn + rn) : 0.0);
+        printf("nova: warp phases, wall ms a tick: first halves %.3f, pack %.3f, split %.3f, unpack %.3f, host lanes "
+               "%.3f, host instructions %.3f, second halves %.3f, later rounds' passes %.3f (split: choosing %.3f, "
+               "fetching %.3f); the slowest node: first half %.3f, pack %.3f, second half %.3f\n",
+               prof.w_first * per, prof.w_pack * per, prof.w_split * per, prof.w_unpack * per,
+               prof.w_hostlanes * per, prof.w_host * per, prof.w_second * per, prof.w_later * per,
+               prof.w_choose * per, prof.w_fetch * per, prof.w_first_max * per, prof.w_pack_max * per,
+               prof.w_second_max * per);
+        printf("nova: nodes' parts, thread-ms a tick: first %.3f (bodies %.3f), pack %.3f, reference %.3f, unpack "
+               "%.3f, host %.3f, second %.3f; barrier: signals %.3f, departures %.3f, delivery %.3f, links %.3f, "
+               "lifecycle %.3f, tallies %.3f, ports %.3f\n",
+               prof.n_first * per, prof.n_bodies * per, prof.n_pack * per, prof.n_ref * per, prof.n_unpack * per,
+               prof.n_host * per, prof.n_second * per, prof.signals * per, prof.departures * per,
+               prof.delivery * per, prof.links * per, prof.lifecycle * per, prof.tally * per, prof.ports * per);
         const WarpGpuStats& ws = w.warp_gpu_stats();
         if (ws.rounds) {
             const double r = static_cast<double>(ws.rounds);
+            printf("nova: the warp kernel: %s\n", w.warp_kernel());
             printf("nova: GPU rounds %llu: %.0f warp steps a round, %.0f in the longest body; on the device's clock "
                    "%.3f ms kernel, %.3f upload, %.3f download a round; %.0f warps' lanes sent a round; the CPU "
                    "threads' share %.3f ms a round; model %.3f us a GPU step, %.4f us a reference step, limit %u\n",
                    static_cast<unsigned long long>(ws.rounds), ws.steps / r, ws.steps_longest / r, ws.ms_dev_kernel / r,
                    ws.ms_dev_up / r, ws.ms_dev_down / r, ws.lanes_sent / r, w.warp_ref_wall() * 1000.0 / r,
                    w.warp_model_gstep() * 1e6, w.warp_model_hstep() * 1e6, w.warp_limit());
+            printf("nova: lanes back a round: %.0f warps gathered with the round, %.0f fetched in %.2f fetches "
+                   "(%.3f ms)\n",
+                   ws.lanes_gathered / r, ws.lanes_fetched / r, ws.fetches / r, ws.ms_fetch / r);
         }
     }
     write_node_hashes(a, w);
@@ -1200,6 +1231,8 @@ int main(int argc, char** argv) {
         return cmd_devices();
     if (argc == 3 && strcmp(argv[1], "bench") == 0 && strcmp(argv[2], "costs") == 0)
         return cmd_bench_costs();
+    if (argc >= 3 && strcmp(argv[1], "bench") == 0 && strcmp(argv[2], "warp") == 0)
+        return cmd_bench_warp(argc, argv);
     if ((argc == 2 || argc == 3) && strcmp(argv[1], "costs") == 0) { // Phase 9: a cost table
         CostTable t;
         if (!builtin_costs(Str(argc == 3 ? argv[2] : "home_v1"), &t)) {
@@ -1234,3 +1267,4 @@ int main(int argc, char** argv) {
     }
     return usage();
 }
+

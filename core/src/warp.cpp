@@ -51,8 +51,15 @@ struct WarpTrace {
     TextBuf* out = nullptr;
 };
 WarpTrace g_trace;
+u64* g_ophist = nullptr; // warp_op_histogram: one thread at a time
 
-void warp_trace(u32 lane0, u32 l, u32 step, u32 ip, u32 op, const Lane& L) {
+void warp_trace(u32 lane0, u32 l, u32 step, u32 ip, u32 op, const Lane& L, u32 seen) {
+    if (g_ophist) { // per Op (kOpCount: a lane that couldn't run the code): lane-instructions, then places searched
+        const u32 k = op < kOpCount ? op : kOpCount;
+        ++g_ophist[k];
+        if (op < kOpCount)
+            g_ophist[kOpCount + 1 + k] += seen;
+    }
     if (!g_trace.on || lane0 != g_trace.lane0 || l != g_trace.lane || !g_trace.out)
         return;
     char line[256];
@@ -74,6 +81,10 @@ void warp_trace_begin(u32 lane0, u32 lane, TextBuf* out) {
 
 void warp_trace_end() {
     g_trace = WarpTrace{};
+}
+
+void warp_op_histogram(u64* counts) {
+    g_ophist = counts;
 }
 
 namespace {
@@ -115,7 +126,7 @@ struct WarpVM {
             (x) = (v);                                                                                                 \
     } while (0)
 #define W_LOOP
-#define W_TRACE(wr, l, step, ip, op, L) warp_trace(IMG((wr) + WW_LANE0), (l), (step), (ip), (op), (L))
+#define W_TRACE(wr, l, step, ip, op, L) warp_trace(IMG((wr) + WW_LANE0), (l), (step), (ip), (op), (L), g_seen)
 #define LANE_T Lane
 #define STACK_GET(L, i) ((L).stack[(i)])
 #define STACK_SET(L, i, v) ((L).stack[(i)] = (v))
@@ -517,12 +528,28 @@ bool Soup::warp_pack(u32 round) {
     // action doesn't run, nor one whose clock is out for this tick.
     auto waits = [&](u32 w) { return timed && (wuntil_[w] > tick_ || wtime_[w] >= tick_time); };
     const bool stamps = !stamp_.empty();
+    // SENSE 22/23 for every body at once: the soonest live action on each, in
+    // one pass over the actions (action_on scans them all per body: Phase 10
+    // profiling found that most of packing's time in a timed world).
+    if (timed) {
+        if (wact_soon_.size() < bodies_.size())
+            wact_soon_.resize(bodies_.size());
+        wact_soon_.fill(kNone);
+        for (u32 i = 0; i < actions_.size(); ++i) {
+            const Action& a = actions_[i];
+            if (a.target >= bodies_.size() || a.target_serial != bodies_[a.target].serial || !action_live(a))
+                continue;
+            u32& best = wact_soon_[a.target];
+            if (best == kNone || a.end < actions_[best].end)
+                best = i;
+        }
+    }
     const double serial = static_cast<double>(p_->warp_step_cost) + p_->warp_lane_cost;
     Array<u32>& run = scratch_; // this body's warps to run, then their places in its list
     Array<u32> places;
     for (usize k = 0; k < n; ++k) {
         const u32 b = order_[(sched_start_ + k) % n];
-        if (!bodies_[b].alive || warp_count_[b] == 0)
+        if (warp_count_[b] == 0 || !bodies_[b].alive) // (the small array first: most bodies have no warp)
             continue;
         run.clear();
         places.clear();
@@ -587,7 +614,17 @@ bool Soup::warp_pack(u32 round) {
                 keys.push((static_cast<u64>(blocks_[kb].start) << 32) | j);
                 lens.push(blocks_[kb].len);
             }
-            sort_u64(keys.data(), keys.size());
+            if (keys.size() <= 64) { // insertion sort: the same order, quicker on short, nearly sorted lists
+                for (usize i = 1; i < keys.size(); ++i) {
+                    const u64 x = keys[i];
+                    usize p = i;
+                    for (; p > 0 && keys[p - 1] > x; --p)
+                        keys[p] = keys[p - 1];
+                    keys[p] = x;
+                }
+            } else {
+                sort_u64(keys.data(), keys.size());
+            }
             sorted = true;
             u64 prev_end = 0;
             for (usize i = 0; i < keys.size() && sorted; ++i) {
@@ -603,10 +640,12 @@ bool Soup::warp_pack(u32 round) {
         const u32 page = code + codons;
         const u32 stamp = page + pages * WP_SIZE;
         const u32 sort_at = stamp + (stamps ? codons : 0);
-        wimg_.resize(static_cast<usize>(sort_at) + (sorted ? 2 * nblk : 0));
+        wimg_.resize_unfilled(static_cast<usize>(sort_at) + (sorted ? 2 * nblk : 0));
         u32* I = wimg_.data();
-        for (u32 i = rec; i < wimg_.size(); ++i)
-            I[i] = 0;
+        // Only the header and the warp entries start as zeros: everything
+        // after them is written in full below (Phase 10 profiling: zeroing
+        // the whole record was a pass over some 20 MB a tick).
+        memset(I + rec, 0, static_cast<usize>(blk - rec) * 4);
         const Body& B = bodies_[b];
         u64 z = Rng::stream_base(seed_ ^ 0x7761727000000000ull, node_, tick_); // "warp"
         z = mix64(z + B.serial);
@@ -637,7 +676,10 @@ bool Soup::warp_pack(u32 round) {
             if (r == 0 || r == 4 || r == 20 || r == 21)
                 continue; // where each lane runs: the GPU reads those itself
             u32 v = 0;
-            if (sense_reading(b, r, kNone, &v)) {
+            if (timed && (r == 22 || r == 23)) { // (as sense_reading, from the pass above)
+                ok_bits |= 1u << r;
+                I[rec + WB_SENSE + r] = action_reading(r, wact_soon_[b]);
+            } else if (sense_reading(b, r, kNone, &v)) {
                 ok_bits |= 1u << r;
                 I[rec + WB_SENSE + r] = v;
             }
@@ -661,24 +703,31 @@ bool Soup::warp_pack(u32 round) {
             I[e + WK_ID] = kb;
             I[e + WK_PAGE] = pe;
             const u32 mine_here = CW_MINE | (j << CW_OWNER_SHIFT);
+            // The usual case first, without branches: every codon the block's
+            // own. Any that isn't is put right after, one by one.
+            const u8* mem = mem_.data() + bl.start;
+            const u32* own = owner_.data() + bl.start;
+            u32* word = I + cw;
+            u32 other = 0;
             for (u32 i = 0; i < bl.len; ++i) {
-                const u32 a = bl.start + i;
-                const u32 o = owner_[a];
-                u32 word = mem_[a];
-                if (o == kb) { // the usual case: this block's own codon
-                    word |= mine_here;
-                } else if (o != kNone && blocks_[o].body == b) {
+                word[i] = static_cast<u32>(mem[i]) | mine_here;
+                other |= own[i] ^ kb;
+            }
+            for (u32 i = 0; other && i < bl.len; ++i) {
+                const u32 o = own[i];
+                if (o == kb)
+                    continue;
+                if (o != kNone && blocks_[o].body == b) {
                     u32 place_of = 0; // another of the body's blocks: its place in the table
                     for (u32 t = B.blocks; t != o; t = blocks_[t].next)
                         ++place_of;
-                    word |= CW_MINE | (place_of << CW_OWNER_SHIFT);
+                    word[i] = static_cast<u32>(mem[i]) | CW_MINE | (place_of << CW_OWNER_SHIFT);
                 } else {
-                    word |= 0xFFFFu << CW_OWNER_SHIFT;
+                    word[i] = static_cast<u32>(mem[i]) | (0xFFFFu << CW_OWNER_SHIFT);
                 }
-                I[cw + i] = word;
-                if (stamps)
-                    I[cw + (stamp - code) + i] = stamp_[a];
             }
+            if (stamps && bl.len)
+                memcpy(I + cw + (stamp - code), stamp_.data() + bl.start, static_cast<usize>(bl.len) * 4);
             cw += bl.len;
             if (bl.len) {
                 const u32 first = bl.start >> kPageBits, last = (bl.start + bl.len - 1) >> kPageBits;
@@ -689,6 +738,8 @@ bool Soup::warp_pack(u32 round) {
                         thr = prob_threshold(p_->mem.speed(h));
                     I[pe + WP_THR] = thr;
                     I[pe + WP_HEAT] = static_cast<u32>(h);
+                    I[pe + WP_FETCH] = 0;
+                    I[pe + WP_WRITE] = 0;
                 }
             }
         }
@@ -726,6 +777,14 @@ void Soup::warp_run_record(usize i) {
     vm.g_cst = wcst_.data();
     vm.g_lanes = lanes_.data();
     vm.w_run_body(wrec_[i]);
+}
+
+void warp_run_reference(u32* img, const u32* cst, Lane* lanes, u32 rec) {
+    WarpVM vm;
+    vm.g_img = img;
+    vm.g_cst = cst;
+    vm.g_lanes = lanes;
+    vm.w_run_body(rec);
 }
 
 void Soup::warp_unpack(bool all_on_gpu) {

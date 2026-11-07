@@ -45,6 +45,50 @@ foreach(part isa layout)
         COMMENT "Embedding warp_${part}.inc for the GPU")
     target_sources(nova_core PRIVATE ${NOVA_GEN}/warp_${part}_bytes.inc)
 endforeach()
+# The warp kernel itself (docs/dxc-plan.md D1): warp_isa.inc between a head
+# and a main, embedded for FXC (any lane count, or warp.kernel = fxc).
+add_custom_command(
+    OUTPUT ${NOVA_GEN}/warp_kernel_bytes.inc
+    COMMAND ${CMAKE_COMMAND} -DIN=${CMAKE_CURRENT_SOURCE_DIR}/src/warp_kernel.hlsl
+            -DOUT=${NOVA_GEN}/warp_kernel_bytes.inc -DNAME=kWarpkernelSource
+            -P ${PROJECT_SOURCE_DIR}/tools/embed_bytes.cmake
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/warp_kernel.hlsl ${PROJECT_SOURCE_DIR}/tools/embed_bytes.cmake
+    COMMENT "Embedding warp_kernel.hlsl for the GPU")
+target_sources(nova_core PRIVATE ${NOVA_GEN}/warp_kernel_bytes.inc)
+
+# ... and compiled at build time by the Windows SDK's DXC (D2): for 32 lanes,
+# the plain kernel and each groupshared tier, signed by the SDK's dxil.dll and
+# embedded. A build tool only: no header and no DLL at run time. dxc.exe is
+# looked for beside the SDK's rc.exe (the SDK the build already uses).
+option(NOVA_DXC "Compile the warp kernel with the Windows SDK's DXC at build time" ON)
+if(NOVA_DXC AND CMAKE_RC_COMPILER)
+    get_filename_component(nova_sdk_bin "${CMAKE_RC_COMPILER}" DIRECTORY)
+    find_program(NOVA_DXC_EXE NAMES dxc HINTS "${nova_sdk_bin}" NO_DEFAULT_PATH)
+endif()
+if(NOVA_DXC AND NOVA_DXC_EXE)
+    message(STATUS "nova: the warp kernel is compiled by ${NOVA_DXC_EXE}")
+    foreach(lds 0 256 512 1024 2048)
+        set(dxil ${NOVA_GEN}/warp_32_${lds}.dxil)
+        add_custom_command(
+            OUTPUT ${dxil}
+            COMMAND ${NOVA_DXC_EXE} -nologo -T cs_6_0 -E main -O3 -D W_LANES=32 -D W_LDS=${lds}
+                    -I ${CMAKE_CURRENT_SOURCE_DIR}/src -Fo ${dxil} ${CMAKE_CURRENT_SOURCE_DIR}/src/warp_kernel.hlsl
+            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/warp_kernel.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/src/warp_isa.inc
+                    ${CMAKE_CURRENT_SOURCE_DIR}/src/warp_layout.inc
+            COMMENT "Compiling the warp kernel with DXC (32 lanes, groupshared ${lds})")
+        add_custom_command(
+            OUTPUT ${NOVA_GEN}/warp_dxil_32_${lds}.inc
+            COMMAND ${CMAKE_COMMAND} -DIN=${dxil} -DOUT=${NOVA_GEN}/warp_dxil_32_${lds}.inc
+                    -DNAME=kWarpDxil32_${lds} -P ${PROJECT_SOURCE_DIR}/tools/embed_bytes.cmake
+            DEPENDS ${dxil} ${PROJECT_SOURCE_DIR}/tools/embed_bytes.cmake
+            COMMENT "Embedding the DXC warp kernel (groupshared ${lds})")
+        target_sources(nova_core PRIVATE ${NOVA_GEN}/warp_dxil_32_${lds}.inc)
+    endforeach()
+    target_compile_definitions(nova_core PRIVATE NOVA_DXC=1)
+else()
+    message(STATUS "nova: no DXC (dxc.exe beside the SDK's rc.exe, or NOVA_DXC=OFF): "
+                   "the warp kernel is compiled by FXC at run time")
+endif()
 target_include_directories(nova_core PRIVATE ${NOVA_GEN})
 
 # The real GPU and NPU (Phase 5): Windows' Direct3D 12, DXCore and DirectML,

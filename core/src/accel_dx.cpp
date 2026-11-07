@@ -201,6 +201,30 @@ struct Queue {
         return event != nullptr;
     }
 
+    // Another compute queue (with its own list and fence) on an existing
+    // device, so the two can run at once and share resources.
+    bool init_on(ID3D12Device* d, TextBuf* r) {
+        dev = d;
+        dev->AddRef();
+        HRESULT hr = E_FAIL;
+        D3D12_COMMAND_QUEUE_DESC qd = {};
+        qd.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+        if (FAILED(hr = dev->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue))) ||
+            FAILED(hr = dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE, IID_PPV_ARGS(&alloc))) ||
+            FAILED(hr = dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, alloc, nullptr,
+                                               IID_PPV_ARGS(&list))) ||
+            FAILED(hr = dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)))) {
+            say_hr(r, "second queue setup failed", hr);
+            return false;
+        }
+        event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+        return event != nullptr;
+    }
+
+    // Makes what this queue runs next wait (on the GPU) for what queue o has
+    // started so far.
+    void after(const Queue& o) { queue->Wait(o.fence, o.value); }
+
     // Closes the list and starts it (Phase 8: the CPU works while it runs).
     bool exec(TextBuf* r) {
         HRESULT hr = list->Close();
@@ -1409,151 +1433,86 @@ bool GpuBackend::collect(int ticket, u8* codons, u32* scalars) {
 
 // --- warps on the GPU (Phase 8, design.md 6.14) --------------------------------
 //
-// The kernel is warp_isa.inc itself (embedded at build time), between a head
-// that binds its macros to HLSL and a main that picks the body record: one
-// thread group per record, one thread per lane. The CPU reference includes
-// the same file as C++ (warp.cpp), so both run one source.
+// The kernel is warp_kernel.hlsl: warp_isa.inc itself, between a head that
+// binds its macros to HLSL and a main that picks the body record, one thread
+// group per record and one thread per lane. The CPU reference includes the
+// same warp_isa.inc as C++ (warp.cpp), so both run one source.
+//
+// Its bytecode (docs/dxc-plan.md): DXC's, compiled at build time for 32
+// lanes and embedded (the plain kernel and each groupshared tier), when the
+// build had DXC, the world has 32 lanes and the device takes Shader Model
+// 6.0; else FXC's, compiled here from the embedded source (and cached).
 namespace {
 
 #include "warp_isa_bytes.inc"
 #include "warp_layout_bytes.inc"
+#include "warp_kernel_bytes.inc"
 
-const char* const kWarpHead = R"(
-#define INOUT(T) inout T
-#if W_LDS
-// The body's record and the constants in groupshared memory (a record of at
-// most W_LDS words): every access a few cycles instead of a trip to memory.
-#define IMG(i) gs_img[(i) - g_rec]
-#define CST(i) gs_cst[(i)]
-#define ATOMIC_ADD(i, v) InterlockedAdd(gs_img[(i) - g_rec], (v))
+#if NOVA_DXC
+#include "warp_dxil_32_0.inc"
+#include "warp_dxil_32_256.inc"
+#include "warp_dxil_32_512.inc"
+#include "warp_dxil_32_1024.inc"
+#include "warp_dxil_32_2048.inc"
+#endif
+
+// DXC's kernels in this build: lanes, groupshared words, the bytecode.
+struct DxilKernel {
+    u32 lanes, lds;
+    const unsigned char* code;
+    usize size;
+};
+#if NOVA_DXC
+const DxilKernel kDxil[] = {
+    {32, 0, kWarpDxil32_0, sizeof kWarpDxil32_0 - 1},
+    {32, 256, kWarpDxil32_256, sizeof kWarpDxil32_256 - 1},
+    {32, 512, kWarpDxil32_512, sizeof kWarpDxil32_512 - 1},
+    {32, 1024, kWarpDxil32_1024, sizeof kWarpDxil32_1024 - 1},
+    {32, 2048, kWarpDxil32_2048, sizeof kWarpDxil32_2048 - 1},
+};
+constexpr u32 kDxilCount = sizeof kDxil / sizeof kDxil[0];
 #else
-#define IMG(i) g_img[g_base + (i)]
-#define CST(i) g_cst[(i)]
-#define ATOMIC_ADD(i, v) InterlockedAdd(g_img[g_base + (i)], (v))
+const DxilKernel* const kDxil = nullptr;
+constexpr u32 kDxilCount = 0;
 #endif
-#define LANES(i) g_lanes[g_lbase + (i)]
-#define SYNC GroupMemoryBarrierWithGroupSync();
-#define ONCE_BEGIN if (g_tid == 0u) {
-#define ONCE_END }
-#define LANE_BEGIN(l0) { uint l = g_tid; {
-#define LANE_END } }
-#define LANES_LOAD(l0) LaneR L = lane_load((l0) + g_tid);
-#define LANES_STORE(l0) lane_store((l0) + g_tid, L);
-#define GS_MIN(x, v) InterlockedMin(x, v)
-#define GS_ADD(x, v) InterlockedAdd(x, v)
-#define GS_MAX(x, v) InterlockedMax(x, v)
-#define W_LOOP [loop]
-#define W_TRACE(wr, l, step, ip, op, L)
-#define LANE_T LaneR
-#define WARP_LANE0(wr, wi) IMG((wr) + WW_LANE0)
-#define STACK_GET(L, i) g_lanes[g_lidx].stack[(i)]
-#define STACK_SET(L, i, v) g_lanes[g_lidx].stack[(i)] = (v)
-struct Lane {
-    uint ax; uint bx; uint cx; uint dx;
-    uint stack[16];
-    uint ip; uint rh; uint wh; uint block; uint sp;
-    uint err; uint errs; uint halted; uint yielded;
-};
-struct LaneR {
-    uint ax; uint bx; uint cx; uint dx;
-    uint ip; uint rh; uint wh; uint block; uint sp;
-    uint err; uint errs; uint halted; uint yielded;
-};
-StructuredBuffer<uint> g_cst : register(t0);
-StructuredBuffer<uint4> g_jobs : register(t1);
-RWStructuredBuffer<uint> g_img : register(u0);
-RWStructuredBuffer<Lane> g_lanes : register(u1);
-cbuffer Params : register(b0) { uint g_njobs; uint g_row; uint g_p0; uint g_p1; };
-static uint g_base;
-static uint g_lbase;
-static uint g_tid;
-static uint g_rec;
-static uint g_lidx; // this thread's lane in g_lanes
-static uint g_seen; // this lane's template codons read and places searched this step (Phase 9c)
-#if W_LDS
-groupshared uint gs_img[W_LDS];
-groupshared uint gs_cst[256];
-#endif
-LaneR lane_load(uint i) {
-    LaneR r;
-    g_lidx = g_lbase + i;
-    r.ax = g_lanes[g_lidx].ax;
-    r.bx = g_lanes[g_lidx].bx;
-    r.cx = g_lanes[g_lidx].cx;
-    r.dx = g_lanes[g_lidx].dx;
-    r.ip = g_lanes[g_lidx].ip;
-    r.rh = g_lanes[g_lidx].rh;
-    r.wh = g_lanes[g_lidx].wh;
-    r.block = g_lanes[g_lidx].block;
-    r.sp = g_lanes[g_lidx].sp;
-    r.err = g_lanes[g_lidx].err;
-    r.errs = g_lanes[g_lidx].errs;
-    r.halted = g_lanes[g_lidx].halted;
-    r.yielded = g_lanes[g_lidx].yielded;
-    return r;
-}
-void lane_store(uint i, LaneR r) {
-    uint k = g_lbase + i;
-    g_lanes[k].ax = r.ax;
-    g_lanes[k].bx = r.bx;
-    g_lanes[k].cx = r.cx;
-    g_lanes[k].dx = r.dx;
-    g_lanes[k].ip = r.ip;
-    g_lanes[k].rh = r.rh;
-    g_lanes[k].wh = r.wh;
-    g_lanes[k].block = r.block;
-    g_lanes[k].sp = r.sp;
-    g_lanes[k].err = r.err;
-    g_lanes[k].errs = r.errs;
-    g_lanes[k].halted = r.halted;
-    g_lanes[k].yielded = r.yielded;
-}
-groupshared uint gs_min;
-groupshared uint gs_count;
-groupshared uint gs_wa[W_LANES];
-groupshared uint gs_wv[W_LANES];
-groupshared uint gs_ctl[12];
-)";
 
-const char* const kWarpMain = R"(
-[numthreads(W_LANES, 1, 1)]
-void main(uint3 g : SV_GroupID, uint3 t : SV_GroupThreadID) {
-    uint j = g.y * g_row + g.x;
-    uint i = 0u;
-    if (j >= g_njobs)
-        return;
-    uint4 job = g_jobs[j];
-    g_base = job.x;
-    g_lbase = job.z;
-    g_tid = t.x;
-    g_rec = job.y;
-#if W_LDS
-    for (i = g_tid; i < job.w; i += W_LANES)
-        gs_img[i] = g_img[g_base + job.y + i];
-    for (i = g_tid; i < WC_COUNT; i += W_LANES)
-        gs_cst[i] = g_cst[i];
-    GroupMemoryBarrierWithGroupSync();
-#endif
-    w_run_body(job.y);
-#if W_LDS
-    GroupMemoryBarrierWithGroupSync();
-    for (i = g_tid; i < job.w; i += W_LANES)
-        g_img[g_base + job.y + i] = gs_img[i];
-#endif
+const DxilKernel* find_dxil(u32 lanes, u32 lds) {
+    for (u32 i = 0; i < kDxilCount; ++i)
+        if (kDxil[i].lanes == lanes && kDxil[i].lds == lds)
+            return &kDxil[i];
+    return nullptr;
 }
-)";
 
-// The groupshared kernel takes records of at most this many words; larger
-// ones run on the plain kernel.
-constexpr u32 kWarpLdsWords = 2048;
+// FXC's includes: the kernel file's two, from the bytes embedded beside it.
+struct WarpIncludes : ID3DInclude {
+    HRESULT __stdcall Open(D3D_INCLUDE_TYPE, LPCSTR name, LPCVOID, LPCVOID* data, UINT* bytes) override {
+        if (strcmp(name, "warp_layout.inc") == 0) {
+            *data = kWarplayoutSource;
+            *bytes = static_cast<UINT>(sizeof kWarplayoutSource - 1);
+            return S_OK;
+        }
+        if (strcmp(name, "warp_isa.inc") == 0) {
+            *data = kWarpisaSource;
+            *bytes = static_cast<UINT>(sizeof kWarpisaSource - 1);
+            return S_OK;
+        }
+        return E_FAIL;
+    }
+    HRESULT __stdcall Close(LPCVOID) override { return S_OK; }
+};
+
+// A groupshared tier's largest size (WarpKernelOptions::lds): its image, the
+// constants and the step's own words within D3D12's 32 KB a group.
+constexpr u32 kWarpLdsMax = 7680;
 static_assert(WC_COUNT <= 256, "the constants fit gs_cst");
 
 static_assert(sizeof(Lane) == 29 * 4 && kMaxStack == 16, "the kernel's Lane is soup.h's");
 
-// The kernel takes FXC tens of seconds to compile, so the bytecode is kept:
-// in memory for the process, and in a file beside the executable
-// (nova_warp_<key>.cso), keyed by a hash of the source, the lane count and
-// the compiler flags. A stale or damaged file only costs a compile.
+// The kernel takes FXC about a minute and a half to compile, so its bytecode
+// is kept: in memory for the process, and in a file beside the executable
+// (nova_warp_<key>.cso), keyed by a hash of the sources, the lane count, the
+// groupshared size and the compiler flags. A stale or damaged file only costs
+// a compile.
 struct WarpCode {
     u64 key = 0;
     Array<u8> code;
@@ -1578,11 +1537,18 @@ void warp_code_path(u64 key, char* out, usize n) {
     snprintf(out, n, "%snova_warp_%016llx.cso", exe, static_cast<unsigned long long>(key));
 }
 
-// The kernel's bytecode for `src`, compiled or from a cache.
-bool warp_bytecode(TextBuf& src, u32 lanes, u32 lds, const D3D_SHADER_MACRO* defs, Array<u8>* code, TextBuf* err) {
+// FXC's bytecode for the kernel with `lanes` lanes and `lds` groupshared
+// words, compiled or from a cache.
+bool warp_fxc_bytecode(u32 lanes, u32 lds, Array<u8>* code, TextBuf* err) {
     const UINT flags = warp_compile_flags();
+    char nl[16], ld[16];
+    snprintf(nl, sizeof nl, "%u", lanes);
+    snprintf(ld, sizeof ld, "%u", lds);
+    const D3D_SHADER_MACRO defs[] = {{"W_LANES", nl}, {"W_LDS", ld}, {nullptr, nullptr}};
     Hasher h(0x7761727063736F00ull); // "warpcso"
-    h.bytes(src.c_str(), src.size());
+    h.bytes(kWarpkernelSource, sizeof kWarpkernelSource - 1);
+    h.bytes(kWarplayoutSource, sizeof kWarplayoutSource - 1);
+    h.bytes(kWarpisaSource, sizeof kWarpisaSource - 1);
     h.word(lanes);
     h.word(lds);
     h.word(flags);
@@ -1608,8 +1574,9 @@ bool warp_bytecode(TextBuf& src, u32 lanes, u32 lds, const D3D_SHADER_MACRO* def
     }
     if (!have) {
         ID3DBlob *cs = nullptr, *msg = nullptr;
-        const HRESULT hr =
-            D3DCompile(src.c_str(), src.size(), "warp_isa", defs, nullptr, "main", "cs_5_1", flags, 0, &cs, &msg);
+        WarpIncludes inc;
+        const HRESULT hr = D3DCompile(kWarpkernelSource, sizeof kWarpkernelSource - 1, "warp_kernel.hlsl", defs, &inc,
+                                      "main", "cs_5_1", flags, 0, &cs, &msg);
         if (FAILED(hr)) {
             say_hr(err, "warp kernel failed to compile", hr);
             if (msg && err) {
@@ -1724,45 +1691,60 @@ void main(uint3 g : SV_GroupID, uint3 t : SV_GroupThreadID) {
 }
 )";
 
-struct WarpGpu::Impl {
-    Queue q;
-    char name[128] = {};
-    u32 lanes = 32; // a warp's
-    ID3D12RootSignature* root = nullptr;
-    ID3D12PipelineState* pso = nullptr;      // records in memory
-    ID3D12PipelineState* pso_lds = nullptr;  // records of at most kWarpLdsWords, in groupshared memory
-    ID3D12PipelineState* pso_move = nullptr; // sending and fetching lanes
-    ID3D12PipelineState* pso_gather = nullptr; // waiting warps' lanes into the round's readback
+// A round in flight on its own queue (the overlap plan: two batches, so one
+// group of nodes' kernel can run while another's is sent).
+struct WarpBatch {
+    Queue* q = nullptr; // batch 0's is the device's own queue; batch 1 has its own on the same device
     // The gathered lanes: their buffer and readback, the round's capacity in
     // warps (from the last round's count), and whether the last round has them.
     ID3D12Resource *gout = nullptr, *grb = nullptr;
     u64 gout_cap = 0, grb_cap = 0;
     u32 gcap = 256, gcap_round = 0;
     bool gathered = false;
+    Array<u64> gpairs; // take_gathered's scratch
     // A round's buffers.
     ID3D12Resource *up = nullptr, *img = nullptr, *rb = nullptr;
     u64 up_cap = 0, img_cap = 0, rb_cap = 0;
-    // Every node's lanes, kept between rounds: node n's warp slot s at lane
-    // rbase[n] + s x lanes.
-    ID3D12Resource* heap = nullptr;
-    ID3D12Resource* old_heap = nullptr; // replaced this round: kept until it finishes
-    u64 heap_lanes = 0;
-    Array<u64> rbase, rcap;
-    // Fetching.
-    ID3D12Resource *fup = nullptr, *fstage = nullptr, *frb = nullptr;
-    u64 fup_cap = 0, fstage_cap = 0, frb_cap = 0;
-    // The round in flight.
-    bool busy = false;
+    ID3D12Resource* old_heap = nullptr; // a heap this round replaced: kept until it finishes
+    // The round in flight, and whether it moved every node's lanes into a new
+    // heap first (then nothing may touch the heap until it is done).
+    bool busy = false, grew = false;
     const WarpJob* jobs = nullptr;
     u32 njobs = 0;
     u64 img_words = 0, nrec = 0, sent = 0;
     double in_s = 0, t_exec = 0;
     Array<u32> table, at;
     Array<u64> img_at, send_at;
+    Array<u64> keys;      // the table's order (submit)
+    Array<u32> ents, runs; // the table's entries in job order; its dispatches (kind, first, count)
+    Array<u64> rbase; // the lane heap's layout when this round was sent (its gathered lanes are found by it)
     // timestamps: before the upload, after it, after the kernel, after the download
     ID3D12QueryHeap* qh = nullptr;
     ID3D12Resource* qrb = nullptr;
-    u64 freq = 0;
+};
+
+struct WarpGpu::Impl {
+    Queue q, q2; // the device's queue (batch 0) and a second on it (batch 1)
+    char name[128] = {};
+    u32 lanes = 32; // a warp's
+    ID3D12RootSignature* root = nullptr;
+    ID3D12PipelineState* pso = nullptr;      // records in memory
+    ID3D12PipelineState* pso_tier[4] = {};   // records of at most tier[k] words, in groupshared memory
+    u32 tier[4] = {}, ntier = 0;
+    bool long_first = false; // WarpKernelOptions
+    ID3D12PipelineState* pso_move = nullptr; // sending and fetching lanes
+    ID3D12PipelineState* pso_gather = nullptr; // waiting warps' lanes into the round's readback
+    WarpBatch batch[WarpGpu::kBatches];
+    // Every node's lanes, kept between rounds: node n's warp slot s at lane
+    // rbase[n] + s x lanes. Shared by the batches (their nodes are disjoint).
+    ID3D12Resource* heap = nullptr;
+    u64 heap_lanes = 0;
+    Array<u64> rbase, rcap;
+    // Fetching.
+    ID3D12Resource *fup = nullptr, *fstage = nullptr, *frb = nullptr;
+    u64 fup_cap = 0, fstage_cap = 0, frb_cap = 0;
+    Array<u32> fat; // fetch's heap positions
+    u64 freq = 0; // timestamp ticks a second (0: none)
 
     void dispatch_rows(ID3D12GraphicsCommandList* L, u64 groups, u32 c0, u32 c1, u32 c2) {
         const u32 row = static_cast<u32>(groups < 65535 ? groups : 65535);
@@ -1773,11 +1755,33 @@ struct WarpGpu::Impl {
     }
 };
 
-bool WarpGpu::open(u32 index, u32 lanes, TextBuf* err, double* compile_ms) {
+bool warp_dxc_built() {
+    return kDxilCount > 0;
+}
+
+bool WarpGpu::open(u32 index, u32 lanes, TextBuf* err, double* compile_ms, const WarpKernelOptions* options) {
     close();
+    dxc_ = false;
+    kernel_[0] = 0;
     if (lanes == 0 || lanes > kMaxLanes) {
         say(err, "warp.lanes out of range");
         return false;
+    }
+    const WarpKernelOptions opt = options ? *options : WarpKernelOptions{};
+    auto tiers_of = [](const u32* t) {
+        u32 k = 0;
+        while (k < 4 && t[k])
+            ++k;
+        return k;
+    };
+    const u32 ndxc = tiers_of(opt.lds), nfxc = tiers_of(opt.fxc_lds);
+    for (u32 pass = 0; pass < 2; ++pass) {
+        const u32* t = pass == 0 ? opt.lds : opt.fxc_lds;
+        for (u32 k = 0; k < (pass == 0 ? ndxc : nfxc); ++k)
+            if (t[k] > kWarpLdsMax || (k > 0 && t[k] <= t[k - 1])) {
+                say(err, "groupshared tiers must ascend, each at most 7,680 words");
+                return false;
+            }
     }
     Found found[16];
     const u32 n = enumerate(found, 16);
@@ -1788,26 +1792,125 @@ bool WarpGpu::open(u32 index, u32 lanes, TextBuf* err, double* compile_ms) {
     }
     Impl* m = new Impl;
     m->lanes = lanes;
+    m->long_first = opt.long_first;
     strncpy(m->name, found[index].d.name, sizeof m->name - 1);
     bool ok = m->q.init(found[index].adapter, true, err);
     release_all(found, n);
-    TextBuf src;
-    src.append(kWarpHead);
-    src.append(reinterpret_cast<const char*>(kWarplayoutSource));
-    src.append(reinterpret_cast<const char*>(kWarpisaSource));
-    src.append(kWarpMain);
-    char nl[16], lds[16];
-    snprintf(nl, sizeof nl, "%u", lanes);
-    snprintf(lds, sizeof lds, "%u", kWarpLdsWords);
-    const D3D_SHADER_MACRO defs[] = {{"W_LANES", nl}, {"W_LDS", "0"}, {nullptr, nullptr}};
-    const D3D_SHADER_MACRO defs_lds[] = {{"W_LANES", nl}, {"W_LDS", lds}, {nullptr, nullptr}};
+    ok = ok && m->q2.init_on(m->q.dev, err);
+    m->batch[0].q = &m->q;
+    m->batch[1].q = &m->q2;
     ID3DBlob *msg = nullptr, *sig = nullptr, *mv = nullptr, *ga = nullptr;
     HRESULT hr = S_OK;
-    Array<u8> code, code_lds;
     const double t0 = clock_seconds();
-    if (ok)
-        ok = warp_bytecode(src, lanes, 0, defs, &code, err) &&
-             warp_bytecode(src, lanes, kWarpLdsWords, defs_lds, &code_lds, err);
+    if (ok) { // the root signature, which every kernel here shares
+        D3D12_ROOT_PARAMETER params[5] = {};
+        params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+        params[0].Descriptor.ShaderRegister = 0;
+        params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+        params[1].Descriptor.ShaderRegister = 1;
+        params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        params[2].Descriptor.ShaderRegister = 0;
+        params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        params[3].Descriptor.ShaderRegister = 1;
+        params[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        params[4].Constants.ShaderRegister = 0;
+        params[4].Constants.Num32BitValues = 4;
+        D3D12_ROOT_SIGNATURE_DESC rsd = {};
+        rsd.NumParameters = 5;
+        rsd.pParameters = params;
+        if (FAILED(hr = D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &msg)) ||
+            FAILED(hr = m->q.dev->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+                                                      IID_PPV_ARGS(&m->root)))) {
+            say_hr(err, "root signature failed", hr);
+            ok = false;
+        }
+        release(msg);
+    }
+    auto pipeline = [&](const void* code, usize size, ID3D12PipelineState** out) {
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {};
+        pd.pRootSignature = m->root;
+        pd.CS.pShaderBytecode = code;
+        pd.CS.BytecodeLength = size;
+        hr = m->q.dev->CreateComputePipelineState(&pd, IID_PPV_ARGS(out));
+        return SUCCEEDED(hr);
+    };
+    // The warp kernel: DXC's where it can run (docs/dxc-plan.md D3), else FXC's.
+    const char* why_fxc = nullptr;
+    if (ok) {
+        D3D12_FEATURE_DATA_SHADER_MODEL sm = {};
+        sm.HighestShaderModel = D3D_SHADER_MODEL_6_0;
+        const bool sm6 = SUCCEEDED(m->q.dev->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &sm, sizeof sm)) &&
+                         sm.HighestShaderModel >= D3D_SHADER_MODEL_6_0;
+        if (opt.fxc)
+            why_fxc = "warp.kernel = fxc";
+        else if (kDxilCount == 0)
+            why_fxc = "this build has no DXC kernels";
+        else if (!find_dxil(lanes, 0))
+            why_fxc = "DXC's kernels are built for 32 lanes";
+        else if (!sm6)
+            why_fxc = "the device doesn't take Shader Model 6.0";
+        for (u32 k = 0; k < ndxc && !why_fxc; ++k)
+            if (!find_dxil(lanes, opt.lds[k]))
+                why_fxc = "a groupshared tier the build didn't compile";
+        if (!why_fxc) {
+            const DxilKernel* p = find_dxil(lanes, 0);
+            bool made = pipeline(p->code, p->size, &m->pso);
+            for (u32 k = 0; k < ndxc && made; ++k) {
+                p = find_dxil(lanes, opt.lds[k]);
+                made = pipeline(p->code, p->size, &m->pso_tier[k]);
+            }
+            if (made) {
+                m->ntier = ndxc;
+                for (u32 k = 0; k < ndxc; ++k)
+                    m->tier[k] = opt.lds[k];
+            } else {
+                release(m->pso);
+                for (u32 k = 0; k < 4; ++k)
+                    release(m->pso_tier[k]);
+                why_fxc = "the device refused DXC's kernels";
+            }
+        }
+        if (why_fxc) {
+            Array<u8> code;
+            ok = warp_fxc_bytecode(lanes, 0, &code, err);
+            if (ok && !pipeline(code.data(), code.size(), &m->pso)) {
+                say_hr(err, "pipeline failed", hr);
+                ok = false;
+            }
+            for (u32 k = 0; k < nfxc && ok; ++k) {
+                ok = warp_fxc_bytecode(lanes, opt.fxc_lds[k], &code, err);
+                if (ok && !pipeline(code.data(), code.size(), &m->pso_tier[k])) {
+                    say_hr(err, "pipeline failed", hr);
+                    ok = false;
+                }
+            }
+            m->ntier = nfxc;
+            for (u32 k = 0; k < nfxc; ++k)
+                m->tier[k] = opt.fxc_lds[k];
+        }
+    }
+    if (ok) { // what runs, for the warp notes and --profile
+        dxc_ = why_fxc == nullptr;
+        TextBuf d;
+        d.append(dxc_ ? "DXC's kernel" : "FXC's kernel");
+        if (m->ntier) {
+            d.append(m->ntier == 1 ? ", groupshared images up to " : ", groupshared tiers of ");
+            for (u32 k = 0; k < m->ntier; ++k) {
+                char w[32];
+                snprintf(w, sizeof w, "%s%u", k == 0 ? "" : (k + 1 == m->ntier ? " and " : ", "), m->tier[k]);
+                d.append(w);
+            }
+            d.append(" words");
+        }
+        if (m->long_first)
+            d.append(", long bodies first");
+        if (why_fxc) {
+            d.append(" (");
+            d.append(why_fxc);
+            d.append(")");
+        }
+        snprintf(kernel_, sizeof kernel_, "%s", d.c_str());
+    }
     if (ok) {
         hr = D3DCompile(kLaneMoveHlsl, strlen(kLaneMoveHlsl), "lane_move", nullptr, nullptr, "main", "cs_5_1",
                         D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &mv, &msg);
@@ -1833,66 +1936,32 @@ bool WarpGpu::open(u32 index, u32 lanes, TextBuf* err, double* compile_ms) {
         }
         release(msg);
     }
+    if (ok && (!pipeline(mv->GetBufferPointer(), mv->GetBufferSize(), &m->pso_move) ||
+               !pipeline(ga->GetBufferPointer(), ga->GetBufferSize(), &m->pso_gather))) {
+        say_hr(err, "pipeline failed", hr);
+        ok = false;
+    }
     if (compile_ms)
         *compile_ms = (clock_seconds() - t0) * 1000.0;
-    if (ok) {
-        D3D12_ROOT_PARAMETER params[5] = {};
-        params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-        params[0].Descriptor.ShaderRegister = 0;
-        params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-        params[1].Descriptor.ShaderRegister = 1;
-        params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
-        params[2].Descriptor.ShaderRegister = 0;
-        params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
-        params[3].Descriptor.ShaderRegister = 1;
-        params[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        params[4].Constants.ShaderRegister = 0;
-        params[4].Constants.Num32BitValues = 4;
-        D3D12_ROOT_SIGNATURE_DESC rsd = {};
-        rsd.NumParameters = 5;
-        rsd.pParameters = params;
-        D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {};
-        if (FAILED(hr = D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &msg)) ||
-            FAILED(hr = m->q.dev->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
-                                                      IID_PPV_ARGS(&m->root)))) {
-            say_hr(err, "root signature failed", hr);
-            ok = false;
-        } else {
-            pd.pRootSignature = m->root;
-            pd.CS.pShaderBytecode = code.data();
-            pd.CS.BytecodeLength = code.size();
-            if (FAILED(hr = m->q.dev->CreateComputePipelineState(&pd, IID_PPV_ARGS(&m->pso))))
-                ok = false;
-            pd.CS.pShaderBytecode = code_lds.data();
-            pd.CS.BytecodeLength = code_lds.size();
-            if (ok && FAILED(hr = m->q.dev->CreateComputePipelineState(&pd, IID_PPV_ARGS(&m->pso_lds))))
-                ok = false;
-            pd.CS.pShaderBytecode = mv->GetBufferPointer();
-            pd.CS.BytecodeLength = mv->GetBufferSize();
-            if (ok && FAILED(hr = m->q.dev->CreateComputePipelineState(&pd, IID_PPV_ARGS(&m->pso_move))))
-                ok = false;
-            pd.CS.pShaderBytecode = ga->GetBufferPointer();
-            pd.CS.BytecodeLength = ga->GetBufferSize();
-            if (ok && FAILED(hr = m->q.dev->CreateComputePipelineState(&pd, IID_PPV_ARGS(&m->pso_gather))))
-                ok = false;
-            if (!ok)
-                say_hr(err, "pipeline failed", hr);
-        }
-    }
     release(msg);
     release(sig);
     release(mv);
     release(ga);
-    if (ok) { // timestamps for --profile; a device without them just has none
+    if (ok) { // timestamps for --profile, a set a batch; a device without them just has none
         D3D12_QUERY_HEAP_DESC qd = {};
         qd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
         qd.Count = 4;
-        UINT64 f = 0;
-        if (SUCCEEDED(m->q.queue->GetTimestampFrequency(&f)) && f &&
-            SUCCEEDED(m->q.dev->CreateQueryHeap(&qd, IID_PPV_ARGS(&m->qh)))) {
-            m->qrb = m->q.buffer(4 * sizeof(u64), D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, false);
-            m->freq = m->qrb ? f : 0;
+        UINT64 f = 0, f2 = 0;
+        bool stamps = SUCCEEDED(m->q.queue->GetTimestampFrequency(&f)) && f &&
+                      SUCCEEDED(m->q2.queue->GetTimestampFrequency(&f2)) && f2 == f;
+        for (u32 b = 0; b < kBatches && stamps; ++b) {
+            WarpBatch& B = m->batch[b];
+            stamps = SUCCEEDED(m->q.dev->CreateQueryHeap(&qd, IID_PPV_ARGS(&B.qh)));
+            if (stamps)
+                B.qrb = m->q.buffer(4 * sizeof(u64), D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, false);
+            stamps = stamps && B.qrb;
         }
+        m->freq = stamps ? f : 0;
     }
     impl_ = m;
     if (!ok)
@@ -1904,31 +1973,38 @@ void WarpGpu::close() {
     if (!impl_)
         return;
     Impl* m = impl_;
-    if (m->busy)
-        m->q.wait(nullptr);
-    release(m->qh);
-    release(m->qrb);
-    release(m->up);
-    release(m->img);
-    release(m->rb);
+    for (u32 b = 0; b < kBatches; ++b) {
+        WarpBatch& B = m->batch[b];
+        if (B.busy && B.q)
+            B.q->wait(nullptr);
+        release(B.qh);
+        release(B.qrb);
+        release(B.up);
+        release(B.img);
+        release(B.rb);
+        release(B.old_heap);
+        release(B.gout);
+        release(B.grb);
+    }
     release(m->heap);
-    release(m->old_heap);
     release(m->fup);
     release(m->fstage);
     release(m->frb);
-    release(m->gout);
-    release(m->grb);
     release(m->pso);
-    release(m->pso_lds);
+    for (u32 k = 0; k < 4; ++k)
+        release(m->pso_tier[k]);
     release(m->pso_move);
     release(m->pso_gather);
     release(m->root);
+    m->q2.destroy();
     m->q.destroy();
     delete m;
     impl_ = nullptr;
 }
 
 const char* WarpGpu::name() const { return impl_ ? impl_->name : "none"; }
+
+double WarpGpu::timestamp_hz() const { return impl_ ? static_cast<double>(impl_->freq) : 0.0; }
 
 namespace {
 
@@ -1970,21 +2046,25 @@ void warp_copy_out(void* ctx, u32 j) {
 
 } // namespace
 
-bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, TextBuf* err, ThreadPool* pool) {
-    if (!impl_ || impl_->busy)
+bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, TextBuf* err, ThreadPool* pool,
+                     u32 batch) {
+    if (!impl_ || batch >= kBatches || impl_->batch[batch].busy)
         return false;
     Impl* m = impl_;
+    WarpBatch& B = m->batch[batch];
+    Queue& Q = *B.q;
     const u32 wl = m->lanes;
-    m->jobs = jobs;
-    m->njobs = njobs;
+    B.jobs = jobs;
+    B.njobs = njobs;
+    B.grew = false;
     // Each job's image, and its node's room for lanes.
-    m->img_at.clear();
-    m->send_at.clear();
+    B.img_at.clear();
+    B.send_at.clear();
     u64 img_words = 0, nrec = 0, sent = 0;
     bool grow = m->heap == nullptr;
     for (u32 j = 0; j < njobs; ++j) {
-        m->img_at.push(img_words);
-        m->send_at.push(sent);
+        B.img_at.push(img_words);
+        B.send_at.push(sent);
         img_words += jobs[j].img_words;
         nrec += jobs[j].nrec;
         sent += jobs[j].nsend;
@@ -1998,20 +2078,27 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
         }
         grow = grow || jobs[j].nlanes > m->rcap[node];
     }
-    m->img_words = img_words;
-    m->nrec = nrec;
-    m->sent = sent;
+    B.img_words = img_words;
+    B.nrec = nrec;
+    B.sent = sent;
     if (nrec == 0)
         return true;
     if (img_words > 0x3FFFFFFFull) {
         say(err, "warp round too big for one dispatch");
         return false;
     }
-    ID3D12GraphicsCommandList* L = m->q.list;
+    ID3D12GraphicsCommandList* L = Q.list;
     // A node that outgrew its room: a new heap with room for twice what each
-    // node needs, every node's lanes copied over on the GPU.
+    // node needs, every node's lanes copied over on the GPU. The copy is every
+    // node's, so it waits for a batch still running (which writes the heap),
+    // and a batch sent while it is running waits for it (rare: rooms double);
+    // their gathered lanes are found by their own copies of the layout.
     D3D12_RESOURCE_STATES heap_state = D3D12_RESOURCE_STATE_COMMON;
+    for (u32 o = 0; o < kBatches; ++o)
+        if (o != batch && m->batch[o].busy && (grow || m->batch[o].grew))
+            Q.after(*m->batch[o].q);
     if (grow) {
+        B.grew = true;
         Array<u64> cap, base;
         cap.resize(m->rcap.size());
         base.resize(m->rcap.size());
@@ -2027,22 +2114,22 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
             base[k] = total;
             total += cap[k];
         }
-        ID3D12Resource* nh = m->q.buffer((total ? total : 1) * sizeof(Lane), D3D12_HEAP_TYPE_DEFAULT,
-                                         D3D12_RESOURCE_STATE_COMMON, true);
+        ID3D12Resource* nh = Q.buffer((total ? total : 1) * sizeof(Lane), D3D12_HEAP_TYPE_DEFAULT,
+                                      D3D12_RESOURCE_STATE_COMMON, true);
         if (!nh) {
             say(err, "the warp lanes' heap could not be made (out of video memory?)");
             return false;
         }
         if (m->heap) {
-            m->q.barrier(m->heap, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
-            m->q.barrier(nh, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+            Q.barrier(m->heap, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            Q.barrier(nh, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
             for (usize k = 0; k < m->rcap.size(); ++k)
                 if (m->rcap[k])
                     L->CopyBufferRegion(nh, base[k] * sizeof(Lane), m->heap, m->rbase[k] * sizeof(Lane),
                                         m->rcap[k] * sizeof(Lane));
             heap_state = D3D12_RESOURCE_STATE_COPY_DEST;
-            release(m->old_heap);
-            m->old_heap = m->heap;
+            release(B.old_heap);
+            B.old_heap = m->heap;
         }
         m->heap = nh;
         m->heap_lanes = total;
@@ -2051,32 +2138,58 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
             m->rbase[k] = base[k];
         }
     }
+    B.rbase.assign(m->rbase.data(), m->rbase.size());
     // The table: per record its node's image base, the record, its node's
-    // lanes' base, its size; records that fit groupshared memory first.
-    m->table.resize(nrec * 4);
-    u64 nsmall = 0;
-    for (u32 pass = 0; pass < 2; ++pass) {
-        usize t = pass == 0 ? 0 : static_cast<usize>(nsmall) * 4;
-        for (u32 j = 0; j < njobs; ++j) {
-            for (u32 r = 0; r < jobs[j].nrec; ++r) {
-                const u32 rec = jobs[j].recs[r];
-                const u32 size = warp_job_rec_words(jobs[j], r);
-                const bool fits = size <= kWarpLdsWords;
-                if (fits == (pass == 0)) {
-                    m->table[t++] = static_cast<u32>(m->img_at[j]);
-                    m->table[t++] = rec;
-                    m->table[t++] = static_cast<u32>(m->rbase[jobs[j].node]);
-                    m->table[t++] = size;
-                    nsmall += pass == 0;
-                }
-            }
+    // lanes' base, its size. Its kind is the smallest groupshared tier that
+    // holds it, else the plain kernel; each kind is a dispatch, the tiers
+    // first, records in job order. long_first: the records whose expected
+    // chain is over a quarter of the longest go first, in dispatches of
+    // their own, longest first.
+    if (nrec > 0xFFFFFFull) {
+        say(err, "warp round has too many records");
+        return false;
+    }
+    u32 cmax = 0; // the longest expected chain
+    if (m->long_first)
+        for (u32 j = 0; j < njobs; ++j)
+            for (u32 r = 0; r < jobs[j].nrec && jobs[j].rec_chain; ++r)
+                cmax = jobs[j].rec_chain[r] > cmax ? jobs[j].rec_chain[r] : cmax;
+    B.keys.clear(); // (long ? 0 : 1) << 59 | kind << 56 | (~chain if long) << 24 | entry
+    B.ents.resize(nrec * 4);
+    for (u32 j = 0, e = 0; j < njobs; ++j)
+        for (u32 r = 0; r < jobs[j].nrec; ++r, ++e) {
+            const u32 size = warp_job_rec_words(jobs[j], r);
+            u32 kind = 0;
+            while (kind < m->ntier && size > m->tier[kind])
+                ++kind;
+            const u32 chain = jobs[j].rec_chain ? jobs[j].rec_chain[r] : 0;
+            const bool lng = cmax && static_cast<u64>(chain) * 4 > cmax;
+            B.keys.push((lng ? 0ull : 1ull) << 59 | static_cast<u64>(kind) << 56 |
+                        (lng ? static_cast<u64>(0xFFFFFFFFu - chain) : 0ull) << 24 | e);
+            B.ents[4 * e + 0] = static_cast<u32>(B.img_at[j]);
+            B.ents[4 * e + 1] = jobs[j].recs[r];
+            B.ents[4 * e + 2] = static_cast<u32>(m->rbase[jobs[j].node]);
+            B.ents[4 * e + 3] = size;
         }
+    sort_u64(B.keys.data(), B.keys.size());
+    B.table.resize(nrec * 4);
+    B.runs.clear(); // (kind, first entry, count) a dispatch
+    for (usize i = 0; i < B.keys.size(); ++i) {
+        const u64 e = B.keys[i] & 0xFFFFFFu;
+        memcpy(&B.table[4 * i], &B.ents[4 * e], 16);
+        const u32 group = static_cast<u32>(B.keys[i] >> 56); // long and kind
+        if (B.runs.empty() || B.runs[B.runs.size() - 3] != group) {
+            B.runs.push(group);
+            B.runs.push(static_cast<u32>(i));
+            B.runs.push(0);
+        }
+        ++B.runs[B.runs.size() - 1];
     }
     // Where each sent warp's lanes go in the heap.
-    m->at.resize(sent ? sent : 1);
+    B.at.resize(sent ? sent : 1);
     for (u32 j = 0, k = 0; j < njobs; ++j)
         for (u32 i = 0; i < jobs[j].nsend; ++i)
-            m->at[k++] = static_cast<u32>(m->rbase[jobs[j].node] + static_cast<u64>(jobs[j].send[i]) * wl);
+            B.at[k++] = static_cast<u32>(m->rbase[jobs[j].node] + static_cast<u64>(jobs[j].send[i]) * wl);
     const u64 cst_b = align256(static_cast<u64>(ncst) * 4), tab_b = align256(nrec * 16);
     const u64 img_b = align256((img_words ? img_words : 1) * 4);
     const u64 send_b = align256((sent ? sent : 1) * wl * sizeof(Lane)), at_b = align256((sent ? sent : 1) * 4);
@@ -2089,18 +2202,16 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
             const u32 nw = jobs[j].img[jobs[j].recs[r] + WB_NWARP];
             wmax = nw > wmax ? nw : wmax;
         }
-    m->gathered = false;
-    m->gcap_round = m->pso_gather && wmax ? m->gcap : 0;
-    const u64 g_bytes = align256((1ull + m->gcap_round + static_cast<u64>(m->gcap_round) * wl * 29) * 4);
-    if (!ensure_buffer(m->q, m->up, m->up_cap, zero_at + 256, D3D12_HEAP_TYPE_UPLOAD,
-                       D3D12_RESOURCE_STATE_GENERIC_READ, false) ||
-        !ensure_buffer(m->q, m->img, m->img_cap, img_b, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, true) ||
-        !ensure_buffer(m->q, m->rb, m->rb_cap, img_b, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST,
+    B.gathered = false;
+    B.gcap_round = m->pso_gather && wmax ? B.gcap : 0;
+    const u64 g_bytes = align256((1ull + B.gcap_round + static_cast<u64>(B.gcap_round) * wl * 29) * 4);
+    if (!ensure_buffer(Q, B.up, B.up_cap, zero_at + 256, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ,
                        false) ||
-        (m->gcap_round &&
-         (!ensure_buffer(m->q, m->gout, m->gout_cap, g_bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON,
-                         true) ||
-          !ensure_buffer(m->q, m->grb, m->grb_cap, g_bytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST,
+        !ensure_buffer(Q, B.img, B.img_cap, img_b, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, true) ||
+        !ensure_buffer(Q, B.rb, B.rb_cap, img_b, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, false) ||
+        (B.gcap_round &&
+         (!ensure_buffer(Q, B.gout, B.gout_cap, g_bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, true) ||
+          !ensure_buffer(Q, B.grb, B.grb_cap, g_bytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST,
                          false)))) {
         say(err, "warp buffers could not be made (out of video memory?)");
         return false;
@@ -2108,37 +2219,37 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
     const double t_in = clock_seconds();
     unsigned char* up = nullptr;
     D3D12_RANGE none = {0, 0};
-    if (FAILED(m->up->Map(0, &none, reinterpret_cast<void**>(&up)))) {
+    if (FAILED(B.up->Map(0, &none, reinterpret_cast<void**>(&up)))) {
         say(err, "warp upload buffer would not map");
         return false;
     }
     memcpy(up, cst, static_cast<usize>(ncst) * 4);
-    memcpy(up + cst_b, m->table.data(), nrec * 16);
-    memcpy(up + cst_b + tab_b + img_b + send_b, m->at.data(), sent * 4);
+    memcpy(up + cst_b, B.table.data(), nrec * 16);
+    memcpy(up + cst_b + tab_b + img_b + send_b, B.at.data(), sent * 4);
     memset(up + zero_at, 0, 256);
     Array<u64> img_off, send_off;
     for (u32 j = 0; j < njobs; ++j) {
-        img_off.push(cst_b + tab_b + m->img_at[j] * 4);
-        send_off.push(cst_b + tab_b + img_b + m->send_at[j] * wl * sizeof(Lane));
+        img_off.push(cst_b + tab_b + B.img_at[j] * 4);
+        send_off.push(cst_b + tab_b + img_b + B.send_at[j] * wl * sizeof(Lane));
     }
-    WarpCopy cin = {jobs, img_off.data(), send_off.data(), up, nullptr, wl, m->up_cap};
+    WarpCopy cin = {jobs, img_off.data(), send_off.data(), up, nullptr, wl, B.up_cap};
     if (pool)
         pool->run(njobs, &warp_copy_in, &cin);
     else
         for (u32 j = 0; j < njobs; ++j)
             warp_copy_in(&cin, j);
-    m->up->Unmap(0, nullptr);
-    m->in_s = clock_seconds() - t_in;
+    B.up->Unmap(0, nullptr);
+    B.in_s = clock_seconds() - t_in;
 
     const bool stamps = m->freq != 0;
-    const D3D12_GPU_VIRTUAL_ADDRESS va = m->up->GetGPUVirtualAddress();
+    const D3D12_GPU_VIRTUAL_ADDRESS va = B.up->GetGPUVirtualAddress();
     if (stamps)
-        L->EndQuery(m->qh, D3D12_QUERY_TYPE_TIMESTAMP, 0);
-    m->q.barrier(m->heap, heap_state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    m->q.barrier(m->img, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+        L->EndQuery(B.qh, D3D12_QUERY_TYPE_TIMESTAMP, 0);
+    Q.barrier(m->heap, heap_state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    Q.barrier(B.img, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
     if (img_words)
-        L->CopyBufferRegion(m->img, 0, m->up, cst_b + tab_b, img_words * 4);
-    m->q.barrier(m->img, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        L->CopyBufferRegion(B.img, 0, B.up, cst_b + tab_b, img_words * 4);
+    Q.barrier(B.img, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     L->SetComputeRootSignature(m->root);
     if (sent) { // the host's changed lanes into the heap
         L->SetPipelineState(m->pso_move);
@@ -2147,19 +2258,18 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
         L->SetComputeRootUnorderedAccessView(2, m->heap->GetGPUVirtualAddress());
         L->SetComputeRootUnorderedAccessView(3, m->heap->GetGPUVirtualAddress());
         m->dispatch_rows(L, sent, static_cast<u32>(sent), wl * 29, 0); // a group a warp
-        m->q.uav_barrier(m->heap);
+        Q.uav_barrier(m->heap);
     }
     if (stamps)
-        L->EndQuery(m->qh, D3D12_QUERY_TYPE_TIMESTAMP, 1);
+        L->EndQuery(B.qh, D3D12_QUERY_TYPE_TIMESTAMP, 1);
     L->SetComputeRootShaderResourceView(0, va);
-    L->SetComputeRootUnorderedAccessView(2, m->img->GetGPUVirtualAddress());
+    L->SetComputeRootUnorderedAccessView(2, B.img->GetGPUVirtualAddress());
     L->SetComputeRootUnorderedAccessView(3, m->heap->GetGPUVirtualAddress());
-    // The two kernels touch different records: no barrier between them.
-    for (u32 kind = 0; kind < 2; ++kind) {
-        const u64 first = kind == 0 ? 0 : nsmall, count = kind == 0 ? nsmall : nrec - nsmall;
-        if (count == 0)
-            continue;
-        L->SetPipelineState(kind == 0 ? m->pso_lds : m->pso);
+    // The dispatches touch different records: no barrier between them.
+    for (usize d = 0; d + 2 < B.runs.size(); d += 3) {
+        const u32 kind = B.runs[d] & 7u;
+        const u64 first = B.runs[d + 1], count = B.runs[d + 2];
+        L->SetPipelineState(kind < m->ntier ? m->pso_tier[kind] : m->pso);
         L->SetComputeRootShaderResourceView(1, va + cst_b + first * 16);
         const u32 row = static_cast<u32>(count < 65535 ? count : 65535);
         const u32 rows = static_cast<u32>((count + row - 1) / row);
@@ -2168,94 +2278,96 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
         L->Dispatch(row, rows, 1);
     }
     if (stamps)
-        L->EndQuery(m->qh, D3D12_QUERY_TYPE_TIMESTAMP, 2);
+        L->EndQuery(B.qh, D3D12_QUERY_TYPE_TIMESTAMP, 2);
     D3D12_RESOURCE_STATES img_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-    if (m->gcap_round) { // the waiting warps' lanes, gathered to come back with the round
-        m->q.uav_barrier(m->img);
-        m->q.uav_barrier(m->heap);
-        m->q.barrier(m->img, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    if (B.gcap_round) { // the waiting warps' lanes, gathered to come back with the round
+        Q.uav_barrier(B.img);
+        Q.uav_barrier(m->heap);
+        Q.barrier(B.img, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         img_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-        m->q.barrier(m->gout, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
-        L->CopyBufferRegion(m->gout, 0, m->up, zero_at, 4); // the count starts at 0
-        m->q.barrier(m->gout, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        Q.barrier(B.gout, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+        L->CopyBufferRegion(B.gout, 0, B.up, zero_at, 4); // the count starts at 0
+        Q.barrier(B.gout, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         L->SetPipelineState(m->pso_gather);
         L->SetComputeRootShaderResourceView(0, va + cst_b);
-        L->SetComputeRootShaderResourceView(1, m->img->GetGPUVirtualAddress());
+        L->SetComputeRootShaderResourceView(1, B.img->GetGPUVirtualAddress());
         L->SetComputeRootUnorderedAccessView(2, m->heap->GetGPUVirtualAddress());
-        L->SetComputeRootUnorderedAccessView(3, m->gout->GetGPUVirtualAddress());
+        L->SetComputeRootUnorderedAccessView(3, B.gout->GetGPUVirtualAddress());
         const u32 ry = nrec < 65535 ? static_cast<u32>(nrec) : 65535u; // records: y, then z
         const u32 rz = static_cast<u32>((nrec + ry - 1) / ry);
-        const u32 k[4] = {static_cast<u32>(nrec), m->gcap_round, wl | (wmax << 16), ry};
+        const u32 k[4] = {static_cast<u32>(nrec), B.gcap_round, wl | (wmax << 16), ry};
         L->SetComputeRoot32BitConstants(4, 4, k, 0);
         L->Dispatch(wmax, ry, rz);
-        m->q.barrier(m->gout, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        L->CopyBufferRegion(m->grb, 0, m->gout, 0, g_bytes);
+        Q.barrier(B.gout, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        L->CopyBufferRegion(B.grb, 0, B.gout, 0, g_bytes);
     }
-    m->q.barrier(m->img, img_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    Q.barrier(B.img, img_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
     if (img_words)
-        L->CopyBufferRegion(m->rb, 0, m->img, 0, img_words * 4);
+        L->CopyBufferRegion(B.rb, 0, B.img, 0, img_words * 4);
     if (stamps) {
-        L->EndQuery(m->qh, D3D12_QUERY_TYPE_TIMESTAMP, 3);
-        L->ResolveQueryData(m->qh, D3D12_QUERY_TYPE_TIMESTAMP, 0, 4, m->qrb, 0);
+        L->EndQuery(B.qh, D3D12_QUERY_TYPE_TIMESTAMP, 3);
+        L->ResolveQueryData(B.qh, D3D12_QUERY_TYPE_TIMESTAMP, 0, 4, B.qrb, 0);
     }
-    m->t_exec = clock_seconds();
-    if (!m->q.exec(err))
+    B.t_exec = clock_seconds();
+    if (!Q.exec(err))
         return false;
-    m->busy = true;
+    B.busy = true;
     return true;
 }
 
-bool WarpGpu::finish(TextBuf* err, ThreadPool* pool) {
-    if (!impl_)
+bool WarpGpu::finish(TextBuf* err, ThreadPool* pool, u32 batch) {
+    if (!impl_ || batch >= kBatches)
         return false;
     Impl* m = impl_;
-    last_ms_ = last_kernel_ms_ = 0;
-    last_longest_ = 0;
-    if (!m->busy)
-        return m->nrec == 0 || m->njobs == 0 ? true : false;
-    m->busy = false;
-    if (!m->q.wait(err)) {
-        dump_messages(m->q.dev);
+    WarpBatch& B = m->batch[batch];
+    Queue& Q = *B.q;
+    last_ms_ = last_kernel_ms_[batch] = 0;
+    last_longest_[batch] = 0;
+    if (!B.busy)
+        return B.nrec == 0 || B.njobs == 0 ? true : false;
+    B.busy = false;
+    if (!Q.wait(err)) {
+        dump_messages(Q.dev);
         return false;
     }
-    release(m->old_heap);
-    const double gpu_s = clock_seconds() - m->t_exec;
+    release(B.old_heap);
+    const double gpu_s = clock_seconds() - B.t_exec;
     const double t_out = clock_seconds();
     void* mapped = nullptr;
-    const u64 img_b = align256((m->img_words ? m->img_words : 1) * 4);
+    const u64 img_b = align256((B.img_words ? B.img_words : 1) * 4);
     D3D12_RANGE all = {0, static_cast<SIZE_T>(img_b)};
-    if (FAILED(m->rb->Map(0, &all, &mapped))) {
+    if (FAILED(B.rb->Map(0, &all, &mapped))) {
         say(err, "warp readback would not map");
         return false;
     }
     Array<u64> img_off;
-    for (u32 j = 0; j < m->njobs; ++j)
-        img_off.push(m->img_at[j] * 4);
-    WarpCopy cout = {m->jobs, img_off.data(), nullptr, nullptr, static_cast<const unsigned char*>(mapped), m->lanes,
+    for (u32 j = 0; j < B.njobs; ++j)
+        img_off.push(B.img_at[j] * 4);
+    WarpCopy cout = {B.jobs, img_off.data(), nullptr, nullptr, static_cast<const unsigned char*>(mapped), m->lanes,
                      img_b};
     if (pool)
-        pool->run(m->njobs, &warp_copy_out, &cout);
+        pool->run(B.njobs, &warp_copy_out, &cout);
     else
-        for (u32 j = 0; j < m->njobs; ++j)
+        for (u32 j = 0; j < B.njobs; ++j)
             warp_copy_out(&cout, j);
     D3D12_RANGE none = {0, 0};
-    m->rb->Unmap(0, &none);
-    if (m->gcap_round) { // the gathered lanes are this round's; the next capacity follows the count
+    B.rb->Unmap(0, &none);
+    if (B.gcap_round) { // the gathered lanes are this round's; the next capacity follows the count
         u32 count = 0;
         void* gm = nullptr;
         D3D12_RANGE first = {0, 4};
-        if (SUCCEEDED(m->grb->Map(0, &first, &gm))) {
+        if (SUCCEEDED(B.grb->Map(0, &first, &gm))) {
             count = *static_cast<const u32*>(gm);
-            m->grb->Unmap(0, &none);
-            m->gathered = true;
+            B.grb->Unmap(0, &none);
+            B.gathered = true;
         }
         const u64 want = static_cast<u64>(count) * 5 / 4 + 64;
-        m->gcap = static_cast<u32>(want < 256 ? 256 : (want > 8192 ? 8192 : want));
+        B.gcap = static_cast<u32>(want < 256 ? 256 : (want > 8192 ? 8192 : want));
     }
     u64 longest = 0; // the longest body's steps: a group runs its warps one after another
-    stats_.img_words += m->img_words;
-    for (u32 j = 0; j < m->njobs; ++j) {
-        const WarpJob& job = m->jobs[j];
+    stats_.img_words += B.img_words;
+    for (u32 j = 0; j < B.njobs; ++j) {
+        const WarpJob& job = B.jobs[j];
         for (u32 r = 0; r < job.nrec; ++r) {
             const u64 size = warp_job_rec_words(job, r);
             stats_.rec_words_max = size > stats_.rec_words_max ? size : stats_.rec_words_max;
@@ -2268,44 +2380,47 @@ bool WarpGpu::finish(TextBuf* err, ThreadPool* pool) {
         }
     }
     stats_.steps_longest += longest;
-    last_longest_ = longest;
+    last_longest_[batch] = longest;
     if (m->freq) {
         u64 ts[4] = {};
-        if (read_back(m->qrb, ts, sizeof ts) && ts[3] >= ts[0]) {
+        if (read_back(B.qrb, ts, sizeof ts) && ts[3] >= ts[0]) {
             const double tk = 1000.0 / static_cast<double>(m->freq);
             stats_.ms_dev_up += (ts[1] - ts[0]) * tk;
             stats_.ms_dev_kernel += (ts[2] - ts[1]) * tk;
             stats_.ms_dev_down += (ts[3] - ts[2]) * tk;
             last_ms_ = (ts[3] - ts[0]) * tk;
-            last_kernel_ms_ = (ts[2] - ts[1]) * tk;
+            last_kernel_ms_[batch] = (ts[2] - ts[1]) * tk;
+            last_span_[batch][0] = ts[0];
+            last_span_[batch][1] = ts[3];
         }
     }
     if (last_ms_ == 0)
         last_ms_ = gpu_s * 1000.0;
-    const u64 lane_bytes = m->sent * m->lanes * sizeof(Lane);
+    const u64 lane_bytes = B.sent * m->lanes * sizeof(Lane);
     ++stats_.rounds;
-    stats_.records += m->nrec;
-    stats_.lanes_sent += m->sent;
-    stats_.bytes_up += m->img_words * 4 + lane_bytes;
-    stats_.bytes_down += m->img_words * 4;
-    stats_.ms_in += m->in_s * 1000.0;
+    stats_.records += B.nrec;
+    stats_.lanes_sent += B.sent;
+    stats_.bytes_up += B.img_words * 4 + lane_bytes;
+    stats_.bytes_down += B.img_words * 4;
+    stats_.ms_in += B.in_s * 1000.0;
     stats_.ms_gpu += gpu_s * 1000.0;
     stats_.ms_out += (clock_seconds() - t_out) * 1000.0;
     return true;
 }
 
-u32 WarpGpu::take_gathered(const WarpFetch* list, u32 n, u8* got) {
+u32 WarpGpu::take_gathered(const WarpFetch* list, u32 n, u8* got, ThreadPool* pool, u32 batch) {
     for (u32 i = 0; i < n; ++i)
         got[i] = 0;
-    if (!impl_ || impl_->busy || !impl_->gathered || n == 0)
+    if (!impl_ || batch >= kBatches || impl_->batch[batch].busy || !impl_->batch[batch].gathered || n == 0)
         return 0;
     Impl* m = impl_;
-    m->gathered = false; // once a round
-    const u32 wl = m->lanes, cap = m->gcap_round;
+    WarpBatch& B = m->batch[batch];
+    B.gathered = false; // once a round
+    const u32 wl = m->lanes, cap = B.gcap_round;
     const u64 words = static_cast<u64>(wl) * 29;
     void* mapped = nullptr;
     D3D12_RANGE head = {0, static_cast<SIZE_T>((1ull + cap) * 4)};
-    if (FAILED(m->grb->Map(0, &head, &mapped)))
+    if (FAILED(B.grb->Map(0, &head, &mapped)))
         return 0;
     const u32* out = static_cast<const u32*>(mapped);
     const u32 ng = out[0] < cap ? out[0] : cap;
@@ -2314,19 +2429,21 @@ u32 WarpGpu::take_gathered(const WarpFetch* list, u32 n, u8* got) {
     for (u32 k = 0; k < ng; ++k)
         keys[k] = (static_cast<u64>(out[1 + k]) << 32) | k;
     D3D12_RANGE none = {0, 0};
-    m->grb->Unmap(0, &none);
+    B.grb->Unmap(0, &none);
     if (ng == 0)
         return 0;
     sort_u64(keys.data(), keys.size());
     D3D12_RANGE all = {0, static_cast<SIZE_T>((1ull + cap + static_cast<u64>(ng) * words) * 4)};
-    if (FAILED(m->grb->Map(0, &all, &mapped)))
+    if (FAILED(B.grb->Map(0, &all, &mapped)))
         return 0;
     out = static_cast<const u32*>(mapped);
     u32 taken = 0;
-    for (u32 i = 0; i < n; ++i) {
-        if (list[i].node >= m->rbase.size())
+    Array<u64>& pairs = B.gpairs; // (gathered slot << 32 | list index), then copied
+    pairs.clear();
+    for (u32 i = 0; i < n; ++i) { // (the heap as this round saw it: another batch may have grown it since)
+        if (list[i].node >= B.rbase.size())
             continue;
-        const u64 at = m->rbase[list[i].node] + static_cast<u64>(list[i].slot) * wl;
+        const u64 at = B.rbase[list[i].node] + static_cast<u64>(list[i].slot) * wl;
         usize lo = 0, hi = keys.size();
         while (lo < hi) { // the first key >= at << 32
             const usize mid = (lo + hi) / 2;
@@ -2337,39 +2454,63 @@ u32 WarpGpu::take_gathered(const WarpFetch* list, u32 n, u8* got) {
         }
         if (lo == keys.size() || (keys[lo] >> 32) != at)
             continue;
-        const u32 slot = static_cast<u32>(keys[lo] & 0xFFFFFFFFu);
-        memcpy(list[i].dst, out + 1 + cap + static_cast<u64>(slot) * words, static_cast<usize>(words) * 4);
+        pairs.push((keys[lo] << 32) | i);
         got[i] = 1;
         ++taken;
     }
-    m->grb->Unmap(0, &none);
+    // The copying (about 7 MB a round in a late landscape), spread over the
+    // threads in chunks.
+    struct Copy {
+        const WarpFetch* list;
+        const u64* pairs;
+        usize n;
+        const u32* src;
+        u64 words;
+        static void task(void* ctx, u32 c) {
+            const Copy& k = *static_cast<const Copy*>(ctx);
+            const usize a = static_cast<usize>(c) * 64, b = a + 64 < k.n ? a + 64 : k.n;
+            for (usize j = a; j < b; ++j) {
+                const u64 p = k.pairs[j];
+                memcpy(k.list[p & 0xFFFFFFFFu].dst, k.src + (p >> 32) * k.words, static_cast<usize>(k.words) * 4);
+            }
+        }
+    };
+    Copy copy = {list, pairs.data(), pairs.size(), out + 1 + cap, words};
+    const u32 chunks = static_cast<u32>((pairs.size() + 63) / 64);
+    if (pool && chunks > 1)
+        pool->run(chunks, &Copy::task, &copy);
+    else
+        for (u32 c = 0; c < chunks; ++c)
+            Copy::task(&copy, c);
+    B.grb->Unmap(0, &none);
     stats_.lanes_gathered += taken;
     stats_.bytes_down += static_cast<u64>(ng) * words * 4;
     return taken;
 }
 
-bool WarpGpu::fetch(const WarpFetch* list, u32 n, TextBuf* err) {
-    if (!impl_ || impl_->busy)
+bool WarpGpu::fetch(const WarpFetch* list, u32 n, TextBuf* err, u32 batch) {
+    if (!impl_ || batch >= kBatches || impl_->batch[batch].busy)
         return false;
     if (n == 0)
         return true;
     Impl* m = impl_;
+    Queue& Q = *m->batch[batch].q; // (its queue: the other batch may be running meanwhile)
     const double t0 = clock_seconds();
     const u32 wl = m->lanes;
-    m->at.resize(n);
+    m->fat.resize(n);
     for (u32 i = 0; i < n; ++i) {
         if (list[i].node >= m->rcap.size() || static_cast<u64>(list[i].slot + 1) * wl > m->rcap[list[i].node]) {
             say(err, "fetching lanes the GPU never had");
             return false;
         }
-        m->at[i] = static_cast<u32>(m->rbase[list[i].node] + static_cast<u64>(list[i].slot) * wl);
+        m->fat[i] = static_cast<u32>(m->rbase[list[i].node] + static_cast<u64>(list[i].slot) * wl);
     }
     const u64 bytes = static_cast<u64>(n) * wl * sizeof(Lane);
-    if (!ensure_buffer(m->q, m->fup, m->fup_cap, align256(static_cast<u64>(n) * 4), D3D12_HEAP_TYPE_UPLOAD,
+    if (!ensure_buffer(Q, m->fup, m->fup_cap, align256(static_cast<u64>(n) * 4), D3D12_HEAP_TYPE_UPLOAD,
                        D3D12_RESOURCE_STATE_GENERIC_READ, false) ||
-        !ensure_buffer(m->q, m->fstage, m->fstage_cap, bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON,
+        !ensure_buffer(Q, m->fstage, m->fstage_cap, bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON,
                        true) ||
-        !ensure_buffer(m->q, m->frb, m->frb_cap, bytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST,
+        !ensure_buffer(Q, m->frb, m->frb_cap, bytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST,
                        false)) {
         say(err, "fetch buffers could not be made");
         return false;
@@ -2380,11 +2521,14 @@ bool WarpGpu::fetch(const WarpFetch* list, u32 n, TextBuf* err) {
         say(err, "fetch upload buffer would not map");
         return false;
     }
-    memcpy(up, m->at.data(), static_cast<usize>(n) * 4);
+    memcpy(up, m->fat.data(), static_cast<usize>(n) * 4);
     m->fup->Unmap(0, nullptr);
-    ID3D12GraphicsCommandList* L = m->q.list;
-    m->q.barrier(m->heap, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    m->q.barrier(m->fstage, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    for (u32 o = 0; o < kBatches; ++o) // (a running batch's heap copy must land first)
+        if (o != batch && m->batch[o].busy && m->batch[o].grew)
+            Q.after(*m->batch[o].q);
+    ID3D12GraphicsCommandList* L = Q.list;
+    Q.barrier(m->heap, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    Q.barrier(m->fstage, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     L->SetComputeRootSignature(m->root);
     L->SetPipelineState(m->pso_move);
     const D3D12_GPU_VIRTUAL_ADDRESS va = m->fup->GetGPUVirtualAddress();
@@ -2393,10 +2537,10 @@ bool WarpGpu::fetch(const WarpFetch* list, u32 n, TextBuf* err) {
     L->SetComputeRootUnorderedAccessView(2, m->heap->GetGPUVirtualAddress());
     L->SetComputeRootUnorderedAccessView(3, m->fstage->GetGPUVirtualAddress());
     m->dispatch_rows(L, n, n, wl * 29, 1); // a group a warp
-    m->q.barrier(m->fstage, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    Q.barrier(m->fstage, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
     L->CopyBufferRegion(m->frb, 0, m->fstage, 0, bytes);
-    if (!m->q.exec(err) || !m->q.wait(err)) {
-        dump_messages(m->q.dev);
+    if (!Q.exec(err) || !Q.wait(err)) {
+        dump_messages(Q.dev);
         return false;
     }
     void* mapped = nullptr;
@@ -2410,6 +2554,7 @@ bool WarpGpu::fetch(const WarpFetch* list, u32 n, TextBuf* err) {
         memcpy(list[i].dst, src + static_cast<usize>(i) * wl, wl * sizeof(Lane));
     m->frb->Unmap(0, &none);
     stats_.lanes_fetched += n;
+    ++stats_.fetches;
     stats_.bytes_down += bytes;
     stats_.ms_fetch += (clock_seconds() - t0) * 1000.0;
     return true;

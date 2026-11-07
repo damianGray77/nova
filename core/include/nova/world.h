@@ -113,6 +113,13 @@ struct StepProfile {
     // Each node's tick by part (Soup::Timing), thread-seconds summed over the
     // nodes: they run in parallel, so these add up to more than the wall time.
     double n_first = 0, n_bodies = 0, n_pack = 0, n_ref = 0, n_unpack = 0, n_host = 0, n_second = 0;
+    // warp_step's phases in wall time (Phase 10 profiling): every node's
+    // first half, the packing, the split (choosing devices, fetching lanes,
+    // building jobs), unpacking, the host's lanes, host instructions, every
+    // node's second half, and later rounds' everything.
+    double w_first = 0, w_pack = 0, w_split = 0, w_unpack = 0, w_hostlanes = 0, w_host = 0, w_second = 0, w_later = 0;
+    double w_choose = 0, w_fetch = 0; // the split's first two parts: choosing devices, fetching lanes
+    double w_first_max = 0, w_pack_max = 0, w_second_max = 0; // the slowest node's, each tick (summed)
 };
 
 enum class KnobResult { ok, unknown_key, not_live, bad_value };
@@ -141,6 +148,14 @@ class World {
     // Times each part of every step into *p (nullptr = off).
     void set_profile(StepProfile* p); // (each node times its own parts too)
     StepProfile* profile() const { return prof_; }
+    // The kernel spike's replay (docs/kernel-spike-plan.md K1): the first GPU
+    // round of the tick that ends at `tick` (or later) is written to `path` as
+    // the GPU receives it (that round is verified, so every lane it needs is
+    // on the host), for `nova bench warp`. The world runs on unchanged.
+    void set_warp_dump(const char* path, u64 tick) {
+        warp_dump_path_ = path;
+        warp_dump_tick_ = tick;
+    }
 
     // Live knobs (demo.* in the demo model; spark.rate, spark.grant,
     // spark.min_len, spark.max_len, and from Phase 6 cpu.wear, heat.ambient
@@ -270,6 +285,8 @@ class World {
     Str warp_notes() const { return warp_notes_.view(); }
     double warp_compile_ms() const { return warp_compile_ms_; }
     const WarpGpuStats& warp_gpu_stats() const { return warp_gpu_.stats(); }
+    // Which warp kernel the GPU runs (DXC's or FXC's, its tiers, and why FXC), or "".
+    const char* warp_kernel() const { return warp_gpu_.is_open() ? warp_gpu_.kernel() : ""; }
     // warp.device = auto: the GPU and the CPU reference each take a share of
     // the bodies every round, at once. A body goes to the CPU when its last
     // first round ran more than warp_limit() steps (the GPU runs a body's
@@ -287,8 +304,7 @@ class World {
     // their share of the GPU rounds so far, in seconds.
     double warp_model_gstep() const { return warp_gstep_; }
     double warp_model_hstep() const { return warp_hstep_; }
-    double warp_ref_wall() const { return warp_ref_wall_; }
-    u64 warp_plain_ticks() const { return warp_plain_ticks_; }
+    double warp_ref_wall() const { return warp_ref_wall_; }    u64 warp_plain_ticks() const { return warp_plain_ticks_; }
     u64 warp_split_ticks() const { return warp_auto_ticks_ - warp_plain_ticks_; }
     // The GPU failed while it held warps' lanes: the world stopped (it can't
     // go on exactly); resume from a snapshot.
@@ -551,10 +567,14 @@ class World {
     Array<u32> warp_job_node_;
     Array<u32> warp_send_;       // the jobs' lanes to send (warp slots)
     Array<u32> warp_job_recs_, warp_job_words_; // the jobs' records (the bodies the GPU runs) and their sizes
+    Array<u32> warp_job_chain_;                 // ... and their expected chains (long ones are dispatched first)
     Array<u64> warp_vstate_;     // warp.verify: (node << 40 | slot << 8 | lane state) before the round
     Array<WarpFetch> warp_fetch_;
     Array<u32> warp_fetch_node_;
     Array<u32> warp_save_img_, warp_save_lanes_; // warp.verify: the packed round, before the GPU ran it
+    const char* warp_dump_path_ = nullptr; // set_warp_dump
+    u64 warp_dump_tick_ = 0;
+    bool warp_write_dump(const Array<u32>& cst);
     Array<u64> warp_save_off_;   // per job: where its image and lanes start in those
     void warp_open(Config& cfg);
     void warp_step(ThreadPool& pool, bool use_gpu = true); // use_gpu false: every node on the reference
@@ -570,6 +590,17 @@ class World {
     Array<double> warp_ref_time_;
     Array<u8> warp_got_; // scratch: which waiting warps' lanes came back with their round
     void warp_ref_build();
+    // The split's per-node passes (on the threads) and what they hand back.
+    bool warp_use_gpu_ = false, warp_same_ = false;
+    // Per node: its first half, first pack and second half last tick, in
+    // seconds (the profile's slowest node; ordering the pool by them, slowest
+    // first, gained nothing: those phases are bound by their total work).
+    Array<double> warp_node_t_;
+    Array<u32> warp_node_gpu_, warp_node_ref_, warp_node_guess_, warp_node_longest_;
+    Array<u32> warp_node_nfetch_, warp_node_nsend_, warp_node_nrec_, warp_node_ofetch_, warp_node_osend_, warp_node_orec_;
+    static void warp_choose_task(void* ctx, u32 n);
+    static void warp_list_count_task(void* ctx, u32 n);
+    static void warp_list_fill_task(void* ctx, u32 n);
     // auto's split from a model (world.cpp): the GPU's seconds a serial step
     // and the reference's a warp step on one thread (0 until measured), the
     // limit they give, and their measuring after a round.

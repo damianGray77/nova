@@ -122,6 +122,37 @@ struct WarpJob {
     // Each record's size in words, beside recs; nullptr when recs are all the
     // image's records in order (each then runs to the next, the last to the end).
     const u32* rec_words = nullptr;
+    // Each record's expected chain (its warps' steps in turn), beside recs, for
+    // WarpKernelOptions::long_first; nullptr: unknown.
+    const u32* rec_chain = nullptr;
+};
+
+// How the warp kernel is chosen and dispatched (docs/dxc-plan.md; the
+// defaults are the world's). DXC's kernel, compiled at build time, runs when
+// the build has it, the world has 32 lanes and the device takes Shader Model
+// 6.0; else FXC's, compiled at run time (WarpGpu::kernel() says which, and
+// why). Either gives the reference's words exactly.
+struct WarpKernelOptions;
+// Whether this build carries DXC's warp kernels (its build found dxc.exe).
+bool warp_dxc_built();
+
+struct WarpKernelOptions {
+    // Groupshared tiers: a record runs with its image in groupshared memory on
+    // the smallest tier that holds it (words, ascending, 0 ends the list),
+    // else on the plain kernel (its image in video memory). Each group holds
+    // its tier's whole size whatever its record's, so smaller tiers fit more
+    // groups on an SM: 75-79% of the steps are in records of 256 words or less.
+    // DXC's tiers must be ones the build compiled (256, 512, 1,024, 2,048).
+    u32 lds[4] = {256, 512, 1024, 2048};
+    // FXC's (at most 7,680 words: D3D12 gives a group 32 KB). One size, as
+    // before DXC: each FXC kernel takes about a minute and a half to compile.
+    u32 fxc_lds[4] = {2048, 0, 0, 0};
+    // The records with the longest expected chains (over a quarter of the
+    // longest, from WarpJob::rec_chain) first, in dispatches of their own,
+    // longest first, so they start at once. Only the order changes.
+    bool long_first = true;
+    // FXC's kernel even where DXC's could run (warp.kernel = fxc).
+    bool fxc = false;
 };
 
 // A job's record r's size in words.
@@ -143,6 +174,7 @@ struct WarpGpuStats {
     u64 bytes_up = 0, bytes_down = 0;
     u64 lanes_sent = 0, lanes_fetched = 0; // warps' lanes moved (each warp's, lanes-per-warp Lanes)
     double ms_fetch = 0;                   // fetching lanes back (a round trip each time)
+    u64 fetches = 0;                       // ... how many round trips
     u64 lanes_gathered = 0;                // warps' lanes that came back with their round (no round trip)
     double ms_in = 0;   // copying the round into the upload buffer (CPU)
     double ms_gpu = 0;  // the device: upload, kernel, download
@@ -164,7 +196,8 @@ class WarpGpu {
 
     // Opens device `index` (accel_list order) and compiles the kernel for
     // `lanes` lanes a warp; compile_ms (if given) gets the compile time.
-    bool open(u32 index, u32 lanes, TextBuf* err, double* compile_ms = nullptr);
+    bool open(u32 index, u32 lanes, TextBuf* err, double* compile_ms = nullptr,
+              const WarpKernelOptions* options = nullptr);
     void close();
     bool is_open() const { return impl_ != nullptr; }
     const char* name() const;
@@ -174,35 +207,52 @@ class WarpGpu {
     // `send`, and starts every record running; finish() waits for it and
     // copies the images back. `pool` (if given) does the copying in parallel.
     // False on a device error: the lanes the GPU held are lost with it.
+    // Batches (the overlap plan): up to kBatches rounds in flight at once,
+    // each on its own queue, for disjoint sets of nodes; the GPU may run
+    // their kernels at the same time.
+    static constexpr u32 kBatches = 2;
     bool submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, TextBuf* err,
-                class ThreadPool* pool = nullptr);
-    bool finish(TextBuf* err, class ThreadPool* pool = nullptr);
-    // Brings warps' lanes from the GPU into the host's copies (n of them).
-    bool fetch(const WarpFetch* list, u32 n, TextBuf* err);
+                class ThreadPool* pool = nullptr, u32 batch = 0);
+    bool finish(TextBuf* err, class ThreadPool* pool = nullptr, u32 batch = 0);
+    // Brings warps' lanes from the GPU into the host's copies (n of them), on
+    // `batch`'s queue (not in flight; the other batch may be).
+    bool fetch(const WarpFetch* list, u32 n, TextBuf* err, u32 batch = 0);
     // The lanes of warps that stopped at a host instruction come back with
     // their round (gathered on the GPU after the run, into the round's own
     // readback), so most host instructions need no fetch. After finish():
     // copies those of the listed warps it has, sets got[i] for each, and
     // returns how many (the rest still need fetch()). Once a round.
-    u32 take_gathered(const WarpFetch* list, u32 n, u8* got);
+    u32 take_gathered(const WarpFetch* list, u32 n, u8* got, class ThreadPool* pool = nullptr, u32 batch = 0);
     // submit() then finish(): the round with nothing in between.
     bool run(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, TextBuf* err, class ThreadPool* pool = nullptr) {
         return submit(cst, ncst, jobs, njobs, err, pool) && finish(err, pool);
     }
     // The device's time for the last round (its timestamps), or 0.
     double last_ms() const { return last_ms_; }
-    // The last round's kernel time on the device's clock (0 without
-    // timestamps) and its longest body's warp steps: a GPU runs a body's
-    // steps one after another, so the one sets the other (the split's model).
-    double last_kernel_ms() const { return last_kernel_ms_; }
-    u64 last_longest() const { return last_longest_; }
+    // A batch's last round: its kernel time on the device's clock (0 without
+    // timestamps) and its longest body's warp steps (a GPU runs a body's
+    // steps one after another, so the one sets the other: the split's model),
+    // and when it began and ended on the device's clock (in ticks of
+    // timestamp_hz(); 0 without), to see two batches overlap.
+    double last_kernel_ms(u32 batch = 0) const { return last_kernel_ms_[batch]; }
+    u64 last_longest(u32 batch = 0) const { return last_longest_[batch]; }
+    u64 last_begin(u32 batch) const { return last_span_[batch][0]; }
+    u64 last_end(u32 batch) const { return last_span_[batch][1]; }
+    double timestamp_hz() const;
+    // Which warp kernel open() chose: DXC's (true) or FXC's, and a line saying
+    // so (its groupshared tiers, the dispatch order, and why FXC if it is).
+    bool kernel_dxc() const { return dxc_; }
+    const char* kernel() const { return kernel_; }
 
   private:
     struct Impl;
     Impl* impl_ = nullptr;
     WarpGpuStats stats_;
-    double last_ms_ = 0, last_kernel_ms_ = 0;
-    u64 last_longest_ = 0;
+    bool dxc_ = false;
+    char kernel_[192] = {};
+    double last_ms_ = 0, last_kernel_ms_[kBatches] = {0, 0};
+    u64 last_longest_[kBatches] = {0, 0};
+    u64 last_span_[kBatches][2] = {{0, 0}, {0, 0}};
 };
 
 // The NPU backend: dot, matvec and matmul through DirectML as float16 matrix

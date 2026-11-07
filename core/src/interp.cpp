@@ -2499,6 +2499,18 @@ i64 Soup::run_cpu(u32 ci, i64 quota, u8 kind) {
 // The body's and the node's SENSE readings (design.md 6.5): everything but
 // where a CPU or lane runs (readings 0, 4, 20, 21). ci is the CPU slot for
 // the asynchronous accelerator's readings (kNone for a warp: they read 0).
+// SENSE 22 and 23 from the soonest action on a body (action_on; kNone: none).
+u32 Soup::action_reading(u32 r, u32 i) const {
+    if (i == kNone)
+        return 0;
+    const Action& a = actions_[i];
+    if (r == 22) {
+        const u64 left = a.end > tick_ ? a.end - tick_ : 1;
+        return left > 0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<u32>(left);
+    }
+    return a.op == static_cast<u32>(Op::engulf) ? kActEngulf : kActInject;
+}
+
 bool Soup::sense_reading(u32 b, u32 r, u32 ci, u32* v) const {
     const Body& B = bodies_[b];
     switch (r) {
@@ -2585,23 +2597,11 @@ bool Soup::sense_reading(u32 b, u32 r, u32 ci, u32* v) const {
         *v = accel_pending(ci);
         return true;
     case 22: // Phase 9: ticks until the soonest action on me ends (0: none)
-    case 23: { // ... and what it is (1 ENGULF, 2 INJECT)
+    case 23: // ... and what it is (1 ENGULF, 2 INJECT)
         if (!p_->cost.timed)
             return false;
-        const u32 i = action_on(b);
-        if (i == kNone) {
-            *v = 0;
-            return true;
-        }
-        const Action& a = actions_[i];
-        if (r == 22) {
-            const u64 left = a.end > tick_ ? a.end - tick_ : 1;
-            *v = left > 0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<u32>(left);
-        } else {
-            *v = a.op == static_cast<u32>(Op::engulf) ? kActEngulf : kActInject;
-        }
+        *v = action_reading(r, action_on(b));
         return true;
-    }
     case 24: { // Phase 9c: my threads still running
         if (!kinds_on())
             return false;

@@ -89,6 +89,14 @@ template <class T> class Array {
         size_ = n;
     }
 
+    // Sets the size, leaving new elements as they are: for a caller that
+    // writes every one of them next (growing as push does).
+    void resize_unfilled(usize n) {
+        if (n > cap_)
+            grow_for(n);
+        size_ = n;
+    }
+
     void clear() { size_ = 0; }
 
     void push(const T& v) {

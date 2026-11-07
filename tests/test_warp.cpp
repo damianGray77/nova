@@ -531,6 +531,24 @@ void test_gpu_device() {
     CHECK(w.warp_verified() == w.warp_gpu_rounds() && w.warp_mismatches() == 0);
     CHECK_EQ_U64(w.hash(), want);
     CHECK(w.warp_gpu_stats().lanes_fetched > 0); // host instructions brought lanes back
+    // 32 lanes run DXC's kernel when the build has it (docs/dxc-plan.md D3);
+    // warp.kernel = fxc runs FXC's, with every round verified too.
+    printf("  warp kernel: %s\n", w.warp_kernel());
+    if (warp_dxc_built())
+        CHECK(strncmp(w.warp_kernel(), "DXC", 3) == 0);
+    {
+        TextBuf fc;
+        fc.append(busy_warp_world());
+        fc.append("warp.device = gpu\nwarp.verify = 1\nwarp.kernel = fxc\n");
+        Run fr;
+        CHECK(make_run(fr, fc.c_str(), 4));
+        fr.run_until(120);
+        const World& fw = fr.world();
+        printf("  warp kernel: %s\n", fw.warp_kernel());
+        CHECK(strncmp(fw.warp_kernel(), "FXC", 3) == 0);
+        CHECK(fw.warp_gpu_rounds() >= 120 && fw.warp_verified() == fw.warp_gpu_rounds() && fw.warp_mismatches() == 0);
+        CHECK_EQ_U64(fw.hash(), want);
+    }
 
     // The GPU keeps lanes between rounds. warp.device = mixed splits the
     // nodes between the GPU and the CPU at random every round, so lanes
@@ -583,59 +601,64 @@ void test_gpu_div_loop() {
             dev = i;
     if (dev == kNone)
         return;
-    WarpGpu gpu;
-    TextBuf err;
-    CHECK(gpu.open(dev, 32, &err));
-    if (!gpu.is_open())
-        return;
-    const char* prog = "DIV INC ROT NOP1 IFZ NOP0 DIV SWAP";
-    auto start = [](WFix& f) {
-        for (u32 l = 0; l < 32; ++l) {
-            Lane& x = f.lane(l);
-            x.ip = 106; // the second DIV
-            x.ax = 0xffffffbbu;
-            x.bx = 0xa0fe2b80u + l; // a different dividend per lane
-            x.cx = 0x01568f9du;
-        }
-    };
-    u32 first_bad = 0;
-    for (u32 steps = 1; steps <= 490 && !first_bad; ++steps) {
-        WFix r, g;
-        CHECK(r.init(prog, 32, steps));
-        CHECK(g.init(prog, 32, steps));
-        start(r);
-        start(g);
-        r.s.tick(0); // the reference
-        g.s.tick_first(0);
-        CHECK(g.s.warp_pack(0));
-        Array<u32> send;
-        send.push(g.w);
-        WarpJob j = {};
-        j.node = 0;
-        j.img = g.s.warp_image().data();
-        j.img_words = static_cast<u32>(g.s.warp_image().size());
-        j.recs = g.s.warp_records().data();
-        j.nrec = static_cast<u32>(g.s.warp_records().size());
-        j.lanes = g.s.lanes_mut().data();
-        j.nlanes = static_cast<u32>(g.s.lanes_mut().size());
-        j.send = send.data();
-        j.nsend = 1;
-        CHECK(gpu.run(g.s.warp_consts().data(), static_cast<u32>(g.s.warp_consts().size()), &j, 1, &err));
-        WarpFetch f = {0, g.w, g.s.lanes_mut().data() + static_cast<usize>(g.w) * 32};
-        CHECK(gpu.fetch(&f, 1, &err));
-        for (u32 l = 0; l < 32 && !first_bad; ++l) {
-            const Lane& a = r.lane(l);
-            const Lane& b = g.lane(l);
-            if (memcmp(&a, &b, sizeof(Lane)) != 0) {
-                first_bad = steps;
-                printf("  div loop: lane %u differs after %u steps: reference ip %u ax %08x bx %08x cx %08x, GPU ip %u "
-                       "ax %08x bx %08x cx %08x\n",
-                       l, steps, a.ip, a.ax, a.bx, a.cx, b.ip, b.ax, b.bx, b.cx);
+    for (u32 kind = 0; kind < 2; ++kind) { // DXC's kernel (where the build has it), then FXC's
+        WarpGpu gpu;
+        TextBuf err;
+        WarpKernelOptions kopt;
+        kopt.fxc = kind == 1;
+        CHECK(gpu.open(dev, 32, &err, nullptr, &kopt));
+        if (!gpu.is_open())
+            return;
+        const char* prog = "DIV INC ROT NOP1 IFZ NOP0 DIV SWAP";
+        auto start = [](WFix& f) {
+            for (u32 l = 0; l < 32; ++l) {
+                Lane& x = f.lane(l);
+                x.ip = 106; // the second DIV
+                x.ax = 0xffffffbbu;
+                x.bx = 0xa0fe2b80u + l; // a different dividend per lane
+                x.cx = 0x01568f9du;
+            }
+        };
+        u32 first_bad = 0;
+        for (u32 steps = 1; steps <= 490 && !first_bad; ++steps) {
+            WFix r, g;
+            CHECK(r.init(prog, 32, steps));
+            CHECK(g.init(prog, 32, steps));
+            start(r);
+            start(g);
+            r.s.tick(0); // the reference
+            g.s.tick_first(0);
+            CHECK(g.s.warp_pack(0));
+            Array<u32> send;
+            send.push(g.w);
+            WarpJob j = {};
+            j.node = 0;
+            j.img = g.s.warp_image().data();
+            j.img_words = static_cast<u32>(g.s.warp_image().size());
+            j.recs = g.s.warp_records().data();
+            j.nrec = static_cast<u32>(g.s.warp_records().size());
+            j.lanes = g.s.lanes_mut().data();
+            j.nlanes = static_cast<u32>(g.s.lanes_mut().size());
+            j.send = send.data();
+            j.nsend = 1;
+            CHECK(gpu.run(g.s.warp_consts().data(), static_cast<u32>(g.s.warp_consts().size()), &j, 1, &err));
+            WarpFetch f = {0, g.w, g.s.lanes_mut().data() + static_cast<usize>(g.w) * 32};
+            CHECK(gpu.fetch(&f, 1, &err));
+            for (u32 l = 0; l < 32 && !first_bad; ++l) {
+                const Lane& a = r.lane(l);
+                const Lane& b = g.lane(l);
+                if (memcmp(&a, &b, sizeof(Lane)) != 0) {
+                    first_bad = steps;
+                    printf("  div loop: lane %u differs after %u steps: reference ip %u ax %08x bx %08x cx %08x, GPU ip %u "
+                           "ax %08x bx %08x cx %08x\n",
+                           l, steps, a.ip, a.ax, a.bx, a.cx, b.ip, b.ax, b.bx, b.cx);
+                }
             }
         }
+        CHECK(first_bad == 0);
+        printf("  warp GPU division (%s): a loop of DIVs agrees with the reference for 1 to 490 steps\n",
+               gpu.kernel());
     }
-    CHECK(first_bad == 0);
-    printf("  warp GPU division: a loop of DIVs agrees with the reference for 1 to 490 steps\n");
 }
 
 // gpu.warps = false is Phase 7 exactly: the same hash as no key at all.

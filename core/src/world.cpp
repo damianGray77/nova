@@ -1215,6 +1215,11 @@ void World::warp_open(Config& cfg) {
     warp_auto_ = d.eq("auto");
     warp_mixed_ = d.eq("mixed"); // a test: nodes split between the two at random, every round
     warp_verify_ = get_u32_in(cfg, "warp.verify", 0, 0, 1000000000);
+    // warp.kernel (docs/dxc-plan.md D3): DXC's kernel where it can run (32
+    // lanes, Shader Model 6.0), else FXC's; or FXC's always. The same words.
+    const Str kern = cfg.get_str("warp.kernel", "dxc");
+    if (!kern.eq("dxc") && !kern.eq("fxc"))
+        cfg.fail("warp.kernel", "must be dxc or fxc");
     if (!soup_params_.warps || d.eq("cpu"))
         return;
     AccelDevice devs[16];
@@ -1224,14 +1229,22 @@ void World::warp_open(Config& cfg) {
         if (devs[i].gpu && devs[i].hardware)
             pick = i;
     TextBuf why;
+    WarpKernelOptions kopt;
+    kopt.fxc = kern.eq("fxc");
     if (pick == kNone) {
         warp_notes_.append("no hardware GPU found: warps run on the CPU reference\n");
-    } else if (!warp_gpu_.open(pick, soup_params_.warp_lanes, &why, &warp_compile_ms_)) {
+    } else if (!warp_gpu_.open(pick, soup_params_.warp_lanes, &why, &warp_compile_ms_, &kopt)) {
         warp_notes_.append("GPU ");
         warp_notes_.append(devs[pick].name);
         warp_notes_.append(" failed to start warps (");
         warp_notes_.append(why.view());
         warp_notes_.append("): warps run on the CPU reference\n");
+    } else {
+        warp_notes_.append("warps on ");
+        warp_notes_.append(devs[pick].name);
+        warp_notes_.append(": ");
+        warp_notes_.append(warp_gpu_.kernel());
+        warp_notes_.append("\n");
     }
 }
 
@@ -1314,21 +1327,122 @@ void World::warp_sync(u32 n) {
 
 void World::warp_first_task(void* ctx, u32 node) {
     World* w = static_cast<World*>(ctx);
+    const double t0 = clock_seconds(); // (each node's time: the slowest go first next tick)
     if (!w->live_.empty() && !w->live_[node]) { // fallow (Phase 4): nothing runs
         w->soups_[node].idle(w->tick_);
         w->warp_active_[node] = 0;
+        w->warp_node_t_[3 * node] = clock_seconds() - t0;
         return;
     }
     if (w->channels_)
         w->signal_field(node);
     w->soups_[node].tick_first(w->tick_);
     w->warp_active_[node] = 1;
+    w->warp_node_t_[3 * node] = clock_seconds() - t0;
 }
 
 void World::warp_pack_task(void* ctx, u32 node) {
     World* w = static_cast<World*>(ctx);
+    const double t0 = clock_seconds();
     if (w->warp_active_[node])
         w->warp_active_[node] = w->soups_[node].warp_pack(w->warp_round_) ? 1 : 0;
+    if (w->warp_round_ == 0)
+        w->warp_node_t_[3 * node + 1] = clock_seconds() - t0;
+}
+
+// The split's choice for node n's bodies this round (warp_step): the GPU or
+// the CPU threads. (Keeping a body on the GPU until its guess passed the
+// limit by a quarter, to save the fetch a move costs, lengthened the kernel
+// more than it saved: bodies grow past the limit, they don't hover there.)
+void World::warp_choose_task(void* ctx, u32 n) {
+    World* w = static_cast<World*>(ctx);
+    u32 gpu_n = 0, ref_n = 0, guess = 0, longest = 0;
+    w->warp_on_gpu_[n] = 0;
+    if (w->warp_active_[n]) {
+        Soup& s = w->soups_[n];
+        Array<u8>& on = s.warp_record_on_gpu();
+        const u64 r = w->warp_round_;
+        for (usize i = 0; i < on.size(); ++i) {
+            const u32 chain = s.warp_record_chain(i);
+            longest = chain > longest ? chain : longest;
+            bool gpu = w->warp_use_gpu_ && w->warp_same_ && (!w->warp_auto_ || chain <= w->warp_limit_);
+            if (w->warp_mixed_ && w->warp_use_gpu_) // the test mode: lanes cross between the two all the time
+                gpu = w->warp_same_ &&
+                      (mix64((w->tick_ << 20) ^ (r << 16) ^ (static_cast<u64>(i) << 40) ^ n ^ w->seed_) & 1);
+            on[i] = gpu ? 1 : 0;
+            if (gpu) {
+                ++gpu_n;
+                w->warp_on_gpu_[n] = 1;
+                guess = chain > guess ? chain : guess;
+            } else {
+                ++ref_n;
+            }
+        }
+    }
+    w->warp_node_gpu_[n] = gpu_n;
+    w->warp_node_ref_[n] = ref_n;
+    w->warp_node_guess_[n] = guess;
+    w->warp_node_longest_[n] = longest;
+}
+
+// The round's lists for node n (warp_step), counted, then filled at the
+// node's offsets: lanes to fetch (Device lanes of bodies the CPU runs, or of
+// every body when verifying), lanes to send (Host lanes of bodies the GPU
+// runs), and the records the GPU runs with their sizes.
+void World::warp_list_count_task(void* ctx, u32 n) {
+    World* w = static_cast<World*>(ctx);
+    u32 nf = 0, ns = 0, nr = 0;
+    if (w->warp_active_[n]) {
+        const Soup& s = w->soups_[n];
+        const u32 L = s.lanes_per_warp();
+        const u32* I = s.warp_image_view().data();
+        const Array<u8>& on = w->soups_[n].warp_record_on_gpu();
+        for (usize k = 0; k < s.warp_records().size(); ++k) {
+            const bool gpu = on[k] != 0;
+            nr += gpu ? 1 : 0;
+            const u32 rec = s.warp_records()[k];
+            for (u32 q = 0; q < I[rec + WB_NWARP]; ++q) {
+                const u8 st = s.lane_state(I[rec + WB_WARPS + q * WW_SIZE + WW_LANE0] / L);
+                nf += ((!gpu || w->warp_verifying_) && st == Soup::kLanesDevice) ? 1 : 0;
+                ns += (gpu && st == Soup::kLanesHost) ? 1 : 0;
+            }
+        }
+    }
+    w->warp_node_nfetch_[n] = nf;
+    w->warp_node_nsend_[n] = ns;
+    w->warp_node_nrec_[n] = nr;
+}
+
+void World::warp_list_fill_task(void* ctx, u32 n) {
+    World* w = static_cast<World*>(ctx);
+    if (!w->warp_active_[n])
+        return;
+    Soup& s = w->soups_[n];
+    const u32 L = s.lanes_per_warp();
+    const u32* I = s.warp_image_view().data();
+    const Array<u8>& on = s.warp_record_on_gpu();
+    u32 f = w->warp_node_ofetch_[n], sd = w->warp_node_osend_[n], rc = w->warp_node_orec_[n];
+    for (usize k = 0; k < s.warp_records().size(); ++k) {
+        const bool gpu = on[k] != 0;
+        const u32 rec = s.warp_records()[k];
+        if (gpu) {
+            w->warp_job_recs_[rc] = rec;
+            w->warp_job_words_[rc] = s.warp_record_words(k);
+            w->warp_job_chain_[rc] = s.warp_record_chain(k); // (long bodies go first on the GPU)
+            ++rc;
+        }
+        for (u32 q = 0; q < I[rec + WB_NWARP]; ++q) {
+            const u32 slot = I[rec + WB_WARPS + q * WW_SIZE + WW_LANE0] / L;
+            const u8 st = s.lane_state(slot);
+            if ((!gpu || w->warp_verifying_) && st == Soup::kLanesDevice) {
+                w->warp_fetch_[f] = WarpFetch{n, slot, s.lanes_mut().data() + static_cast<usize>(slot) * L};
+                w->warp_fetch_node_[f] = n;
+                ++f;
+            }
+            if (gpu && st == Soup::kLanesHost)
+                w->warp_send_[sd++] = slot;
+        }
+    }
 }
 
 // warp.verify: every active node's bodies on the reference, one after another.
@@ -1494,8 +1608,43 @@ void World::warp_host_task(void* ctx, u32 node) {
 
 void World::warp_second_task(void* ctx, u32 node) {
     World* w = static_cast<World*>(ctx);
+    const double t0 = clock_seconds();
     if (w->live_.empty() || w->live_[node])
         w->soups_[node].tick_second();
+    w->warp_node_t_[3 * node + 2] = clock_seconds() - t0;
+}
+
+// set_warp_dump's file, little-endian 32-bit words: "NWRD" (0x4452574E), the
+// version (1), lanes a warp, the constants' count, the jobs' count, the
+// constants; then per job its node, image words, records and lanes (Lane
+// count), the image, the record offsets, each record's words, and the lanes.
+bool World::warp_write_dump(const Array<u32>& cst) {
+    FILE* f = fopen(warp_dump_path_, "wb");
+    if (!f)
+        return false;
+    bool ok = true;
+    auto put = [&](const void* p, usize words) {
+        ok = ok && (words == 0 || fwrite(p, 4, words, f) == words);
+    };
+    const u32 head[5] = {0x4452574Eu, 1u, soup_params_.warp_lanes, static_cast<u32>(cst.size()),
+                         static_cast<u32>(warp_jobs_.size())};
+    put(head, 5);
+    put(cst.data(), cst.size());
+    Array<u32> words;
+    for (usize i = 0; i < warp_jobs_.size(); ++i) {
+        const WarpJob& j = warp_jobs_[i];
+        const u32 jh[4] = {j.node, j.img_words, j.nrec, j.nlanes};
+        put(jh, 4);
+        put(j.img, j.img_words);
+        put(j.recs, j.nrec);
+        words.resize(j.nrec);
+        for (u32 r = 0; r < j.nrec; ++r)
+            words[r] = warp_job_rec_words(j, r);
+        put(words.data(), j.nrec);
+        put(j.lanes, static_cast<usize>(j.nlanes) * (sizeof(Lane) / 4));
+    }
+    ok = fclose(f) == 0 && ok;
+    return ok;
 }
 
 // The update with warps on the GPU: every node's first half (sparks, CPUs),
@@ -1517,13 +1666,29 @@ void World::warp_second_task(void* ctx, u32 node) {
 // sends every node to the GPU.
 void World::warp_step(ThreadPool& pool, bool use_gpu) {
     double cpu_s = 0, gpu_s = 0, pack_s = 0;
+    // Profiling: each phase's wall time (the first round's apart from later ones').
+    double tw = prof_ ? clock_seconds() : 0;
+    auto wmark = [&](double StepProfile::*part) {
+        if (!prof_)
+            return;
+        const double now = clock_seconds();
+        prof_->*part += now - tw;
+        tw = now;
+    };
     warp_active_.resize(nodes_);
     warp_on_gpu_.resize(nodes_);
+    if (warp_node_t_.size() != static_cast<usize>(nodes_) * 3) {
+        warp_node_t_.resize(static_cast<usize>(nodes_) * 3);
+        warp_node_t_.fill(0.0);
+    }
     pool.run(nodes_, &World::warp_first_task, this);
+    wmark(&StepProfile::w_first);
     for (u32 r = 0; r < soup_params_.warp_rounds && !warp_failed_; ++r) {
         warp_round_ = r;
         double t = clock_seconds();
+        tw = t;
         pool.run(nodes_, &World::warp_pack_task, this);
+        wmark(r == 0 ? &StepProfile::w_pack : &StepProfile::w_later);
         // The constants must be the same everywhere for one dispatch.
         const Array<u32>* cst = nullptr;
         bool same = true;
@@ -1547,96 +1712,78 @@ void World::warp_step(ThreadPool& pool, bool use_gpu) {
         // lanes at once: a body's record and warps are its own.
         if (use_gpu && warp_auto_ && r == 0 && warp_gstep_ > 0 && warp_hstep_ > 0)
             warp_limit_ = warp_model_limit(pool.threads());
+        // Each node chooses on a thread (warp_choose_task); the sums after.
+        warp_use_gpu_ = use_gpu;
+        warp_same_ = same;
+        warp_node_gpu_.resize(nodes_);
+        warp_node_ref_.resize(nodes_);
+        warp_node_guess_.resize(nodes_);
+        warp_node_longest_.resize(nodes_);
+        pool.run(nodes_, &World::warp_choose_task, this);
+        u32 gpu_recs = 0, ref_recs = 0, longest_all = 0;
         if (r == 0)
             warp_gpu_guess_ = 0;
-        u32 gpu_recs = 0, ref_recs = 0, longest_all = 0;
         for (u32 n = 0; n < nodes_; ++n) {
-            warp_on_gpu_[n] = 0; // (now: the GPU runs some of its bodies)
-            if (!warp_active_[n])
-                continue;
-            Soup& s = soups_[n];
-            Array<u8>& on = s.warp_record_on_gpu();
-            for (usize i = 0; i < on.size(); ++i) {
-                const u32 chain = s.warp_record_chain(i);
-                longest_all = chain > longest_all ? chain : longest_all;
-                bool gpu = use_gpu && same && (!warp_auto_ || chain <= warp_limit_);
-                if (warp_mixed_ && use_gpu) // the test mode: lanes cross between the two all the time
-                    gpu = same && (mix64((tick_ << 20) ^ (static_cast<u64>(r) << 16) ^ (static_cast<u64>(i) << 40) ^ n ^
-                                         seed_) &
-                                   1);
-                on[i] = gpu ? 1 : 0;
-                if (gpu) {
-                    ++gpu_recs;
-                    warp_on_gpu_[n] = 1;
-                    if (r == 0 && chain > warp_gpu_guess_)
-                        warp_gpu_guess_ = chain;
-                } else {
-                    ++ref_recs;
-                }
-            }
+            gpu_recs += warp_node_gpu_[n];
+            ref_recs += warp_node_ref_[n];
+            longest_all = warp_node_longest_[n] > longest_all ? warp_node_longest_[n] : longest_all;
+            if (r == 0 && warp_node_guess_[n] > warp_gpu_guess_)
+                warp_gpu_guess_ = warp_node_guess_[n];
         }
+        if (prof_ && r == 0)
+            prof_->w_choose += clock_seconds() - tw;
         // warp.verify: this round on both, compared (the GPU's bodies' inputs
         // must then be on the host too).
-        warp_verifying_ = warp_verify_ && gpu_recs && (warp_gpu_rounds_ % warp_verify_ == 0);
-        // Lanes the reference needs that only the GPU has: those of the bodies
-        // the CPU runs (every body's when verifying).
+        // (set_warp_dump's round is verified too, so its lanes are all on the host.)
+        const bool dump_now = warp_dump_path_ && r == 0 && gpu_recs && tick_ + 1 >= warp_dump_tick_;
+        warp_verifying_ = (warp_verify_ && gpu_recs && (warp_gpu_rounds_ % warp_verify_ == 0)) || dump_now;
+        // The lists, built per node on the threads, in two passes (count, then
+        // fill at each node's offset), so they come out in node order: the
+        // lanes the reference needs that only the GPU has (those of the bodies
+        // the CPU runs; every body's when verifying), and the GPU's jobs (each
+        // node's bodies it runs, their sizes, and the lanes it must be sent:
+        // those of their warps the host holds the newer copy of).
+        warp_node_nfetch_.resize(nodes_);
+        warp_node_nsend_.resize(nodes_);
+        warp_node_nrec_.resize(nodes_);
+        pool.run(nodes_, &World::warp_list_count_task, this);
+        warp_node_ofetch_.resize(nodes_);
+        warp_node_osend_.resize(nodes_);
+        warp_node_orec_.resize(nodes_);
+        u32 nfetch = 0, nsend = 0, nrec = 0;
+        for (u32 n = 0; n < nodes_; ++n) {
+            warp_node_ofetch_[n] = nfetch;
+            warp_node_osend_[n] = nsend;
+            warp_node_orec_[n] = nrec;
+            nfetch += warp_node_nfetch_[n];
+            nsend += warp_node_nsend_[n];
+            nrec += warp_node_nrec_[n];
+        }
         Array<WarpFetch>& fl = warp_fetch_;
         Array<u32>& fn = warp_fetch_node_;
-        fl.clear();
-        fn.clear();
-        for (u32 n = 0; n < nodes_; ++n) {
-            if (!warp_active_[n])
-                continue;
-            Soup& s = soups_[n];
-            const u32 L = s.lanes_per_warp();
-            const u32* I = s.warp_image().data();
-            const Array<u8>& on = s.warp_record_on_gpu();
-            for (usize k = 0; k < s.warp_records().size(); ++k) {
-                if (on[k] && !warp_verifying_)
-                    continue;
-                const u32 rec = s.warp_records()[k];
-                for (u32 i = 0; i < I[rec + WB_NWARP]; ++i) {
-                    const u32 w = I[rec + WB_WARPS + i * WW_SIZE + WW_LANE0] / L;
-                    if (s.lane_state(w) == Soup::kLanesDevice) {
-                        fl.push(WarpFetch{n, w, s.lanes_mut().data() + static_cast<usize>(w) * L});
-                        fn.push(n);
-                    }
-                }
-            }
-        }
-        if (!warp_fetch(fl, fn))
-            return;
-        // The GPU's jobs: each node's bodies it runs (their records and
-        // sizes), and the lanes it must be sent (those of their warps the host
-        // holds the newer copy of).
+        fl.resize(nfetch);
+        fn.resize(nfetch);
+        warp_send_.resize(nsend);
+        warp_job_recs_.resize(nrec);
+        warp_job_words_.resize(nrec);
+        warp_job_chain_.resize(nrec);
+        pool.run(nodes_, &World::warp_list_fill_task, this);
         warp_jobs_.clear();
         warp_job_node_.clear();
-        warp_send_.clear();
-        warp_job_recs_.clear();
-        warp_job_words_.clear();
         warp_vstate_.clear();
-        Array<u32> send_off, rec_off;
         for (u32 n = 0; n < nodes_; ++n) {
             if (!warp_active_[n] || !warp_on_gpu_[n])
                 continue;
             Soup& s = soups_[n];
-            const u32 L = s.lanes_per_warp();
-            const u32* I = s.warp_image().data();
-            const Array<u8>& on = s.warp_record_on_gpu();
-            send_off.push(static_cast<u32>(warp_send_.size()));
-            rec_off.push(static_cast<u32>(warp_job_recs_.size()));
-            for (usize k = 0; k < s.warp_records().size(); ++k) {
-                if (!on[k])
-                    continue;
-                const u32 rec = s.warp_records()[k];
-                warp_job_recs_.push(rec);
-                warp_job_words_.push(s.warp_record_words(k));
-                for (u32 i = 0; i < I[rec + WB_NWARP]; ++i) {
-                    const u32 w = I[rec + WB_WARPS + i * WW_SIZE + WW_LANE0] / L;
-                    if (s.lane_state(w) == Soup::kLanesHost)
-                        warp_send_.push(w);
-                    if (warp_verifying_ && warp_mismatches_ < 3) // (for warp.verify's account of a difference)
+            if (warp_verifying_ && warp_mismatches_ < 3) { // (for warp.verify's account of a difference)
+                const u32 L = s.lanes_per_warp();
+                const u32* I = s.warp_image_view().data();
+                for (u32 k = 0; k < warp_node_nrec_[n]; ++k) {
+                    const u32 rec = warp_job_recs_[warp_node_orec_[n] + k];
+                    for (u32 i = 0; i < I[rec + WB_NWARP]; ++i) {
+                        const u32 w = I[rec + WB_WARPS + i * WW_SIZE + WW_LANE0] / L;
                         warp_vstate_.push(static_cast<u64>(n) << 40 | static_cast<u64>(w) << 8 | s.lane_state(w));
+                    }
                 }
             }
             WarpJob j = {};
@@ -1645,19 +1792,20 @@ void World::warp_step(ThreadPool& pool, bool use_gpu) {
             j.img_words = static_cast<u32>(s.warp_image().size());
             j.lanes = s.lanes_mut().data();
             j.nlanes = static_cast<u32>(s.lanes_mut().size());
+            j.send = warp_send_.data() + warp_node_osend_[n];
+            j.nsend = warp_node_nsend_[n];
+            j.recs = warp_job_recs_.data() + warp_node_orec_[n];
+            j.rec_words = warp_job_words_.data() + warp_node_orec_[n];
+            j.rec_chain = warp_job_chain_.data() + warp_node_orec_[n];
+            j.nrec = warp_node_nrec_[n];
             warp_jobs_.push(j);
             warp_job_node_.push(n);
         }
-        for (usize i = 0; i < warp_jobs_.size(); ++i) { // (the lists, now that they've stopped growing)
-            const u32 a = send_off[i], b = i + 1 < warp_jobs_.size() ? send_off[i + 1] : static_cast<u32>(warp_send_.size());
-            warp_jobs_[i].send = warp_send_.data() + a;
-            warp_jobs_[i].nsend = b - a;
-            const u32 c = rec_off[i],
-                      d = i + 1 < warp_jobs_.size() ? rec_off[i + 1] : static_cast<u32>(warp_job_recs_.size());
-            warp_jobs_[i].recs = warp_job_recs_.data() + c;
-            warp_jobs_[i].rec_words = warp_job_words_.data() + c;
-            warp_jobs_[i].nrec = d - c;
-        }
+        const double tf0 = prof_ ? clock_seconds() : 0;
+        if (!warp_fetch(fl, fn))
+            return;
+        if (prof_ && r == 0)
+            prof_->w_fetch += clock_seconds() - tf0;
         // warp.verify: keep the GPU's nodes' inputs, to run the reference on them.
         if (warp_verifying_) {
             warp_save_img_.clear();
@@ -1671,6 +1819,16 @@ void World::warp_step(ThreadPool& pool, bool use_gpu) {
                                         static_cast<usize>(warp_jobs_[i].nlanes) * (sizeof(Lane) / 4));
             }
         }
+        if (dump_now) {
+            if (warp_write_dump(*cst))
+                fprintf(stderr, "nova: wrote the warp round of tick %llu (%u jobs) to %s\n",
+                        static_cast<unsigned long long>(tick_ + 1), static_cast<u32>(warp_jobs_.size()),
+                        warp_dump_path_);
+            else
+                fprintf(stderr, "nova: could not write the warp round to %s\n", warp_dump_path_);
+            warp_dump_path_ = nullptr;
+        }
+        wmark(r == 0 ? &StepProfile::w_split : &StepProfile::w_later);
         pack_s += clock_seconds() - t;
         cpu_s += clock_seconds() - t;
         // The GPU starts on its nodes; the CPU threads run the rest meanwhile.
@@ -1863,7 +2021,9 @@ void World::warp_step(ThreadPool& pool, bool use_gpu) {
         if (warp_auto_)
             for (u32 n = 0; n < nodes_; ++n)
                 steps_before += soups_[n].tally().warp_steps;
+        tw = prof_ ? clock_seconds() : 0;
         pool.run(nodes_, &World::warp_unpack_task, this);
+        wmark(r == 0 ? &StepProfile::w_unpack : &StepProfile::w_later);
         if (warp_auto_)
             for (u32 n = 0; n < nodes_; ++n)
                 steps_after += soups_[n].tally().warp_steps;
@@ -1889,7 +2049,7 @@ void World::warp_step(ThreadPool& pool, bool use_gpu) {
         }
         if (!fl.empty()) { // most came back with the round (gathered on the GPU): fetch only the rest
             warp_got_.resize(fl.size());
-            if (warp_gpu_.take_gathered(fl.data(), static_cast<u32>(fl.size()), warp_got_.data()) > 0) {
+            if (warp_gpu_.take_gathered(fl.data(), static_cast<u32>(fl.size()), warp_got_.data(), &pool) > 0) {
                 usize k = 0;
                 for (usize i = 0; i < fl.size(); ++i) {
                     if (warp_got_[i]) {
@@ -1906,7 +2066,9 @@ void World::warp_step(ThreadPool& pool, bool use_gpu) {
         }
         if (!warp_fetch(fl, fn))
             return;
+        wmark(r == 0 ? &StepProfile::w_hostlanes : &StepProfile::w_later);
         pool.run(nodes_, &World::warp_host_task, this);
+        wmark(r == 0 ? &StepProfile::w_host : &StepProfile::w_later);
         cpu_s += clock_seconds() - t;
         // The split (auto): a search for the limit that makes rounds quickest,
         // measured. The cost of a round is its wall time, the GPU and the CPU
@@ -1948,7 +2110,18 @@ void World::warp_step(ThreadPool& pool, bool use_gpu) {
             }
         }
     }
+    tw = prof_ ? clock_seconds() : 0;
     pool.run(nodes_, &World::warp_second_task, this);
+    wmark(&StepProfile::w_second);
+    if (prof_) { // the slowest node in each pool phase: the floor under its wall time
+        double m[3] = {0, 0, 0};
+        for (u32 n = 0; n < nodes_; ++n)
+            for (u32 k = 0; k < 3; ++k)
+                m[k] = warp_node_t_[3 * n + k] > m[k] ? warp_node_t_[3 * n + k] : m[k];
+        prof_->w_first_max += m[0];
+        prof_->w_pack_max += m[1];
+        prof_->w_second_max += m[2];
+    }
     if (prof_) {
         prof_->warp_cpu += cpu_s;
         prof_->warp_pack += pack_s;

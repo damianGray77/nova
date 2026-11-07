@@ -12,6 +12,9 @@ Only thin C-runtime headers (`cstdint`, `cstddef`, `cstdio`, `cstdlib`,
 Phase 5 Windows' own Direct3D 12, DXCore and DirectML headers, used only by
 `core/src/accel_dx.cpp`) are used. A CTest entry (`includes`) enforces this;
 adding a header to its allowlist is a dependency decision to discuss first.
+The build also runs the Windows SDK's own `dxc.exe`, when it's there, to
+compile the GPU warp kernel; only its output is embedded, and nothing of DXC is
+included, linked or shipped (`docs/dxc-plan.md`).
 
 ## Status: Phase 10 built (design.md 6.16, 9.1); tuning after stress tests
 
@@ -48,6 +51,16 @@ heat (snapshot format v2). `nova resume <snapshot>` continues a snapshot
 headlessly for timing and bisecting. `warp.device = auto` now shares each
 round per body (long bodies to the CPU threads, the rest to the GPU) with
 the split set by a measured model of both sides.
+
+The warp kernel is now compiled at build time by the Windows SDK's DXC, a
+build tool only, with no new header or DLL at run time. It keeps
+`core/src/warp_kernel.hlsl` as its one source and gives records groupshared
+tiers sized to them, the long bodies first. The late world's GPU round takes
+16.1 ms instead of 29.6, word for word the same, and a late tick takes
+25.7 ms instead of 28.3 in `auto` (31.9 instead of 38.7 with every body on the
+GPU). A build without `dxc.exe`, another lane count, or `warp.kernel = fxc`
+runs the old FXC kernel, compiled at run time. `nova resume --dump-round`
+and `nova bench warp` replay one GPU round to compare kernels.
 
 **Phase 9** charges every instruction in world time measured on the real
 machine (`cost.table = home_v1`, the default since Phase 10; `classic` is

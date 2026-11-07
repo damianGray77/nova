@@ -547,6 +547,15 @@ struct DispersalPorts {
 void warp_trace_begin(u32 lane0, u32 lane, TextBuf* out);
 void warp_trace_end();
 
+// The CPU reference on one body record of a packed round (warp.cpp): img is
+// the round's image, cst its constants, lanes the node's lanes by slot. For
+// `nova bench warp`, which replays a dumped round outside any soup.
+void warp_run_reference(u32* img, const u32* cst, Lane* lanes, u32 rec);
+// While set (nullptr: off), the reference counts per Op, into counts[0 ..
+// 2 x kOpCount + 1): lane-instructions (kOpCount: a lane that couldn't run
+// the code), then places searched. One thread at a time (`nova bench warp --ops`).
+void warp_op_histogram(u64* counts);
+
 class Soup {
   public:
     Soup() = default;
@@ -956,6 +965,8 @@ class Soup {
     bool cpu_runs(u32 b) const;
     bool warp_runs(u32 b) const;
     bool sense_reading(u32 b, u32 r, u32 ci, u32* v) const;
+    u32 action_reading(u32 r, u32 i) const; // SENSE 22/23 from action i (kNone: none)
+    Array<u32> wact_soon_; // warp_pack's scratch: per body, the soonest live action on it (action_on, at once)
     // A warp's host instruction; or, with `resolving`, the end of its action.
     // Returns whether it succeeded.
     bool host_step(u32 w, const Action* resolving = nullptr);
