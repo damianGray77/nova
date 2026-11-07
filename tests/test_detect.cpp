@@ -365,7 +365,7 @@ void event_replay() {
 
     ReplayLog log;
     CHECK(log.load_file(path, &err));
-    CHECK(log.version() == 2 && log.event_count() == 4);
+    CHECK(log.version() == kReplayVersion && log.event_count() == 4); // (events since v2; v3 since the integration)
     ReplayResult r;
     CHECK(replay_verify(log, 1, &r));
     CHECK(r.ok && r.events_checked == 4);

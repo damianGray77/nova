@@ -242,8 +242,11 @@ struct SoupParams {
     float p_speed, e_speed; // P (E) millicores: a millicore's time a tick (the instructions it runs) x this
     float gpu_speed;        // GPU units: lane throughput (block ops, warp work) and the warps' clock x this
     float npu_speed;        // NPU units: multiply-adds a tick (npu.macs) x this
-    float mem_fast_speed, mem_slow_speed; // the memory tiers (W3, not built yet): their costs / these
-    float disk_speed, archive_speed;      // the disk tiers (W4): their access and per-codon costs / these
+    // The tiers' speeds divide their costs, so they are doubles: the floor
+    // (0.1) as a float is 0.100000001, and a cost divided by it would come
+    // out a hair under ten times and truncate one short (6 -> 59, not 60).
+    double mem_fast_speed, mem_slow_speed; // the memory tiers (W3, not built yet): their costs / these
+    double disk_speed, archive_speed;      // the disk tiers (W4): each tier's DISK access and per-codon costs / these
     // optional seeded genome (smoke tests, demos), on every node or one
     u8 seed_genome[kMaxSeedLen];
     u32 seed_len;        // 0 = no seed

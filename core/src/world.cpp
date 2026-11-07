@@ -600,15 +600,19 @@ void World::derive_node(u32 n, const Array<double>* z, bool first) {
     if (substrates_) {
         u8* lv = sub_level_.data() + static_cast<usize>(n) * kSubstrateTypes;
         memcpy(lv, sub_at_.data() + static_cast<usize>(n) * kSubstrateTypes, kSubstrateTypes);
-        auto speed = [&](u32 t) { return static_cast<float>(substrate_multiplier(lv[t], sub_params_.floor_mult)); };
+        auto mult = [&](u32 t) { return substrate_multiplier(lv[t], sub_params_.floor_mult); };
+        auto speed = [&](u32 t) { return static_cast<float>(mult(t)); };
         p.p_speed = speed(kSubP);
         p.e_speed = speed(kSubE);
         p.gpu_speed = speed(kSubGpu);
         p.npu_speed = speed(kSubNpu);
-        p.mem_fast_speed = speed(kSubMemFast);
-        p.mem_slow_speed = speed(kSubMemSlow);
-        p.disk_speed = speed(kSubDiskFast);
-        p.archive_speed = speed(kSubDiskSlow);
+        // The tiers' speeds as doubles (they divide costs: soup.h). The disk
+        // tiers (W4) divide each tier's DISK access and per-codon costs by
+        // these two (Exec::disk_scale, interp.cpp): fast disk, then archive.
+        p.mem_fast_speed = mult(kSubMemFast);
+        p.mem_slow_speed = mult(kSubMemSlow);
+        p.disk_speed = mult(kSubDiskFast);
+        p.archive_speed = mult(kSubDiskSlow);
     }
     if (z[kFieldSoupSize].size())
         p.size = scaled_u32(m.size, factor(kFieldSoupSize), 64 < m.size ? 64 : m.size, 1u << 24);

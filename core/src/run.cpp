@@ -3,10 +3,13 @@
 #include <cstdio> // snprintf
 
 #include "nova/budget.h"
-#include "nova/keys.h" // the settings registry (pre-v4 snapshots' defaults)
+#include "nova/legacy.h" // older snapshots' and replay logs' defaults
 #include "nova/snapshot.h"
 
 namespace nova {
+
+static_assert(kSnapshotLegacyBefore <= kSnapshotVersion,
+              "snapshots before kSnapshotLegacyBefore take the legacy defaults (legacy.h)");
 
 void genome_names(const CodonTable& t, const u8* codons, u32 len, TextBuf& out) {
     for (u32 i = 0; i < len; ++i) {
@@ -50,20 +53,13 @@ bool Run::init_from_snapshot(const u8* data, usize n, u32 threads, TextBuf* err,
         err->append("snapshot: the config's changes were refused");
         return false;
     }
-    // A varied world (docs/world-plan.md W9): a snapshot from before v4 comes
-    // from a world without substrates, sparks by activity or the archive (disk
-    // tiers, W4; its disk section has none), so it resumes with all three
-    // off, unless its config (or an edit above) names them.
-    if (h.version < 4 && key_peek_str(config_, "world.model").eq("soup")) {
-        const Str g = key_peek_str(config_, "world.graph");
-        const bool map = g.eq("procedural") || g.eq("landscape"); // (substrates are read only there)
-        if (!config_.has("spark.activity"))
-            config_.set("spark.activity", "0");
-        if (map && !config_.has("substrate.enabled"))
-            config_.set("substrate.enabled", "false");
-        if (!config_.has("world.archive"))
-            config_.set("world.archive", "0");
-    }
+    // A snapshot from before v4 comes from a world without the features on by
+    // default since (legacy.h: substrates, sparks by activity, the archive,
+    // whose disk section it lacks), so it resumes with them off, unless its
+    // config (or an edit above) names them. The effective config then carries
+    // them, so later snapshots keep them off.
+    if (h.version < kSnapshotLegacyBefore)
+        apply_legacy_defaults(config_);
     budget_notes_.clear(); // a snapshot's budgets were resolved when it ran: this only checks the fit
     if (!resolve_budgets(config_, threads ? threads : ThreadPool::hardware_threads(), &budget_notes_, err))
         return false;
@@ -466,7 +462,7 @@ bool replay_verify(const ReplayLog& log, u32 threads, ReplayResult* out) {
     *out = ReplayResult{};
     Run run;
     Config::ParseError pe;
-    if (!run.config().parse(log.config_text(), &pe)) {
+    if (!log.replay_config(&run.config(), &pe)) { // (with the legacy defaults for a log before v3)
         snprintf(out->msg, sizeof out->msg, "logged config: %s", pe.msg);
         return false;
     }

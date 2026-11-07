@@ -130,8 +130,8 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | Key | Kind | Default | Range | Setting |
 |---|---|---|---|---|
 | `substrate.enabled` | switch | true | true or false | **Substrates**. Each node's P cores, E cores, GPU, NPU, fast and slow memory and fast and slow disk perform at one of five levels (the floor, 0.5, 1, 1.5 or 2 times), from smooth noise fields (a ring: every level 1). Needs `world.graph=procedural\|landscape`. |
-| `substrate.smooth` | number | 0.7 | 0 to 1 | **Smoothness**. 0: each node's levels on their own; 1: following the noise fields, so neighbours share them. Needs `substrate.enabled`. |
-| `substrate.scale` | number | 3 | 0.1 to 100 | **Feature scale**. Features of the substrate fields across the height (like land.scale): higher gives smaller regions. Needs `substrate.enabled`. |
+| `substrate.smooth` | number | 1 | 0 to 1 | **Smoothness**. 0: each node's levels on their own; 1: following the noise fields, so neighbours share them. Needs `substrate.enabled`. |
+| `substrate.scale` | number | 1.5 | 0.1 to 100 | **Feature scale**. Features of the substrate fields across the height (like land.scale): higher gives smaller regions. Needs `substrate.enabled`. |
 | `substrate.floor` | number | 0.1 | 0.01 to 1 | **Floor**. The lowest level's multiplier: the resource is there but nearly useless. Needs `substrate.enabled`. |
 | `substrate.share_floor` | number | 10 | 0 to 100 | **Share at the floor**. The share of nodes at the lowest level, for each type, by rank (relative to the other four shares). Needs `substrate.enabled`. |
 | `substrate.share_half` | number | 20 | 0 to 100 | **Share at 0.5x**. The share of nodes at 0.5 times, for each type (relative to the other four shares). Needs `substrate.enabled`. |

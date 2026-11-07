@@ -58,6 +58,7 @@
 #include "nova/hash.h"
 #include "nova/io.h"
 #include "nova/keys.h"
+#include "nova/legacy.h"
 #include "nova/replay.h"
 #include "nova/run.h"
 
@@ -1320,6 +1321,9 @@ int cmd_replay(const Args& a) {
         return 1;
     }
     u32 threads = a.has_threads ? static_cast<u32>(a.threads) : 0;
+    if (log.version() < kReplayLegacyBefore) // (docs/results/integration.md)
+        printf("nova: a version %u log: settings it doesn't name take the defaults it was written with (legacy.h)\n",
+               log.version());
     ReplayResult r;
     double t0 = now_ms();
     bool ok = replay_verify(log, threads, &r);

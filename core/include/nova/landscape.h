@@ -132,9 +132,12 @@ enum SubstrateType : u32 { kSubP, kSubE, kSubGpu, kSubNpu, kSubMemFast, kSubMemS
 inline constexpr u32 kFieldSubstrate = 256; // + type: each type's noise field
 inline constexpr u8 kSubstrateOne = 2;      // the 1x level (every level without substrates)
 
+// (The defaults are the registry's, keys.inc: smooth 1 and scale 1.5 since the
+// integration, so substrates blend into each other; the approved 0.7 and 3
+// made a patchy map. docs/results/world.md.)
 struct SubstrateParams {
-    double smooth = 0.7;     // substrate.smooth: 0 each node on its own, 1 following the field
-    double scale = 3.0;      // substrate.scale: features across the height
+    double smooth = 1.0;     // substrate.smooth: 0 each node on its own, 1 following the field
+    double scale = 1.5;      // substrate.scale: features across the height
     double floor_mult = 0.1; // substrate.floor: the lowest level's multiplier
     double share[kSubstrateLevels] = {10, 20, 40, 20, 10}; // substrate.share_*: relative shares
 };

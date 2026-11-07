@@ -3,8 +3,8 @@
 // The replay log (design.md 7.1 H and K): everything needed to re-run a run
 // exactly, plus checkpoints to prove that it did.
 //
-// Text format v2, one record per line, in time order:
-//   nova-replay 2
+// Text format v3, one record per line, in time order:
+//   nova-replay 3
 //   config <key> = <value>        the config at tick 0 (one line per entry)
 //   hash <tick> <16 hex digits>   world hash once <tick> ticks have completed
 //   knob <tick> <key> = <value>   a live knob change, applied before tick <tick> ran
@@ -13,6 +13,13 @@
 //                                 must see exactly the same events
 //   end <tick> <16 hex digits>    final tick and hash
 // Lines starting with '#' are comments. Version 1 logs (no events) still load.
+//
+// v3 (docs/results/integration.md) changes no record: it marks a log written
+// since the varied world's features (substrates, sparks by activity, the
+// archive) came on by default. A log records only the settings it was given,
+// so a v2 or v1 log replays with those features as they were then: a setting
+// it doesn't name takes its legacy default (legacy.h, as for snapshots before
+// v4), not the registry's. replay_config() gives the config to replay.
 //
 // Knob events are what keep a run reproducible once the analysis UI lets people
 // turn knobs mid-run: the change is logged with its tick, and replay reapplies
@@ -25,7 +32,7 @@
 
 namespace nova {
 
-inline constexpr u32 kReplayVersion = 2;
+inline constexpr u32 kReplayVersion = 3;
 
 class ReplayWriter {
   public:
@@ -53,7 +60,12 @@ class ReplayLog {
     bool parse(Str text, TextBuf* err);
     bool load_file(const char* path, TextBuf* err);
 
+    // The config as logged, one "key = value" line per record.
     Str config_text() const { return config_.view(); }
+    // The config to replay with (into *out, replacing it): the logged one,
+    // and for a log before v3 the legacy defaults (legacy.h) for the settings
+    // it doesn't name. False, with the reason, if the logged text won't parse.
+    bool replay_config(Config* out, Config::ParseError* err) const;
 
     u32 version() const { return version_; }
 

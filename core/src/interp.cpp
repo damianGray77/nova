@@ -468,10 +468,11 @@ struct Exec {
     // Disk tiers (docs/world-plan.md W4): a DISK op's cost from `access` (its
     // slowest tier's) and `per` codon (each codon's own tier's) over nf fast
     // and na archive codons -- the archive archive.slow times the fast
-    // disk's, each tier's divided by its substrate speed.
+    // disk's, each tier's divided by its substrate speed (the node's fast-disk
+    // and slow-disk levels, set by World::derive_node: docs/world-plan.md W1).
     double disk_scale(double access, double per, u32 nf, u32 na) const {
-        const double ff = 1.0 / static_cast<double>(p.disk_speed);
-        const double fa = p.archive_slow / static_cast<double>(p.archive_speed);
+        const double ff = 1.0 / p.disk_speed;
+        const double fa = p.archive_slow / p.archive_speed;
         const double slowest = na == 0 ? ff : (nf > 0 && ff > fa ? ff : fa);
         return access * slowest + per * (static_cast<double>(nf) * ff + static_cast<double>(na) * fa);
     }
@@ -503,7 +504,7 @@ struct Exec {
         u32 na = 0; // W4: codons on the archive
         for (i32 i = 0; s.disk_.tiered() && i < n; ++i)
             na += addr[i] >= s.disk_.fast ? 1u : 0u;
-        if (!s.disk_.tiered() && p.disk_speed == 1.0f) // (exactly as before)
+        if (!s.disk_.tiered() && p.disk_speed == 1.0) // (exactly as before)
             *cost = max_of<u32>(1, p.disk_cost_base + static_cast<u32>(p.disk_cost_per_codon * n));
         else
             *cost = max_of<u32>(1, static_cast<u32>(min_of(disk_scale(p.disk_cost_base, p.disk_cost_per_codon,
@@ -1404,7 +1405,7 @@ struct Exec {
         const bool store = p.sel.disk[c.bx] == 1;
         const u64 access = store ? costs().disk_write : costs().disk_read;
         const u64 per = store ? costs().disk_write_codon : costs().disk_read_codon;
-        if (!s.disk_.tiered() && p.disk_speed == 1.0f) // (exactly as before)
+        if (!s.disk_.tiered() && p.disk_speed == 1.0) // (exactly as before)
             return t + access + n * per;
         u32 na = 0;
         if (!s.disk_.archive_in(c.body, c.ax, c.cx, &na))

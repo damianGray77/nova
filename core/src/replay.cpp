@@ -1,6 +1,11 @@
 #include "nova/replay.h"
 
+#include "nova/legacy.h"
+
 namespace nova {
+
+static_assert(kReplayLegacyBefore <= kReplayVersion,
+              "replay logs before kReplayLegacyBefore take the legacy defaults (legacy.h)");
 
 namespace {
 
@@ -124,6 +129,17 @@ Str ReplayLog::knob_value(usize i) const {
 
 Str ReplayLog::event_text(usize i) const {
     return Str(arena_.data() + events_[i].off, events_[i].len);
+}
+
+// A log before v3 was written before the varied world's features came on by
+// default, and names only the settings it was given: the rest take the
+// values they had then (legacy.h), as a snapshot before v4 does.
+bool ReplayLog::replay_config(Config* out, Config::ParseError* err) const {
+    if (!out->parse(config_.view(), err))
+        return false;
+    if (version_ < kReplayLegacyBefore)
+        apply_legacy_defaults(*out);
+    return true;
 }
 
 bool ReplayLog::parse(Str text, TextBuf* err) {

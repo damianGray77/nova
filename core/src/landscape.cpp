@@ -368,7 +368,7 @@ void substrate_levels(u64 seed, const SubstrateParams& s, const Array<double>& x
     u32 counts[kSubstrateLevels];
     substrate_counts(s, static_cast<u32>(n), counts);
     const double smooth = s.smooth < 0 ? 0 : (s.smooth > 1 ? 1 : s.smooth);
-    const double scale = s.scale > 0 ? s.scale : 3.0;
+    const double scale = s.scale > 0 ? s.scale : SubstrateParams{}.scale;
     Array<u64> keys, sorted, rank;
     keys.resize(n);
     rank.resize(n);

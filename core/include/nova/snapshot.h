@@ -36,7 +36,8 @@ namespace nova {
 //     and a cargo carries its archive share.
 // Snapshots before v4 resume with substrates, sparks by activity and the
 // archive off (substrate.enabled = false, spark.activity = 0, world.archive =
-// 0) unless their config or an edit names them (Run::init_from_snapshot).
+// 0) unless their config or an edit names them: the legacy defaults, kept in
+// one place for snapshots and replay logs alike (legacy.h; Run::init_from_snapshot).
 inline constexpr u32 kSnapshotVersion = 4;
 inline constexpr u32 kSnapshotOldest = 1;
 

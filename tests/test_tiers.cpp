@@ -12,11 +12,15 @@
 //   - fail_disk_tier wipes one tier only
 //   - a busy landscape with the archive on: the same at 1, 4 and 20 threads,
 //     under shuffled dispatch and through a snapshot
+//   - with substrates (the integration): each node's fast-disk and slow-disk
+//     levels divide its tiers' DISK costs, and the busy landscape with
+//     substrates and sparks by activity on too is as deterministic
 #include <cstdio>
 #include <cstring>
 
 #include "check.h"
 #include "helpers.h"
+#include "nova/landscape.h"
 #include "nova/snapshot.h"
 #include "soup_helpers.h"
 
@@ -802,6 +806,154 @@ void test_old_snapshot() {
     CHECK(Config::set_fallback(kLegacyDefaults, nullptr));
 }
 
+// --- with substrates (docs/world-plan.md W1 with W4; docs/results/integration.md) ---
+
+// The classic costs of an 8-codon DISK store on each tier, run on a quiet
+// soup with a node's own params: 8 fast codons claimed, then 8 of archive.
+bool store_costs(const SoupParams& node, i64* fast, i64* arch) {
+    SoupParams p = node; // (the soup keeps a pointer to its params)
+    Soup s;
+    s.init(&p, 3, 0);
+    const u32 b = plant(s, 100, "DISK ALLOC INC INC INC INC INC INC", 500);
+    if (b == kNone)
+        return false;
+    const u32 c = s.body(b).cpus;
+    s.begin_tick(0);
+    auto op = [&](u32 ip, u32 ax, u32 bx, u32 cx) {
+        Cpu& k = s.cpu_mut(c);
+        k.ip = ip;
+        k.ax = ax;
+        k.bx = bx;
+        k.cx = cx;
+        return s.run_cpu(c, 1);
+    };
+    op(101, 0, 3, 8); // [0, 8) fast
+    op(101, 0, 6, 8); // [8, 16) archive
+    if (s.disk_held(b) != 16 || s.archive_held(b) != 8)
+        return false;
+    s.cpu_mut(c).rh = 100;
+    *fast = op(100, 0, 1, 8);
+    const bool ok = s.cpu(c).err == 0;
+    *arch = op(100, 8, 1, 8);
+    return ok && s.cpu(c).err == 0 && soup_ok(s);
+}
+
+// Both ends connected: a world with substrates sets each node's disk_speed
+// and archive_speed from its fast-disk and slow-disk levels (derive_node),
+// and DISK divides each tier's costs by them. On every node of a procedural
+// world, an 8-codon store costs 6 on the fast disk at 1x (4 + 0.25 x 8) and
+// 60 on the archive: at 2x half that, at the floor (0.1) ten times.
+void test_substrate_speeds() {
+    const char* w = "seed = 3\nworld.model = soup\nworld.graph = procedural\nworld.nodes = 40\n"
+                    "world.soup_size = 1024\nworld.millicores = 1000\nworld.disk = 256\nworld.archive = 64\n"
+                    "substrate.enabled = true\n";
+    Run run;
+    CHECK(make_run(run, w, 1));
+    const World& wd = run.world();
+    CHECK(wd.substrates());
+    const i64 fast_want[kSubstrateLevels] = {60, 12, 6, 4, 3}; // the floor, 0.5x, 1x, 1.5x, 2x
+    const i64 arch_want[kSubstrateLevels] = {600, 120, 60, 40, 30};
+    u32 seen_f[kSubstrateLevels] = {}, seen_a[kSubstrateLevels] = {};
+    bool speeds = true, costs = true;
+    for (u32 n = 0; n < wd.node_count(); ++n) {
+        const SoupParams& p = wd.node_params(n);
+        const u8 lf = wd.substrate_level(n, kSubDiskFast), la = wd.substrate_level(n, kSubDiskSlow);
+        speeds = speeds && p.disk_speed == wd.substrate_mult(n, kSubDiskFast) &&
+                 p.archive_speed == wd.substrate_mult(n, kSubDiskSlow) && p.disk == 256 && p.archive == 64;
+        i64 f = 0, a = 0;
+        const bool ran = store_costs(p, &f, &a);
+        costs = costs && ran && f == fast_want[lf] && a == arch_want[la];
+        if (!ran || f != fast_want[lf] || a != arch_want[la])
+            fprintf(stderr,
+                    "  node %u: fast level %u costs %lld (want %lld), archive level %u costs %lld (want %lld)\n", n,
+                    lf, static_cast<long long>(f), static_cast<long long>(fast_want[lf]), la, static_cast<long long>(a),
+                    static_cast<long long>(arch_want[la]));
+        ++seen_f[lf];
+        ++seen_a[la];
+    }
+    CHECK(speeds && costs);
+    bool every = true; // every level is on some node (40 nodes: 4, 8, 16, 8, 4 of each type)
+    for (u32 l = 0; l < kSubstrateLevels; ++l)
+        every = every && seen_f[l] == (l == 2 ? 16u : (l == 0 || l == 4 ? 4u : 8u)) && seen_a[l] == seen_f[l];
+    CHECK(every);
+    printf("  substrates and disk tiers: an 8-codon store costs 3 / 6 / 60 on a fast disk at 2x / 1x / the floor, "
+           "30 / 60 / 600 on an archive, on all %u nodes\n",
+           wd.node_count());
+}
+
+// The busy archive landscape with substrates and sparks by activity on too:
+// every new feature of the varied world at once, the same at 1, 4 and 20
+// threads, under shuffled dispatch and through a snapshot.
+void test_varied_world() {
+    TextBuf cfg;
+    cfg.append(kTierWorld);
+    cfg.append("substrate.enabled = true\nspark.activity = 2\n");
+    u64 hashes[4] = {};
+    const u32 threads[4] = {1, 4, 20, 4};
+    Array<u32> order;
+    SoupTally sum = {};
+    u32 slow_disks = 0;
+    for (u32 v = 0; v < 4; ++v) {
+        Run run;
+        CHECK(make_run(run, cfg.c_str(), threads[v]));
+        const World& w = run.world();
+        if (v == 0)
+            for (u32 n = 0; n < w.node_count(); ++n)
+                slow_disks += w.node_params(n).disk_speed != 1.0 || w.node_params(n).archive_speed != 1.0;
+        if (v == 3) {
+            const u32 n = w.node_count();
+            order.resize(n);
+            Rng r(99, 0, 0);
+            for (u32 i = 0; i < n; ++i)
+                order[i] = i;
+            for (u32 i = n - 1; i > 0; --i) {
+                const u32 j = static_cast<u32>(r.below(i + 1));
+                const u32 t = order[i];
+                order[i] = order[j];
+                order[j] = t;
+            }
+            run.set_dispatch_order(order.data());
+        }
+        for (u64 t = 1; t <= 300; ++t) {
+            run.run_until(t);
+            if (v == 0) {
+                const SoupTally& s = w.last_soup_tick();
+                sum.archive_stores += s.archive_stores;
+                sum.archive_loads += s.archive_loads;
+                sum.disk_stores += s.disk_stores;
+                sum.disk_loads += s.disk_loads;
+                sum.sparks += s.sparks;
+            }
+        }
+        hashes[v] = w.hash();
+        if (v == 0) {
+            CHECK(w.substrates() && w.node_params(0).spark_activity == 2.0);
+            for (u32 n = 0; n < w.node_count(); ++n)
+                CHECK(soup_ok(w.node_soup(n)));
+        }
+    }
+    printf("  varied world (substrates, sparks by activity, archive): 300 ticks, %llu sparks, %llu DISK stores "
+           "(%llu on the archive), %llu loads (%llu), %u of %u nodes with a disk tier off 1x, hash %016llx\n",
+           static_cast<unsigned long long>(sum.sparks), static_cast<unsigned long long>(sum.disk_stores),
+           static_cast<unsigned long long>(sum.archive_stores), static_cast<unsigned long long>(sum.disk_loads),
+           static_cast<unsigned long long>(sum.archive_loads), slow_disks, 48u,
+           static_cast<unsigned long long>(hashes[0]));
+    CHECK(sum.disk_stores > 0 && sum.archive_stores + sum.archive_loads > 0 && slow_disks > 0);
+    CHECK_EQ_U64(hashes[1], hashes[0]);
+    CHECK_EQ_U64(hashes[2], hashes[0]);
+    CHECK_EQ_U64(hashes[3], hashes[0]);
+    Run a; // through a snapshot taken midway, resumed on 20 threads
+    CHECK(make_run(a, cfg.c_str(), 1));
+    a.run_until(150);
+    ByteWriter snap;
+    a.snapshot(snap);
+    Run b;
+    TextBuf err;
+    CHECK(b.init_from_snapshot(snap.data(), snap.size(), 20, &err));
+    b.run_until(300);
+    CHECK_EQ_U64(b.world().hash(), hashes[0]);
+}
+
 } // namespace
 
 void suite_tiers() {
@@ -818,4 +970,6 @@ void suite_tiers() {
     test_files();
     test_world();
     test_old_snapshot();
+    test_substrate_speeds();
+    test_varied_world();
 }

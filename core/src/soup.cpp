@@ -400,7 +400,7 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     // substrate's multipliers (W1), which the world sets per node (1 here).
     p->spark_activity = key_f64(cfg, "spark.activity");
     p->p_speed = p->e_speed = p->gpu_speed = p->npu_speed = 1.0f;
-    p->mem_fast_speed = p->mem_slow_speed = p->disk_speed = p->archive_speed = 1.0f;
+    p->mem_fast_speed = p->mem_slow_speed = p->disk_speed = p->archive_speed = 1.0;
 
     p->heat_on = key_flag(cfg, "heat.enabled");
     p->cool = static_cast<float>(key_f64(cfg, "heat.cool"));

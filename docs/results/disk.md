@@ -27,7 +27,7 @@
   - home_v1: the kernel call (not scaled), then `disk_read`/`disk_write` as the access and `disk_read_codon`/`disk_write_codon` per codon. An operation longer than a tick is an action as before.
   - A range outside the body's disk (which then fails) is priced at the fast disk's, as before tiers.
   - Without an archive and at `disk_speed` 1 the old expressions are used verbatim.
-- **Substrate speeds:** `SoupParams::disk_speed` and `archive_speed` (floats, set to 1 in `soup_params_from_config`; nothing else sets them yet). They divide each tier's access and per-codon costs. The world agent adds the same two fields for substrates.
+- **Substrate speeds:** `SoupParams::disk_speed` and `archive_speed` (floats, set to 1 in `soup_params_from_config`; nothing else sets them yet). They divide each tier's access and per-codon costs. The world agent adds the same two fields for substrates. (At the integration one pair was kept, as doubles, and the world sets them from each node's fast-disk and slow-disk levels: `docs/results/integration.md`.)
 - **Dormancy (6.17):**
   - The disk reserve counts both tiers, kept apart. `Dormant::archive_reserve` takes the struct's former padding, so `Dormant` stays 48 bytes and hashes as before without an archive.
   - The clock spends the memory reserve, then the fast disk's reserve, then the archive's, each at `dormant.disk_loss`. The world's transit clock (`World::deliver_dormant`) spends them in the same order.
@@ -143,7 +143,7 @@ The differences are within run-to-run noise. The archive adds two range scans of
 ## Deviations and open points
 
 - **`budget.disk` still sizes only `world.disk`.** The archive (a quarter more by default) comes on top in the same files. The fit check now counts it and refuses a world that won't fit, naming `world.archive`. The registry can't peek a computed key, so the budget can't tell a defaulted archive from a set one, which leaving room for it would need. The help text says so.
-- **Replay logs written before W4** replay with the archive on, because their config doesn't name it and the replay format has no version to key on (snapshots have one, and are handled). A pre-W4 replay of a world with a disk won't verify. The world and disasters agents' new defaults have the same problem; one shared fix at merge would cover all of them (for example a replay-format bump that turns the new features off for older logs).
+- **Replay logs written before W4** replay with the archive on, because their config doesn't name it and the replay format has no version to key on (snapshots have one, and are handled). A pre-W4 replay of a world with a disk won't verify. The world and disasters agents' new defaults have the same problem; one shared fix at merge would cover all of them (for example a replay-format bump that turns the new features off for older logs). **Fixed at the integration:** new logs are `nova-replay 3`, and a v2 log takes `world.archive = 0` (with the other legacy defaults) for what it doesn't name: `docs/results/integration.md`.
 - **No viewer or inspector changes:** W8 is the configuration page's and the viewer's step. The inspector's disk figure is the whole disk.
 - `docs/design.md` isn't updated (a results note only, as asked).
 

@@ -1015,12 +1015,14 @@ bool RunArchive::load(const char* dir, TextBuf* err) {
         // detector off: only its shape is wanted).
         Config cfg;
         Config::ParseError pe;
-        if (cfg.parse(log.config_text(), &pe)) {
+        if (log.replay_config(&cfg, &pe)) { // (the config it ran with: legacy defaults for a log before v3)
             cfg.set("accel.mode", "instant");
             cfg.set("gpu.warps", "false"); // (no GPU wanted either)
             cfg.set("detect.enabled", "false");
-            // Only the graph is wanted: no disk tier, in files or RAM.
+            // Only the graph is wanted: no disk tier, in files or RAM (nor
+            // the archive, the disk tiers' second: docs/world-plan.md W4).
             cfg.set("world.disk", "0");
+            cfg.set("world.archive", "0");
             cfg.set("disk.path", "");
             World* w = new World;
             if (w->init(cfg)) {

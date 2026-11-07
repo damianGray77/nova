@@ -46,15 +46,15 @@ Each node's `SoupParams` carries the eight speeds (`p_speed`, `e_speed`, `gpu_sp
   - *Timed block ops* in instant mode: the work's time over the body's units is divided by `gpu_speed` too.
   - The host-instruction wait (the GPU round trip plus the host's time) and a launch's start-up are not lane work and are unchanged.
 - **NPU:** a unit's multiply-adds a tick are `npu.macs` × `npu_speed` (capacity, heat), and timed instant ops divide their multiply-add time by it.
-- **Fast and slow memory, fast and slow disk:** the tiers don't exist yet. Their multipliers are set per node in `mem_fast_speed`, `mem_slow_speed`, `disk_speed` and `archive_speed`, with exactly those names, for the memory-tier build (W3) and the disk build (W4), which divides its tier costs by the last two. Nothing reads them here.
+- **Fast and slow memory, fast and slow disk:** the tiers don't exist yet. Their multipliers are set per node in `mem_fast_speed`, `mem_slow_speed`, `disk_speed` and `archive_speed`, with exactly those names, for the memory-tier build (W3) and the disk build (W4), which divides its tier costs by the last two. Nothing reads them here. (Since the integration the disk tiers read the last two, and all four are doubles, so the floor divides a cost by exactly 0.1: `docs/results/integration.md`.)
 
 ### Keys, defaults, snapshots
 
 - *New settings* (`core/src/keys.inc`; `docs/keys.md` regenerated, 275 settings):
-  - Substrates group: `substrate.enabled` (true; needs `world.graph=procedural|landscape`), `substrate.smooth` (0.7), `substrate.scale` (3), `substrate.floor` (0.1), and the five shares `substrate.share_floor`, `.share_half`, `.share_one`, `.share_one_half`, `.share_two` (10, 20, 40, 20, 10).
+  - Substrates group: `substrate.enabled` (true; needs `world.graph=procedural|landscape`), `substrate.smooth` (0.7; **1 since the integration**), `substrate.scale` (3; **1.5 since the integration**: see "Defaults changed at the integration" below), `substrate.floor` (0.1), and the five shares `substrate.share_floor`, `.share_half`, `.share_one`, `.share_one_half`, `.share_two` (10, 20, 40, 20, 10).
   - Sparks group: `spark.activity` (2; 0 = by time alone).
 - *Defaults:* on in the engine (Damian's rule). Off in the test runner's legacy fallback (`substrate.enabled = false`, `spark.activity = 0` in `tests/test_main.cpp`), so every existing pinned and gate hash is unchanged.
-- *Snapshots:* `kSnapshotVersion` 3 → 4. With substrates on, each node's eight levels follow the lifecycle section (checked on load). A snapshot before v4 comes from a world without either rule, so `Run::init_from_snapshot` resumes it with `spark.activity = 0` (soup worlds) and `substrate.enabled = false` (procedural and landscape worlds) unless its config or a `--set` names them. The effective config then carries them, so later snapshots keep them off.
+- *Snapshots:* `kSnapshotVersion` 3 → 4. With substrates on, each node's eight levels follow the lifecycle section (checked on load). A snapshot before v4 comes from a world without either rule, so `Run::init_from_snapshot` resumes it with `spark.activity = 0` (soup worlds) and `substrate.enabled = false` (procedural and landscape worlds) unless its config or a `--set` names them. The effective config then carries them, so later snapshots keep them off. (Since the integration these lines, with the disk tiers' `world.archive = 0`, live in one text, `core/include/nova/legacy.h`, which replay logs from before v3 use too: `docs/results/integration.md`.)
 - `substrate.` joins the prefixes a refused live change calls "structural".
 
 ## Settled details
@@ -65,7 +65,7 @@ Each node's `SoupParams` carries the eight speeds (`p_speed`, `e_speed`, `gpu_sp
 4. **Fast disk = `disk_speed`, slow disk = `archive_speed`,** as the brief named them.
 5. **A ring world doesn't read the substrate keys,** as it doesn't read `land.*` or `vary.*`: setting one there is an unused-key error. Sparks by activity apply in every soup world.
 6. **Occupancy is taken once per tick per node** at the start of its tick (above), not as the tick goes. That keeps the rule a function of the soup's state at a fixed point, the same on any thread and in any dispatch order.
-7. **The floor's speed as a float:** 0.1 is stored as a float (0.1000000015). A whole number of millicores times it rounds back exactly in the tests' cases (1,000 × 0.1 = 100.0); the speeds multiply a body's summed unit speed once, not each unit's, so the floor's error doesn't accumulate over a body's units.
+7. **The floor's speed as a float:** 0.1 is stored as a float (0.1000000015) for the cores and accelerators (the tiers' four speeds became doubles at the integration, since they divide costs). A whole number of millicores times it rounds back exactly in the tests' cases (1,000 × 0.1 = 100.0); the speeds multiply a body's summed unit speed once, not each unit's, so the floor's error doesn't accumulate over a body's units.
 
 ## Measurements (Debug build, the home rig, shared with the running `long1`)
 
@@ -86,17 +86,17 @@ Each node's `SoupParams` carries the eight speeds (`p_speed`, `e_speed`, `gpu_sp
 
 **Sparks** (W5): rate 0.8 gives 0.8 on an empty node, 0.2 half full, 8 × 10⁻⁵ at 99%, 0 full; a resting dormant program and waste leave it unchanged. In a running soup at rate 0.5 for 400 ticks: 206 sparks on an empty node of 100,000 codons (its sparks hold under 2% of it), 0 on one 99% full. (A first version of that check gave its sparks 10 millicores at a full instruction rate and counted 84 sparks instead of about 200: random code that runs claims memory, so even an empty node's rate falls within a few hundred ticks. I didn't measure that node's occupancy; the test now keeps its sparks idle.)
 
-**The map** (`nova land configs\landscape.cfg`, 1,000 nodes, seed 1): every type exactly 10.0 / 20.0 / 40.0 / 20.0 / 10.0%; **990 distinct substrates** of 1,000 nodes; generation adds nothing measurable (778 ms with substrates, 776 without, mostly the soups).
+**The map** (`nova land configs\landscape.cfg`, 1,000 nodes, seed 1): every type exactly 10.0 / 20.0 / 40.0 / 20.0 / 10.0%; **990 distinct substrates** of 1,000 nodes at the first defaults (smooth 0.7, scale 3), **542** at the defaults since the integration (smooth 1, scale 1.5); generation adds nothing measurable (778 ms with substrates, 776 without, mostly the soups).
 
-**How smooth the map is** (a 1,000-node landscape, seed 5; neighbours are its paths): mean level steps a type between two nodes, and how many of the 8 types differ.
+**How smooth the map is** (a 1,000-node landscape, seed 5; neighbours are its paths): mean level steps a type between two nodes, and how many of the 8 types differ. The first row is today's defaults (since the integration), the second the approved first defaults.
 
 | `substrate.smooth` | `substrate.scale` | neighbours: steps a type | types differing | random pairs: steps | types | neighbours / random | distinct (landscape.cfg) |
 |---:|---:|---:|---:|---:|---:|---:|---:|
-| **0.7** | **3** | 0.878 | 5.24 | 1.201 | 5.93 | **73%** | 990 |
+| **1.0** | **1.5** | 0.224 | **1.75** | 1.198 | 5.92 | **19%** | 542 |
+| 0.7 | 3 | 0.878 | 5.24 | 1.201 | 5.93 | 73% | 990 |
 | 0.9 | 3 | 0.615 | 4.27 | 1.201 | 5.92 | 51% | 967 |
 | 1.0 | 3 | 0.347 | 2.69 | 1.200 | 5.93 | 29% | 806 |
 | 0.7 | 1.5 | 0.868 | 5.21 | 1.199 | 5.92 | 72% | 990 |
-| 1.0 | 1.5 | 0.224 | 1.75 | 1.198 | 5.92 | 19% | 542 |
 
 **Everything on** (a 24-node landscape on the engine's own defaults: timed costs, threads and E cores, warps, GPU and NPU, disk, signals, dormancy, vents, substrates and sparks by activity, with a quick lifecycle): 160 ticks, 560 bodies, 256 warps, mean occupancy 0.46, 4 collapses and 3 recoveries; the same hash at 1, 4 and 20 threads, under shuffled dispatch and through a snapshot at tick 80 resumed on 20 threads; and on the RTX 5080 with `warp.device = gpu` and every round verified, 160 of 160 rounds the reference's word for word, the same hash. The whole suite runs in about 6.5 s.
 
@@ -121,7 +121,7 @@ Each node's `SoupParams` carries the eight speeds (`p_speed`, `e_speed`, `gpu_sp
 
 ## Deviations and findings, for Damian
 
-1. **The defaults make a far patchier map than the plan expects.** The plan says neighbours share most of their levels and crossing regions usually changes one type by a step. With `substrate.smooth` 0.7 and `substrate.scale` 3, mixed as the resource fields are (as the brief and the plan say), neighbours differ in 5.2 of 8 types (random pairs: 5.9), 73% of a random pair's difference, and 990 of 1,000 nodes have a substrate of their own. At smooth 0.7 the independent part of the mix weighs about as much as the field (√(1 − 0.49) ≈ 0.71 against 0.7), and at the presets' node spacing that decides most levels; even the field alone at scale 3 changes a third of the types between neighbours. `substrate.smooth = 1` with `substrate.scale = 1.5` gives what the plan describes (neighbours differ in 1.75 types, 19% of random, 542 distinct substrates). I kept the approved defaults; the test asserts that the defaults are under 80% of random and the field alone under 35%. Recommendation: `substrate.smooth` 1 and `substrate.scale` 1.5 for the run (or anything between, from the table above).
+1. **The defaults make a far patchier map than the plan expects.** The plan says neighbours share most of their levels and crossing regions usually changes one type by a step. With `substrate.smooth` 0.7 and `substrate.scale` 3, mixed as the resource fields are (as the brief and the plan say), neighbours differ in 5.2 of 8 types (random pairs: 5.9), 73% of a random pair's difference, and 990 of 1,000 nodes have a substrate of their own. At smooth 0.7 the independent part of the mix weighs about as much as the field (√(1 − 0.49) ≈ 0.71 against 0.7), and at the presets' node spacing that decides most levels; even the field alone at scale 3 changes a third of the types between neighbours. `substrate.smooth = 1` with `substrate.scale = 1.5` gives what the plan describes (neighbours differ in 1.75 types, 19% of random, 542 distinct substrates). I kept the approved defaults; the test asserts that the defaults are under 80% of random and the field alone under 35%. Recommendation: `substrate.smooth` 1 and `substrate.scale` 1.5 for the run (or anything between, from the table above). **Resolved at the integration:** Damian asked for substrates that transition into each other nicely, and the defaults are now 1 and 1.5 (below).
 2. **Pre-v4 snapshots resume with `spark.activity = 0` too.** The plan names tiers and substrates; an old snapshot's world had the old spark rule as well, so it resumes with both off unless told otherwise.
 3. **Snapshot v4 carries the substrate levels only to check them** (they derive from the config and each node's life, like its resources): a mismatch refuses the snapshot rather than overriding the config's map.
 4. **The viewer is untouched,** as asked: no substrate map mode yet (W8), and `RunArchive` doesn't load the new columns. `docs/design.md` isn't updated: the plan's behaviour is documented here and in `docs/keys.md`, for folding into design.md at the merge.
@@ -130,6 +130,23 @@ Each node's `SoupParams` carries the eight speeds (`p_speed`, `e_speed`, `gpu_sp
    - `kSnapshotVersion` is 4 here too, with this build's block after the lifecycle section under `substrates_` (and `version >= 4` on load); `Run::init_from_snapshot`'s pre-v4 block may want the disasters' and tiers' switches added beside these two.
    - The test `test_old_snapshot` downgrades a snapshot of a world with substrates off to v3; if another build writes a v4-only section for that world's config (legacy fallback), it needs that feature off there too.
    - `nodes.csv`'s new columns go after `born`; the lineage build adds stats columns, not node columns.
+
+   All four were settled at the integration (`docs/results/integration.md`): one pair of speeds (now doubles), one v4, the pre-v4 lines in `core/include/nova/legacy.h`, and `test_old_snapshot` on a world with a disk and no archive.
+
+## Defaults changed at the integration
+
+Damian asked for substrates that "transition into each other nicely". The approved defaults gave a patchy map (deviation 1), so the integration changed them, in the registry (`core/src/keys.inc`, `docs/keys.md` regenerated) and in `SubstrateParams`' own defaults (`core/include/nova/landscape.h`), which the neighbours test checks agree:
+
+| | `substrate.smooth` | `substrate.scale` | neighbours: types differing (of 8) | neighbours / random pairs | distinct substrates (`landscape.cfg`, 1,000 nodes) |
+|---|---:|---:|---:|---:|---:|
+| before (approved) | 0.7 | 3 | 5.24 | 73% | 990 |
+| **after** | **1** | **1.5** | **1.75** | **19%** | **542** |
+
+(Neighbours: the paths of a 1,000-node landscape, seed 5; random pairs: 20,000; suite `substrates`, re-measured on the integrated build, and `nova land configs\landscape.cfg`, with and without `--set substrate.smooth=0.7 --set substrate.scale=3`.)
+
+- At smooth 1 the levels follow the fields alone (the independent draw per node is still drawn, weighing 0), and at scale 1.5 the features are twice as large, so crossing from one region to the next usually changes one or two types by a step, as the plan describes. Each type still has its own field and exact 10/20/40/20/10 shares.
+- *Tests:* `test_neighbours` measures today's defaults first and asserts neighbours under 30% of random pairs and under 2.5 types differing; the first defaults stay in the table for the record (under 80%), with the field alone at scale 3 (under 35%) and each smoother setting smoother than the last.
+- *What else moved:* the everything-on world (suite `substrates`, engine defaults, now with the archive on too) reads 160 ticks, 531 bodies, 230 warps, mean occupancy 0.44, 6 collapses and 4 recoveries (before: 560, 256, 0.46, 4, 3), still the same at 1, 4 and 20 threads, shuffled, through a snapshot and on the RTX 5080. No pinned or gate hash moved: the test runner's legacy fallback keeps substrates off.
 
 ## Determinism
 

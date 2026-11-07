@@ -221,9 +221,9 @@ NOVA_WHOLE("vent.radius", 256, 1, 1u << 24, 0, "Resources", "Vent radius", "vent
 NOVA_FLAG("substrate.enabled", true, 0, "Substrates", "Substrates", "world.graph=procedural|landscape",
           "Each node's P cores, E cores, GPU, NPU, fast and slow memory and fast and slow disk perform at one of "
           "five levels (the floor, 0.5, 1, 1.5 or 2 times), from smooth noise fields (a ring: every level 1).")
-NOVA_NUMBER("substrate.smooth", 0.7, 0, 1, 0, "Substrates", "Smoothness", "substrate.enabled",
+NOVA_NUMBER("substrate.smooth", 1, 0, 1, 0, "Substrates", "Smoothness", "substrate.enabled",
             "0: each node's levels on their own; 1: following the noise fields, so neighbours share them.")
-NOVA_NUMBER("substrate.scale", 3, 0.1, 100, 0, "Substrates", "Feature scale", "substrate.enabled",
+NOVA_NUMBER("substrate.scale", 1.5, 0.1, 100, 0, "Substrates", "Feature scale", "substrate.enabled",
             "Features of the substrate fields across the height (like land.scale): higher gives smaller regions.")
 NOVA_NUMBER("substrate.floor", 0.1, 0.01, 1, 0, "Substrates", "Floor", "substrate.enabled",
             "The lowest level's multiplier: the resource is there but nearly useless.")

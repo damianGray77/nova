@@ -13,6 +13,7 @@
 #include "helpers.h"
 #include "nova/accel.h"
 #include "nova/hash.h"
+#include "nova/keys.h"
 #include "nova/landscape.h"
 #include "nova/snapshot.h"
 #include "soup_helpers.h"
@@ -98,9 +99,15 @@ void test_neighbours() {
     Landscape L;
     TextBuf err;
     CHECK(generate_landscape(5, lp, &L, &err));
-    // The defaults, then smoother ones (and larger features) for the record.
-    const double smooths[5] = {0.7, 0.9, 1.0, 0.7, 1.0}, scales[5] = {3, 3, 3, 1.5, 1.5};
-    double ratio[5] = {};
+    // The defaults (smooth 1, scale 1.5 since the integration: the registry's
+    // and SubstrateParams' own), then for the record the approved first
+    // defaults (0.7 at scale 3, a patchy map) and the steps between.
+    SubstrateParams def;
+    const Key* ks = key_find("substrate.smooth");
+    const Key* kc = key_find("substrate.scale");
+    CHECK(def.smooth == 1.0 && def.scale == 1.5 && ks && kc && ks->def == def.smooth && kc->def == def.scale);
+    const double smooths[5] = {1.0, 0.7, 0.9, 1.0, 0.7}, scales[5] = {1.5, 3, 3, 3, 1.5};
+    double ratio[5] = {}, types[5] = {};
     for (u32 v = 0; v < 5; ++v) {
         SubstrateParams s;
         s.smooth = smooths[v];
@@ -131,14 +138,20 @@ void test_neighbours() {
         }
         const double per = kSubstrateTypes;
         ratio[v] = (nb_steps / nb) / (rd_steps / pairs);
+        types[v] = nb_types / nb;
         printf("  substrates (smooth %.1f, scale %.1f): neighbours differ by %.3f steps a type (%.2f of 8 types), "
                "random pairs by %.3f (%.2f): %.0f%%\n",
                smooths[v], scales[v], nb_steps / nb / per, nb_types / nb, rd_steps / pairs / per, rd_types / pairs,
                100.0 * ratio[v]);
     }
-    CHECK(ratio[0] < 0.8);  // the defaults: well under random pairs
-    CHECK(ratio[2] < 0.35); // following the fields alone: far under
-    CHECK(ratio[2] < ratio[1] && ratio[1] < ratio[0]);
+    // The defaults: neighbours share most of their levels (1.75 of 8 types
+    // differ, 19% of a random pair's difference when measured), so crossing
+    // from one region to the next usually changes a type or two by a step.
+    CHECK(ratio[0] < 0.3 && types[0] < 2.5);
+    CHECK(ratio[1] < 0.8);  // the first defaults: under random pairs, but patchy (5.2 types)
+    CHECK(ratio[3] < 0.35); // following the fields alone at scale 3
+    CHECK(ratio[3] < ratio[2] && ratio[2] < ratio[1]); // smoother, smoother still
+    CHECK(ratio[0] < ratio[3] && ratio[0] < ratio[4]); // and larger features smoother again
 }
 
 // A small landscape world (as the landscape suite's); land_sub() turns
@@ -193,13 +206,15 @@ const char* land_sub() {
 
 bool node_matches(const World& w, u32 n, const Array<u8>& map) {
     const SoupParams& p = w.node_params(n);
-    const float sp[kSubstrateTypes] = {p.p_speed,        p.e_speed,        p.gpu_speed,  p.npu_speed,
-                                       p.mem_fast_speed, p.mem_slow_speed, p.disk_speed, p.archive_speed};
+    // (the cores' and accelerators' speeds are floats; the tiers', which
+    // divide costs, doubles: soup.h)
+    const double sp[kSubstrateTypes] = {p.p_speed,        p.e_speed,        p.gpu_speed,  p.npu_speed,
+                                        p.mem_fast_speed, p.mem_slow_speed, p.disk_speed, p.archive_speed};
     bool ok = true;
     for (u32 t = 0; t < kSubstrateTypes; ++t) {
         const u8 l = map[static_cast<usize>(n) * kSubstrateTypes + t];
-        ok = ok && w.substrate_level(n, t) == l &&
-             sp[t] == static_cast<float>(substrate_multiplier(l, w.substrate_params().floor_mult));
+        const double m = substrate_multiplier(l, w.substrate_params().floor_mult);
+        ok = ok && w.substrate_level(n, t) == l && sp[t] == (t < kSubMemFast ? static_cast<float>(m) : m);
     }
     return ok;
 }
