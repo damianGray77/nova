@@ -351,6 +351,7 @@ struct Exec {
         if (s.obs_)
             s.obs_->on_divide(s, c.block, k, s.tick_);
         u32 d = s.new_body(); // may move bodies_
+        s.origin_[d] = kOriginDaughter; // W7 (detector data)
         unlink_block(parent, k);
         Body& P = s.bodies_[parent];
         Body& D = s.bodies_[d];

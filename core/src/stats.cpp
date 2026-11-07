@@ -42,13 +42,26 @@ const char* const kColumns[kStatsColumns] = {
     "dormant_started", "dormant_woke", "dormant_expired", "dormant_eaten", "dormant_hops", "drifting", "resting",
     // disk tiers (docs/world-plan.md W4): a gauge, then two sums
     "archive_held", "archive_stores", "archive_loads",
+    // founders by origin (world plan W7): lineages founded in the window (sums)
+    "founded_spark", "founded_daughter", "founded_arrival", "founded_wake",
     "compress",     "ambient"};
 // The first 39 tally fields fill columns 3-41; Phase 8's five go after
 // live_nodes, then Phase 9's four after the warp gauges, then Phase 9c's two
 // and its gauge, then Phase 10's nine, then dormancy's five and its gauges,
-// then the disk tiers' gauge and two.
+// then the disk tiers' gauge and two, then the detector's foundings by origin
+// (not tallies: the detector's own counts).
 inline constexpr u32 kTallyEarly = 39, kTallyWarp = 5, kTallyAction = 4, kTallyThread = 2, kTallyLife = 9,
-                     kTallyDormant = 5, kTallyArchive = 2;
+                     kTallyDormant = 5, kTallyArchive = 2, kFoundedColumns = 4;
+// The origins of those columns, in order (soup.h).
+const u8 kFoundedOrigin[kFoundedColumns] = {kOriginSpark, kOriginDaughter, kOriginArrival, kOriginWake};
+
+u64 total_founded(const World& w, u8 origin) {
+    u64 n = 0;
+    for (u32 i = 0; i < w.node_count(); ++i)
+        if (const Lineages* L = w.node_lineages(i))
+            n += L->founded_by(origin);
+    return n;
+}
 static_assert(sizeof(SoupTally) / sizeof(u64) ==
                   kTallyEarly + kTallyWarp + kTallyAction + kTallyThread + kTallyLife + kTallyDormant + kTallyArchive,
               "a SoupTally field was added: update kColumns");
@@ -123,7 +136,7 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
                         disk_held,       w.live_nodes()};
     const usize nt = sizeof tail / sizeof tail[0];
     static_assert(3 + kTallyEarly + sizeof tail / sizeof tail[0] + kTallyWarp + 2 + kTallyAction + kTallyThread + 1 +
-                          kTallyLife + kTallyDormant + 2 + 1 + kTallyArchive ==
+                          kTallyLife + kTallyDormant + 2 + 1 + kTallyArchive + kFoundedColumns ==
                       kStatsIntColumns,
                   "stats row shape");
     for (usize i = 0; i < nt; ++i)
@@ -153,6 +166,12 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
     v[az] = archive_held;
     for (usize i = 0; i < kTallyArchive; ++i)
         v[az + 1 + i] = t[kTallyEarly + kTallyWarp + kTallyAction + kTallyThread + kTallyLife + kTallyDormant + i];
+    const usize fz = az + 1 + kTallyArchive;
+    for (usize i = 0; i < kFoundedColumns; ++i) { // W7: foundings by origin in the window
+        const u64 f = total_founded(w, kFoundedOrigin[i]);
+        v[fz + i] = f - marks->founded[i];
+        marks->founded[i] = f;
+    }
     marks->links = links;
     marks->inject = inject;
     marks->gpu = gpu;

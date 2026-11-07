@@ -305,11 +305,12 @@ void ViewFrame::clear_new() {
 
 // Sums: the early tallies, the link counts, the warp tallies, Phase 9's
 // actions and 9c's thread tallies, Phase 10's (e_held, 73, is a gauge),
-// dormancy's five (drifting and resting, 88 and 89, are gauges), and the disk
-// tiers' archive stores and loads (91, 92; archive_held, 90, is a gauge).
+// dormancy's five (drifting and resting, 88 and 89, are gauges), the disk
+// tiers' archive stores and loads (91, 92; archive_held, 90, is a gauge), and
+// the foundings by origin (W7, 93-96).
 bool stats_column_is_sum(u32 i) {
     return (i >= 3 && i < 42) || (i >= 49 && i <= 51) || (i >= 60 && i <= 64) || (i >= 67 && i <= 72) ||
-           (i >= 74 && i <= 82) || (i >= 83 && i <= 87) || (i >= 91 && i <= 92);
+           (i >= 74 && i <= 82) || (i >= 83 && i <= 87) || (i >= 91 && i <= 92) || (i >= 93 && i <= 96);
 }
 
 void chart_row(const StatsRow& r, double* out) {
@@ -1075,8 +1076,9 @@ bool RunArchive::load(const char* dir, TextBuf* err) {
 bool RunArchive::load_stats(Str t, TextBuf* err) {
     Str line;
     usize at = next_line(t, 0, &line);
-    Str f[96];
-    const usize nh = split_fields(line, f, 96);
+    constexpr usize kMaxFields = kStatsColumns + 32; // room for columns a later build adds
+    Str f[kMaxFields];
+    const usize nh = split_fields(line, f, kMaxFields);
     u32 col[kStatsColumns];
     for (u32 i = 0; i < kStatsColumns; ++i)
         col[i] = 0xFFFFFFFFu;
@@ -1093,7 +1095,7 @@ bool RunArchive::load_stats(Str t, TextBuf* err) {
         at = next_line(t, at, &line);
         if (line.n == 0)
             continue;
-        const usize nf = split_fields(line, f, 96);
+        const usize nf = split_fields(line, f, kMaxFields);
         StatsRow r = {};
         for (u32 i = 0; i < kStatsIntColumns; ++i)
             r.v[i] = static_cast<u64>(field_f64(f, nf, col[i]));

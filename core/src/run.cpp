@@ -351,7 +351,9 @@ void Run::write_lineage_row(const LineageEnd& e, u32 node, bool alive) {
     }
     t.append_char(',');
     t.append_hex64(e.info.founder_genotype);
-    t.append(e.info.detected ? ",1\n" : ",0\n");
+    t.append(e.info.detected ? ",1," : ",0,");
+    t.append(origin_name(e.info.founder_origin)); // W7
+    t.append_char('\n');
     lineages_.write(t.view());
 }
 
@@ -377,7 +379,7 @@ bool Run::open_lineages(const char* path, TextBuf* err) {
         return false;
     }
     lineages_.write("lineage,node,founded,ended,status,max_depth,peak_alive,members,founder_len,"
-                    "divide_links,inject_links,gpu_links,founder_genotype,detected\n");
+                    "divide_links,inject_links,gpu_links,founder_genotype,detected,founder_origin\n");
     lineages_.flush();
     return true;
 }

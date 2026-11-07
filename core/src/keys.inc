@@ -543,6 +543,9 @@ NOVA_FLAG("detect.enabled", true, 0, "Detection and lineages", "Detection", "",
           "The lineage detector: inheritance links, lineages, the replicator gate and the genebank.")
 NOVA_NUMBER("detect.similarity", 0.75, 0, 1, kKeyOpenMin, "Detection and lineages", "Similarity",
             "detect.enabled", "How closely a daughter must match her parent's block for an inheritance link.")
+NOVA_WHOLE("detect.shift", 8, 0, 64, 0, "Detection and lineages", "Alignment shift", "detect.enabled",
+           "A DIVIDE daughter is also compared with her parent shifted by up to this many codons either way, and "
+           "rotated where her first 4 codons appear in it (descent, not likeness: disasters plan X12).")
 NOVA_WHOLE("detect.genebank_threshold", 2, 1, 1000000, 0, "Detection and lineages", "Genebank threshold",
            "detect.enabled", "A genotype is saved to the genebank when this many copies of it live at once.")
 NOVA_FLAG("detect.inject", true, 0, "Detection and lineages", "INJECT links", "detect.enabled",

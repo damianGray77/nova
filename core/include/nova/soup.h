@@ -77,6 +77,16 @@ inline constexpr u32 kMaxLanes = 64;         // warp.lanes, at most
 inline constexpr u32 kFormCpu = 0;           // a body born on a CPU (Body::form)
 inline constexpr u32 kFormGpu = 1;           // ... on a GPU, as a warp (Phase 8)
 inline constexpr u32 kMaxSeedLen = 1024;     // longest seeded genome
+// How a body began (founders by origin, docs/world-plan.md W7): detector data,
+// like a lineage tag, so neither hashed nor snapshotted. A body alive at a
+// snapshot resume reads as unknown, as does a seeded genome or a body made
+// through the test API.
+inline constexpr u8 kOriginUnknown = 0;
+inline constexpr u8 kOriginSpark = 1;
+inline constexpr u8 kOriginDaughter = 2; // born by DIVIDE
+inline constexpr u8 kOriginArrival = 3;  // dispersed in from a neighbour
+inline constexpr u8 kOriginWake = 4;     // woke from dormancy
+inline constexpr u32 kOriginCount = 5;
 
 struct SelectorMap {
     u8 sense[kSenseReadingsMax]; // SENSE: BX -> reading (6.5 list; 8-10 GPU, 11-13 NPU, 14 degree,
@@ -581,7 +591,9 @@ struct CargoTag {
     u64 genotype;
     u64 parent;   // her genotype's first parent, for the genebank
     u32 depth;
-    u32 gated;    // her lineage had met the gate where she left
+    u8 gated;     // her lineage had met the gate where she left
+    u8 origin;    // how her lineage's founder began (kOrigin..., W7)
+    u16 pad;
 };
 
 // A daughter leaving this node this tick (moved into transit at the barrier).
@@ -710,10 +722,12 @@ class Soup {
     // here (at the barrier, in the fixed delivery order) lands in a waste run
     // its code fits, as a resting body that doesn't run; false (changing
     // nothing) when there is no room, and the world sends it on. Its lineage
-    // tag waits with it, for when it wakes.
+    // tag waits with it, for when it wakes (it is no member while dormant).
     bool land_dormant(const u8* code, u32 len, const Dormant& d, const CargoTag& tag);
     bool dormant(u32 b) const { return b < dorm_.size() && dorm_[b].on != 0; }
     bool force_dormant(u32 b) { return go_dormant(b); } // tests: as if the watchdog found it frozen
+    // How body b began (kOrigin..., W7): detector data, not world state.
+    u8 origin(u32 b) const { return b < origin_.size() ? origin_[b] : kOriginUnknown; }
     const Dormant& dormant_state(u32 b) const { return dorm_[b]; }
     u32 resting_count() const; // dormant programs resting here
     // A varied world (docs/world-plan.md W5): the share of memory held by
@@ -1152,7 +1166,9 @@ class Soup {
 
     // Dormancy and drift (docs/dormancy-plan.md). dorm_: per body slot (world
     // state with life.dormancy); dorm_tag_: the lineage tag each waits with
-    // (detector data, like a cargo's: not hashed or saved). go_dormant(): a
+    // (detector data, like a cargo's: not hashed or saved). A program leaves
+    // its lineage when it goes dormant, wherever it rests, and rejoins with
+    // this tag when it wakes, as an arrival does (X12). go_dormant(): a
     // frozen body keeps its code and reserves, leaves the rest, and drifts on
     // (or rests here with nowhere to go); false when it has no reserves (it
     // dies). rest_tick(): a resting one's end of tick (wake, clock, dwell).
@@ -1160,6 +1176,9 @@ class Soup {
     // open neighbour from this node's stream, or kNone.
     Array<Dormant> dorm_;
     Array<CargoTag> dorm_tag_;
+    // W7: per body slot, how it began (kOrigin...): detector data like
+    // dorm_tag_, not hashed or saved (a resumed run's bodies read as unknown).
+    Array<u8> origin_;
     u64 frozen_bare_ = 0, dormant_mem_sum_ = 0, dormant_disk_sum_ = 0; // diagnostics
     bool go_dormant(u32 b);
     void rest_tick(u32 b);

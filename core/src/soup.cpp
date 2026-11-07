@@ -686,6 +686,7 @@ void Soup::init(const SoupParams* p, u64 seed, u32 node, u32 life, const Ruins* 
     last_ran_.clear();
     dorm_.clear();
     dorm_tag_.clear();
+    origin_.clear();
     if (p->vent_spacing > 0) {
         const u32 nv = n / p->vent_spacing > 0 ? n / p->vent_spacing : 1;
         Rng vr(seed ^ 0x76656E7473000000ull, node, Rng::kInitTick - life); // "vents"
@@ -939,6 +940,9 @@ u32 Soup::new_body() {
         dorm_[b] = Dormant{};
         dorm_tag_[b] = CargoTag{};
     }
+    if (origin_.size() < bodies_.size()) // W7: how it began, set by whoever made it
+        origin_.resize(bodies_.size());
+    origin_[b] = kOriginUnknown;
     return b;
 }
 
@@ -1068,6 +1072,7 @@ bool Soup::arrive(const u8* code, u32 len, u32 millicores, u32 gpus, u32 npus, u
         birth(b, at, form);
     if (kinds_on() && bodies_[b].cpus != kNone) // Phase 9c: her thread prefers her divider's kind
         cpu_kind_[bodies_[b].cpus] = kind;
+    origin_[b] = kOriginArrival;
     if (obs_)
         obs_->on_arrive(*this, owner_[at], tag, tick_);
     ++tally_.arrived;
@@ -1168,7 +1173,12 @@ bool Soup::go_dormant(u32 b) {
     d.npus = p_->npus ? npu_.count[b] : 0;
     d.form = B.form;
     d.kind = kinds_on() && B.cpus != kNone ? cpu_kind_[B.cpus] : kKindP;
+    // Its lineage tag waits with it, and it leaves its lineage now, wherever
+    // it will rest; it rejoins on waking (X12). So neither its departure nor
+    // its death while dormant leaves the lineage again.
     dorm_tag_[b] = obs_ ? obs_->cargo_tag(k) : CargoTag{};
+    if (obs_)
+        obs_->on_dormant(k, tick_);
     const u32 g = genome_len(b);
     for (u32 j = blocks_[k].next; j != kNone;) {
         const u32 next = blocks_[j].next;
@@ -1263,7 +1273,8 @@ bool Soup::can_wake(u32 b) const {
 // It wakes where it rests: it claims up to the cores it held at home, capped
 // by what's free here, and up to its disk reserve (empty), then starts as an
 // arrival does -- one thread at its start, registers zero, in its own form.
-// Its memory reserve was its fuel and is spent. Here it joins its lineage.
+// Its memory reserve was its fuel and is spent. Here it rejoins its lineage
+// (it left when it went dormant), as an arrival joins hers.
 void Soup::wake(u32 b) {
     Dormant& d = dorm_[b];
     Body& B = bodies_[b];
@@ -1291,6 +1302,7 @@ void Soup::wake(u32 b) {
         cpu_kind_[B.cpus] = static_cast<u8>(d.kind);
     if (p_->frozen_ticks > 0)
         last_ran_[b] = tick_;
+    origin_[b] = kOriginWake;
     if (obs_)
         obs_->on_arrive(*this, B.blocks, dorm_tag_[b], tick_);
     ++tally_.dormant_woke;
@@ -2610,11 +2622,14 @@ void Soup::sparks(u32 count) {
             continue;
         }
         if (!p_->warps) {
-            create_body(at, len, p_->spark_grant);
+            const u32 b = create_body(at, len, p_->spark_grant);
+            if (b != kNone) // (always: the run is waste)
+                origin_[b] = kOriginSpark;
         } else {
             // Its form: whichever it holds; holding both, the GPU with
             // chance spark.gpu_born.
             const u32 b = new_body();
+            origin_[b] = kOriginSpark;
             new_block(at, len, b);
             claim_mixed(b, p_->spark_grant);
             if (p_->spark_gpu_grant)
@@ -3718,6 +3733,8 @@ bool Soup::load(ByteReader& r, TextBuf* err, u32 version) {
         for (usize i = 0; i < dorm_tag_.size(); ++i)
             dorm_tag_[i] = CargoTag{};
     }
+    origin_.clear(); // W7: not in snapshots, so every body alive now began unknown
+    origin_.resize(nb);
     vent_at_.clear();
     if (p_->vent_spacing > 0 && !get_array(r, &vent_at_, n)) {
         err->append("snapshot: vents truncated");

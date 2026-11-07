@@ -9,7 +9,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 - **Families:** a key with a `<placeholder>` stands for one setting per member listed.
 - **Needs:** the switch the setting depends on; it does nothing while that is off.
 
-285 settings, 83 of them from 14 families; 11 hidden (tests and demos).
+286 settings, 83 of them from 14 families; 11 hidden (tests and demos).
 
 ## Contents
 
@@ -331,6 +331,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 |---|---|---|---|---|
 | `detect.enabled` | switch | true | true or false | **Detection**. The lineage detector: inheritance links, lineages, the replicator gate and the genebank. |
 | `detect.similarity` | number | 0.75 | above 0, at most 1 | **Similarity**. How closely a daughter must match her parent's block for an inheritance link. Needs `detect.enabled`. |
+| `detect.shift` | whole | 8 | 0 to 64 | **Alignment shift**. A DIVIDE daughter is also compared with her parent shifted by up to this many codons either way, and rotated where her first 4 codons appear in it (descent, not likeness: disasters plan X12). Needs `detect.enabled`. |
 | `detect.genebank_threshold` | whole | 2 | 1 to 1000000 | **Genebank threshold**. A genotype is saved to the genebank when this many copies of it live at once. Needs `detect.enabled`. |
 | `detect.inject` | switch | true | true or false | **INJECT links**. An INJECT that leaves the victim matching the injector is an inheritance link. Needs `detect.enabled`. |
 | `detect.written` | switch | true | true or false | **Written codons only**. A DIVIDE link counts only the codons the parent wrote into the daughter since her ALLOC. Needs `detect.enabled`. |

@@ -178,6 +178,351 @@ void remains_do_not_count() {
     CHECK(w.s.tally().births == 1 && w.L.links() == 1);
 }
 
+// Descent, not likeness (disasters plan X12). A hand-built birth: the parent's
+// code at 100 and the daughter's block at 300 (each a body made through the
+// test API, as DIVIDE leaves them), every daughter codon marked as written by
+// the parent's body, or none; then the DIVIDE hook.
+const u32 kParLen = 24;
+
+void parent_code(u8* out) { // 24 distinct codons
+    for (u32 i = 0; i < kParLen; ++i)
+        out[i] = static_cast<u8>((i * 7 + 3) % 64);
+}
+
+// One of the first 8 codons not in parent_code, picked by i mod 8.
+u8 foreign_codon(u32 i) {
+    u8 par[kParLen];
+    parent_code(par);
+    u32 found = 0;
+    for (u32 v = 0; v < 64; ++v) {
+        bool in = false;
+        for (u32 j = 0; j < kParLen; ++j)
+            in = in || par[j] == v;
+        if (!in && found++ == i % 8)
+            return static_cast<u8>(v);
+    }
+    return 0;
+}
+
+struct Birth {
+    Watched w;
+    u32 parent = kNone, daughter = kNone;
+    bool make(const u8* dau, u32 dlen, bool written, const char* extra = "") {
+        if (!w.init(extra))
+            return false;
+        u8 par[kParLen];
+        parent_code(par);
+        for (u32 i = 0; i < kParLen; ++i)
+            w.s.mem_mut()[100 + i] = par[i];
+        parent = w.s.create_body(100, kParLen, 100);
+        for (u32 i = 0; i < dlen; ++i)
+            w.s.mem_mut()[300 + i] = dau[i];
+        daughter = w.s.create_body(300, dlen, 100);
+        if (parent == kNone || daughter == kNone)
+            return false;
+        if (written)
+            for (u32 i = 0; i < dlen; ++i)
+                w.L.on_write(300 + i);
+        w.L.on_divide(w.s, w.s.body(parent).blocks, w.s.body(daughter).blocks, 0);
+        return true;
+    }
+    BlockTag ptag() const { return w.L.tag(w.s.body(parent).blocks); }
+    BlockTag dtag() const { return w.L.tag(w.s.body(daughter).blocks); }
+    // She joined her parent's lineage one generation deeper.
+    bool joined() const {
+        const BlockTag p = ptag(), d = dtag();
+        return p.lineage != 0 && d.lineage == p.lineage && d.depth == p.depth + 1 && w.L.links() == 1;
+    }
+    bool apart() const { return dtag().lineage == 0 && ptag().lineage == 0 && w.L.links() == 0; }
+};
+
+// A rotation, a shift or a partial copy of her parent joins its lineage one
+// generation deeper (each was a new lineage at depth 0 before X12), and so
+// does her own rotated daughter, two deep. Unrelated codons, a copy her parent
+// didn't write, and a partial copy short of the share don't join.
+void descent_not_likeness() {
+    u8 par[kParLen], dau[64];
+    parent_code(par);
+    {
+        Birth b; // an exact copy, as always
+        CHECK(b.make(par, kParLen, true) && b.joined() && b.dtag().depth == 1);
+    }
+    {
+        Birth b; // a rotation: she starts 9 codons into the parent (beyond the shifts)
+        for (u32 i = 0; i < kParLen; ++i)
+            dau[i] = par[(i + 9) % kParLen];
+        CHECK(b.make(dau, kParLen, true) && b.joined());
+        // Her own daughter, rotated 5 more, joins two generations deep.
+        u8 gd[kParLen];
+        for (u32 i = 0; i < kParLen; ++i)
+            gd[i] = dau[(i + 5) % kParLen];
+        for (u32 i = 0; i < kParLen; ++i)
+            b.w.s.mem_mut()[500 + i] = gd[i];
+        const u32 g = b.w.s.create_body(500, kParLen, 100);
+        CHECK(g != kNone);
+        for (u32 i = 0; i < kParLen; ++i)
+            b.w.L.on_write(500 + i);
+        b.w.L.on_divide(b.w.s, b.w.s.body(b.daughter).blocks, b.w.s.body(g).blocks, 1);
+        const BlockTag tg = b.w.L.tag(b.w.s.body(g).blocks);
+        CHECK(tg.lineage == b.ptag().lineage && tg.depth == 2 && b.w.L.lineage(tg.lineage)->max_depth == 2);
+        // ... and the same rotation lying as remains (not written) doesn't.
+        Birth r;
+        for (u32 i = 0; i < kParLen; ++i)
+            dau[i] = par[(i + 9) % kParLen];
+        CHECK(r.make(dau, kParLen, false) && r.apart());
+    }
+    {
+        // A head two codons late: two codons of junk, then the parent from its
+        // start (her first codons aren't in the parent, so only a shift finds
+        // her). With detect.shift = 0 she is a stranger.
+        dau[0] = foreign_codon(0);
+        dau[1] = foreign_codon(1);
+        for (u32 i = 2; i < kParLen; ++i)
+            dau[i] = par[i - 2];
+        Birth b;
+        CHECK(b.make(dau, kParLen, true) && b.joined());
+        Birth none;
+        CHECK(none.make(dau, kParLen, true, "detect.shift = 0\n") && none.apart());
+        // Three codons ahead, and stopping short: a partial copy, shifted.
+        for (u32 i = 0; i < 18; ++i)
+            dau[i] = par[i + 3];
+        Birth s3;
+        CHECK(s3.make(dau, 18, true) && s3.joined());
+    }
+    {
+        Birth b; // a partial copy: the parent's first half, measured against her length
+        CHECK(b.make(par, kParLen / 2, true) && b.joined());
+        for (u32 i = 0; i < 12; ++i) // 8 of her 12 codons match: short of 3/4
+            dau[i] = i < 8 ? par[i] : foreign_codon(i);
+        Birth s;
+        CHECK(s.make(dau, 12, true) && s.apart());
+        for (u32 i = 0; i < 12; ++i) // 9 of 12 do
+            dau[i] = i < 9 ? par[i] : foreign_codon(i);
+        Birth t;
+        CHECK(t.make(dau, 12, true) && t.joined());
+    }
+    {
+        Birth b; // unrelated codons, written by the parent
+        for (u32 i = 0; i < kParLen; ++i)
+            dau[i] = foreign_codon(i);
+        CHECK(b.make(dau, kParLen, true) && b.apart());
+    }
+    {
+        Birth b; // a copy of twice the parent (her write head wrapped): all hers match
+        for (u32 i = 0; i < 2 * kParLen; ++i)
+            dau[i] = par[i % kParLen];
+        CHECK(b.make(dau, 2 * kParLen, true) && b.joined());
+    }
+    // detect.shift is a knob, 0 to 64.
+    Watched w;
+    CHECK(w.init("detect.shift = 64\n") && w.d.shift == 64);
+    Watched bad;
+    CHECK(!bad.init("detect.shift = 65\n"));
+}
+
+// The same through the interpreter: a parent ALLOCs her, writes a rotation of
+// itself into her, and DIVIDEs.
+void rotation_through_divide() {
+    Watched w;
+    CHECK(w.init(""));
+    const u32 b = w.plant(100, "ALLOC DIVIDE INC DEC SHL ZERO NOT PUSH POP SENSE OR AND ADD SUB NOP0 NOP1", 500);
+    CHECK(b != kNone);
+    Cpu& c = w.s.cpu_mut(w.s.body(b).cpus);
+    c.bx = 0; // memory
+    c.cx = 16;
+    w.run(b, 1); // ALLOC
+    const u32 k = w.s.body(b).latest;
+    CHECK(k != kNone && w.s.block(k).len == 16);
+    const u32 at = w.s.block(k).start;
+    for (u32 i = 0; i < 16; ++i) { // a rotation by 6, as the parent's body would write it
+        w.s.mem_mut()[at + i] = w.s.mem()[100 + (i + 6) % 16];
+        w.L.on_write(at + i);
+    }
+    c.cx = 32;
+    w.run(b, 1); // DIVIDE, here
+    CHECK(w.s.tally().births == 1 && w.L.links() == 1 && w.L.founded() == 1);
+    const BlockTag t = w.L.tag(k);
+    CHECK(t.lineage == w.L.tag(w.s.body(b).blocks).lineage && t.depth == 1);
+}
+
+// A copy of body b's code at a free place, written by b's body, and the DIVIDE
+// hook: b founds a lineage (if it isn't in one). Returns b's lineage.
+u64 found_from(Watched& w, u32 b) {
+    const u32 start = w.s.block(w.s.body(b).blocks).start, len = w.s.block(w.s.body(b).blocks).len;
+    const u32 at = w.s.find_free_fwd(600, len);
+    if (at == kNone)
+        return 0;
+    for (u32 i = 0; i < len; ++i)
+        w.s.mem_mut()[at + i] = w.s.mem()[start + i];
+    const u32 d = w.s.create_body(at, len, 0);
+    if (d == kNone)
+        return 0;
+    for (u32 i = 0; i < len; ++i)
+        w.L.on_write(at + i);
+    w.L.on_divide(w.s, w.s.body(b).blocks, w.s.body(d).blocks, 0);
+    return w.L.tag(w.s.body(b).blocks).lineage;
+}
+
+// Founders by origin (world plan W7): each body carries how it began, and a
+// lineage records its founder's; the detector counts foundings by origin.
+void founder_origins() {
+    { // a spark
+        Watched w;
+        CHECK(w.init("spark.initial = 1\nspark.grant = 10\nspark.min_len = 12\nspark.max_len = 12\n"));
+        CHECK(w.s.body_count() == 1);
+        const u32 b = w.s.body_at(0);
+        CHECK(w.s.origin(b) == kOriginSpark);
+        const u64 id = found_from(w, b);
+        CHECK(id != 0 && w.L.lineage(id)->founder_origin == kOriginSpark);
+        CHECK(w.L.founded_by(kOriginSpark) == 1 && w.L.founded() == 1);
+        // A member dispersing carries her founder's origin, so the lineage's
+        // entry on the next node names the same founder (and isn't a founding there).
+        const u32 k = w.s.body(b).blocks;
+        const CargoTag t = w.L.cargo_tag(k);
+        CHECK(t.lineage == id && t.origin == kOriginSpark);
+        Watched there;
+        CHECK(there.init(""));
+        CHECK(there.s.arrive(w.s.mem() + w.s.block(k).start, w.s.block(k).len, 50, 0, 0, 0, t));
+        const LineageInfo* li = there.L.lineage(id);
+        CHECK(li && li->founder_origin == kOriginSpark && li->alive == 1 && there.L.founded() == 0);
+    }
+    { // a daughter: budded off (not a copy), she then founds one of her own
+        Watched w;
+        CHECK(w.init(""));
+        const u32 p = w.plant(100, "ALLOC DIVIDE INC INC", 640);
+        Cpu& c = w.s.cpu_mut(w.s.body(p).cpus);
+        c.bx = 0;
+        c.cx = 6;
+        w.run(p, 1);
+        const u32 k = w.s.body(p).latest;
+        c.cx = 32;
+        w.run(p, 1);
+        CHECK(w.s.tally().births == 1 && w.L.links() == 0 && k != kNone);
+        const u32 d = w.s.block(k).body;
+        CHECK(d != p && w.s.origin(d) == kOriginDaughter && w.s.origin(p) == kOriginUnknown);
+        const u64 id = found_from(w, d);
+        CHECK(id != 0 && w.L.lineage(id)->founder_origin == kOriginDaughter && w.L.founded_by(kOriginDaughter) == 1);
+    }
+    { // an arrival, untagged
+        Watched w;
+        CHECK(w.init(""));
+        u8 code[10];
+        for (u32 i = 0; i < 10; ++i)
+            code[i] = static_cast<u8>(10 + i);
+        CHECK(w.s.arrive(code, 10, 50, 0, 0, 0, CargoTag{}));
+        const u32 b = w.s.body_at(w.s.body_count() - 1);
+        CHECK(w.s.origin(b) == kOriginArrival);
+        const u64 id = found_from(w, b);
+        CHECK(id != 0 && w.L.lineage(id)->founder_origin == kOriginArrival && w.L.founded_by(kOriginArrival) == 1);
+    }
+    { // woke from dormancy, untagged
+        Watched w;
+        CHECK(w.init("life.dormancy = true\nworld.disk = 1024\n"));
+        const u32 b = w.plant(100, "ALLOC INC INC INC", 200);
+        Cpu& c = w.s.cpu_mut(w.s.body(b).cpus);
+        c.bx = 3; // disk: its reserve
+        c.cx = 16;
+        w.run(b, 1);
+        CHECK(w.s.force_dormant(b) && w.s.dormant(b)); // a hermit: it rests here
+        w.s.begin_tick(1);
+        w.s.death_sweep(); // and wakes on its own freed millicores
+        CHECK(!w.s.dormant(b) && w.s.body(b).alive && w.s.origin(b) == kOriginWake);
+        const u64 id = found_from(w, b);
+        CHECK(id != 0 && w.L.lineage(id)->founder_origin == kOriginWake && w.L.founded_by(kOriginWake) == 1);
+    }
+    { // made through the test API (as a seeded genome is): unknown
+        Watched w;
+        CHECK(w.init(""));
+        const u32 b = w.plant(100, "INC DEC INC DEC SHL", 100);
+        CHECK(w.s.origin(b) == kOriginUnknown);
+        const u64 id = found_from(w, b);
+        CHECK(id != 0 && w.L.lineage(id)->founder_origin == kOriginUnknown && w.L.founded_by(kOriginUnknown) == 1);
+    }
+    CHECK(strcmp(origin_name(kOriginSpark), "spark") == 0 && strcmp(origin_name(kOriginDaughter), "daughter") == 0 &&
+          strcmp(origin_name(kOriginArrival), "arrival") == 0 && strcmp(origin_name(kOriginWake), "wake") == 0 &&
+          strcmp(origin_name(kOriginUnknown), "unknown") == 0);
+}
+
+// The sum of a stats.csv column over its rows (0 if there is no such column).
+u64 csv_column_sum(const char* text, const char* name) {
+    const usize nlen = strlen(name);
+    // Which column: count commas in the header up to the name.
+    const char* eol = strchr(text, '\n');
+    u32 col = 0;
+    bool found = false;
+    for (const char* p = text; p && p < eol;) {
+        const char* end = p;
+        while (end < eol && *end != ',')
+            ++end;
+        if (static_cast<usize>(end - p) == nlen && strncmp(p, name, nlen) == 0) {
+            found = true;
+            break;
+        }
+        ++col;
+        p = end + 1;
+    }
+    if (!found || !eol)
+        return 0;
+    u64 sum = 0;
+    for (const char* line = eol + 1; *line;) {
+        const char* p = line;
+        for (u32 c = 0; c < col && *p && *p != '\n'; ++p)
+            c += *p == ',';
+        u64 v = 0;
+        while (*p >= '0' && *p <= '9')
+            v = v * 10 + static_cast<u64>(*p++ - '0');
+        sum += v;
+        const char* next = strchr(line, '\n');
+        if (!next)
+            break;
+        line = next + 1;
+    }
+    return sum;
+}
+
+// The four stats columns count, per window, the lineages founded by a spark,
+// a daughter, an arrival and a woken program, in a dispersal world with
+// dormancy: summed over the run they are the detectors' counts by origin, and
+// with the seeded founders (unknown) every lineage founded.
+void founders_in_the_csv() {
+    const char* csv = "nova_test_founders.csv";
+    TextBuf cfg;
+    cfg.append(kSoupWorldProc);
+    cfg.append("life.frozen_ticks = 40\nlife.dormancy = true\nmem.upkeep = 6\nworld.disk = 1024\n");
+    Run run;
+    CHECK(make_run(run, cfg.c_str(), 4));
+    TextBuf err;
+    CHECK(run.open_stats(csv, 50, &err));
+    run.run_until(400);
+    run.finish();
+    u64 by[kOriginCount] = {}, founded = 0;
+    for (u32 n = 0; n < run.world().node_count(); ++n) {
+        const Lineages* L = run.world().node_lineages(n);
+        CHECK(L != nullptr);
+        if (!L)
+            return;
+        founded += L->founded();
+        for (u32 o = 0; o < kOriginCount; ++o)
+            by[o] += L->founded_by(o);
+    }
+    Array<u8> bytes;
+    CHECK(read_file(csv, &bytes));
+    bytes.push(0);
+    const char* text = reinterpret_cast<const char*>(bytes.data());
+    const u64 spark = csv_column_sum(text, "founded_spark"), daughter = csv_column_sum(text, "founded_daughter"),
+              arrival = csv_column_sum(text, "founded_arrival"), wake = csv_column_sum(text, "founded_wake");
+    CHECK(spark == by[kOriginSpark] && daughter == by[kOriginDaughter] && arrival == by[kOriginArrival] &&
+          wake == by[kOriginWake]);
+    CHECK(spark + daughter + arrival + wake + by[kOriginUnknown] == founded);
+    CHECK(by[kOriginUnknown] >= 1 && founded > by[kOriginUnknown]); // the seeds, and life since
+    printf("  detect: founders by origin, 24-node dispersal world, 400 ticks: %llu spark, %llu daughter, "
+           "%llu arrival, %llu wake, %llu unknown (seeded)\n",
+           static_cast<unsigned long long>(spark), static_cast<unsigned long long>(daughter),
+           static_cast<unsigned long long>(arrival), static_cast<unsigned long long>(wake),
+           static_cast<unsigned long long>(by[kOriginUnknown]));
+    remove(csv);
+}
+
 // detect.inject: an INJECT that leaves its victim a copy is a link; the victim
 // joins the injector's lineage; re-infecting her adds no member. The injector
 // carries a surface ("0") and a key ("1"), so its copies stay open to it.
@@ -339,7 +684,11 @@ void output_files() {
     bytes.push(0);
     text = reinterpret_cast<const char*>(bytes.data());
     CHECK(strncmp(text, "lineage,node,founded,ended,status,", 34) == 0);
+    CHECK(strstr(text, ",founder_genotype,detected,founder_origin\n") != nullptr); // W7: the last column
     CHECK(strstr(text, "\n0.1,0,") != nullptr); // lineage ids are node.count (Phase 3)
+    const char* row = strstr(text, "\n0.1,0,");
+    const char* eol = row ? strchr(row + 1, '\n') : nullptr;
+    CHECK(eol && eol - row > 8 && strncmp(eol - 8, ",unknown", 8) == 0); // the seeded founder
     remove(bank);
     remove(lin);
 }
@@ -429,6 +778,18 @@ void snapshot_resume() {
     Run resumed;
     TextBuf err;
     CHECK(resumed.init_from_snapshot(bytes.data(), bytes.size(), 1, &err));
+    // W7: origins aren't snapshotted, so every body alive at the resume began
+    // unknown (the daughters born before it included).
+    const Soup& rs = resumed.world().node_soup(0);
+    bool unknown = rs.body_count() > 1;
+    for (usize i = 0; i < rs.body_count(); ++i)
+        unknown = unknown && rs.origin(rs.body_at(i)) == kOriginUnknown;
+    CHECK(unknown);
+    const Soup& fs = first.world().node_soup(0);
+    usize daughters = 0;
+    for (usize i = 0; i < fs.body_count(); ++i)
+        daughters += fs.origin(fs.body_at(i)) == kOriginDaughter;
+    CHECK(daughters > 0); // (they were daughters before it)
     resumed.run_until(30);
     CHECK_EQ_U64(resumed.world().hash(), straight.world().hash());
     const Lineages* L = resumed.world().node_lineages(0);
@@ -443,6 +804,10 @@ void suite_detect() {
     no_copy_no_link();
     random_budding_never_links();
     remains_do_not_count();
+    descent_not_likeness();
+    rotation_through_divide();
+    founder_origins();
+    founders_in_the_csv();
     inject_links();
     bud_and_inject_replicator();
     gate_knobs();

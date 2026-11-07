@@ -8,6 +8,7 @@ namespace nova {
 bool detect_params_from_config(Config& cfg, DetectParams* p) {
     p->enabled = key_flag(cfg, "detect.enabled");
     p->similarity = key_f64(cfg, "detect.similarity");
+    p->shift = key_u32(cfg, "detect.shift"); // X12: DIVIDE alignments shifted up to this many codons each way
     p->genebank_threshold = key_u32(cfg, "detect.genebank_threshold");
     p->inject = key_flag(cfg, "detect.inject");
     p->written = key_flag(cfg, "detect.written");
@@ -24,6 +25,8 @@ void Lineages::init(const DetectParams* p, u32 node) {
     next_id_ = 1;
     links_ = inject_links_ = gpu_links_ = founded_ = detections_ = gpu_detections_ = 0;
     npu_detections_ = colonisations_ = disk_detections_ = signal_detections_ = defended_detections_ = 0;
+    for (u32 i = 0; i < kOriginCount; ++i)
+        founded_by_[i] = 0;
     max_depth_ever_ = 0;
     tags_.clear();
     table_.clear();
@@ -127,26 +130,110 @@ bool Lineages::similar(u32 match, u32 len_a, u32 len_b) const {
            p_->similarity * static_cast<double>(max_of(len_a, len_b));
 }
 
+namespace {
+
+// The rotation key (her first codons looked for in the parent), and the
+// fewest matching codons that show descent (X12).
+constexpr u32 kDescentFloor = 4;
+
+// share x n, rounded up (share in (0, 1]), at most n.
+u32 share_of(double share, u32 n) {
+    const double want = share * static_cast<double>(n);
+    u32 k = static_cast<u32>(want);
+    if (static_cast<double>(k) < want)
+        ++k;
+    return k < n ? k : n;
+}
+
+} // namespace
+
+u32 Lineages::aligned(const u8* par, u32 plen, const u8* m, u32 dstart, u32 dlen, u32 r, u32 misses,
+                      u32* by_gpu) const {
+    // Only codons the parent's body wrote into the daughter since her ALLOC
+    // count (detect.written): budding onto a relative's remains is not copying.
+    u32 match = 0, miss = 0, gpu = 0;
+    u32 j = r; // the parent's codon facing her codon i, read cyclically
+    for (u32 i = 0; i < dlen; ++i) {
+        const u32 a = dstart + i;
+        if (par[j] == m[a] && (!p_->written || is_written(a))) {
+            ++match;
+            gpu += is_gpu_written(a);
+        } else if (++miss > misses) {
+            break; // this alignment can no longer pass
+        }
+        if (++j == plen)
+            j = 0;
+    }
+    *by_gpu = gpu;
+    return match;
+}
+
+// Descent, not likeness (disasters plan X12): her codons, written by the
+// parent's body and matching it at the best alignment, against her length.
+// The first alignment that passes is taken: straight, then shifts nearest
+// first, then the rotation candidates in the parent's order. A failing
+// alignment stops once more than (1 - similarity) of her codons miss (a
+// quarter, at 0.75), so a birth costs a few hundred codon comparisons at
+// most, outside world time.
+bool Lineages::descends(const Soup& s, u32 p, u32 k, u32* match, u32* by_gpu) const {
+    const Block& P = s.block(p);
+    const Block& D = s.block(k);
+    if (P.len == 0 || D.len == 0)
+        return false;
+    const u8* m = s.mem();
+    const u8* par = m + P.start;
+    // The fewest matches that pass: similarity x her length, rounded up, and
+    // never fewer than kDescentFloor codons (or similarity x the parent's
+    // length, if that is fewer): one written codon matching somewhere in a
+    // long parent is chance, not descent. Every link the same-offset rule
+    // made before X12 passes this too (its matches are a subset of the
+    // straight comparison's, and it needed similarity x the longer length).
+    const u32 need = max_of(share_of(p_->similarity, D.len), min_of(kDescentFloor, share_of(p_->similarity, P.len)));
+    if (need > D.len)
+        return false; // too short to show descent
+    const u32 misses = D.len - need; // the most misses an alignment may have
+    u32 n = 0, g = 0;
+    auto passes = [&](u32 r) {
+        n = aligned(par, P.len, m, D.start, D.len, r, misses, &g);
+        return n >= need;
+    };
+    bool ok = passes(0); // the straight comparison
+    // Shifts of 1 .. detect.shift codons, forward then back (a head off by a
+    // codon or two); past half the parent they would repeat one another.
+    const u32 smax = min_of(p_->shift, P.len / 2);
+    for (u32 d = 1; d <= smax && !ok; ++d)
+        ok = passes(d) || (P.len - d != d && passes(P.len - d));
+    // Rotations (a copy that starts part-way through the parent): only where
+    // her first 4 codons (all of hers, if fewer) appear in the parent, read
+    // cyclically, and not already tried as a shift; at most 8.
+    const u32 key = min_of(kDescentFloor, D.len);
+    u32 tried = 0;
+    for (u32 r = smax + 1; r + smax < P.len && tried < 8 && !ok; ++r) {
+        u32 j = 0, q = r;
+        while (j < key && par[q] == m[D.start + j]) {
+            ++j;
+            if (++q == P.len)
+                q = 0;
+        }
+        if (j < key)
+            continue;
+        ++tried;
+        ok = passes(r);
+    }
+    if (ok) {
+        *match = n;
+        *by_gpu = g;
+    }
+    return ok;
+}
+
 void Lineages::on_divide(const Soup& s, u32 p, u32 k, u64 tick) {
     // A CPU running inside the block it splits off is not a parent copying
     // itself: the daughter would trivially match.
     if (p == kNone || p == k)
         return;
-    const Block& P = s.block(p);
-    const Block& D = s.block(k);
-    const u32 n = min_of(P.len, D.len);
-    const u8* m = s.mem();
-    // Only codons the parent's body wrote into the daughter since her ALLOC
-    // count (detect.written): budding onto a relative's remains is not copying.
     u32 match = 0, by_gpu = 0;
-    for (u32 i = 0; i < n; ++i) {
-        const u32 a = D.start + i;
-        if (m[P.start + i] == m[a] && (!p_->written || is_written(a))) {
-            ++match;
-            by_gpu += is_gpu_written(a);
-        }
-    }
-    if (similar(match, P.len, D.len))
+    if (descends(s, p, k, &match, &by_gpu))
         link(s, p, k, tick, kViaDivide, 2 * by_gpu > match);
 }
 
@@ -251,6 +338,8 @@ void Lineages::link(const Soup& s, u32 p, u32 k, u64 tick, u32 via, bool gpu) {
         L.founded = tick;
         L.founder_len = P.len;
         L.founder_genotype = genotype_hash(m + P.start, P.len);
+        L.founder_origin = P.body != kNone ? s.origin(P.body) : kOriginUnknown; // W7
+        ++founded_by_[L.founder_origin < kOriginCount ? L.founder_origin : kOriginUnknown];
         join(p, m + P.start, P.len, tick, id, 0, 0);
     }
     const BlockTag parent = tags_[p];
@@ -356,8 +445,24 @@ CargoTag Lineages::cargo_tag(u32 k) const {
         c.parent = gm ? gm->parent : 0;
         const LineageInfo* L = table_.find(t.lineage);
         c.gated = L && L->detected ? 1 : 0;
+        c.origin = L ? static_cast<u8>(L->founder_origin) : kOriginUnknown;
     }
     return c;
+}
+
+const char* origin_name(u32 origin) {
+    switch (origin) {
+    case kOriginSpark:
+        return "spark";
+    case kOriginDaughter:
+        return "daughter";
+    case kOriginArrival:
+        return "arrival";
+    case kOriginWake:
+        return "wake";
+    default:
+        return "unknown";
+    }
 }
 
 // A dispersed daughter placed in block k. She keeps her lineage and depth:
@@ -366,12 +471,14 @@ CargoTag Lineages::cargo_tag(u32 k) const {
 // travels with her (`gated`), so a gated lineage stays gated here and its
 // later events (GPU, NPU) can fire on this node. The first arrival of a gated
 // lineage on a node it wasn't founded on is a colonist event, once per
-// lineage per node.
+// lineage per node. A dormant program waking rejoins the same way (X12): it
+// left its lineage when it went dormant, so it is counted once. (If its block
+// is a member already -- taken over by an INJECT while it rested -- it stays
+// as it is, rather than being counted twice.)
 void Lineages::on_arrive(const Soup& s, u32 k, const CargoTag& tag, u64 tick) {
     if (k >= tags_.size())
         tags_.resize(static_cast<usize>(k) + 1);
-    tags_[k] = BlockTag{};
-    if (tag.lineage == 0)
+    if (tag.lineage == 0 || tags_[k].lineage != 0)
         return;
     const Block& B = s.block(k);
     const u8* code = s.mem() + B.start;
@@ -383,6 +490,7 @@ void Lineages::on_arrive(const Soup& s, u32 k, const CargoTag& tag, u64 tick) {
         n.founded = tick;
         n.founder_len = B.len;
         n.founder_genotype = tag.genotype;
+        n.founder_origin = tag.origin; // the founder's, from its founding node (W7)
         n.detected = tag.gated;
         L = &n;
     } else if (tag.gated && !L->detected) {

@@ -6,6 +6,7 @@
 
 #include "check.h"
 #include "helpers.h"
+#include "nova/lineage.h"
 #include "soup_helpers.h"
 
 using namespace nova;
@@ -380,6 +381,121 @@ void test_dormant() {
     CHECK(soup_ok(g.s));
 }
 
+// The lineage tracker and dormancy (disasters plan X12). Two members of one
+// lineage on a soup with a detector: a (the founder, at 100) and b, its exact
+// copy written by a's body (at 300, depth 1), which holds 16 codons of disk so
+// it can go dormant.
+struct LineageFix {
+    SoupParams p;
+    DetectParams d;
+    Lineages L;
+    Soup s;
+    u32 a = kNone, b = kNone;
+    u64 id = 0;
+    bool init(const char* extra = "") {
+        TextBuf cfg;
+        cfg.append("heat.enabled = false\nhazard.copy = 0\nhazard.flaw = 0\nhazard.rot = 0\nmem.upkeep = 0\n"
+                   "world.millicores = 2000\nworld.disk = 4096\nlife.dormancy = true\n");
+        cfg.append(extra);
+        if (!make_params(&p, cfg.c_str(), 1024))
+            return false;
+        d.enabled = true;
+        s.init(&p, 23, 0);
+        L.init(&d, 0);
+        s.set_observer(&L);
+        s.begin_tick(0);
+        a = plant(s, 100, "ALLOC INC INC INC", 500);
+        b = plant(s, 300, "ALLOC INC INC INC", 500);
+        if (a == kNone || b == kNone)
+            return false;
+        for (u32 i = 0; i < 4; ++i)
+            L.on_write(300 + i);
+        L.on_divide(s, s.body(a).blocks, s.body(b).blocks, 0);
+        id = L.tag(s.body(a).blocks).lineage;
+        Cpu& c = s.cpu_mut(s.body(b).cpus);
+        c.bx = 3; // disk
+        c.cx = 16;
+        s.run_cpu(s.body(b).cpus, 1);
+        return id != 0 && L.tag(s.body(b).blocks).lineage == id && alive() == 2 && s.disk_held(b) == 16;
+    }
+    u32 alive() const {
+        const LineageInfo* i = L.lineage(id);
+        return i ? i->alive : 0;
+    }
+    usize ended() const { // rows for this lineage among the detector's extinct ones
+        usize n = 0;
+        for (usize i = 0; i < L.ends().size(); ++i)
+            n += L.ends()[i].id == id;
+        return n;
+    }
+};
+
+// A dormant program leaves its lineage when it goes dormant and rejoins when
+// it wakes: resting and waking at home (a hermit node: nowhere to drift)
+// leaves the lineage's count where it was, round after round (it used to gain
+// a phantom member each time), and the lineage ends when its last member dies.
+// One that drifts off, or dies resting, leaves it once, not twice.
+void test_dormant_lineage() {
+    LineageFix f;
+    CHECK(f.init());
+    for (u64 t = 1; t <= 3; ++t) {
+        CHECK(f.s.force_dormant(f.b) && f.s.dormant(f.b)); // nowhere to drift: it rests here
+        CHECK(f.alive() == 1 && f.L.tag(f.s.body(f.b).blocks).lineage == 0);
+        f.s.begin_tick(t);
+        f.s.death_sweep(); // its own freed millicores are free: it wakes
+        CHECK(!f.s.dormant(f.b) && f.s.body(f.b).alive && f.s.tally().dormant_woke == 1);
+        const BlockTag tb = f.L.tag(f.s.body(f.b).blocks);
+        CHECK(f.alive() == 2 && tb.lineage == f.id && tb.depth == 1);
+        CHECK(f.s.disk_held(f.b) == 16); // its reserve again
+        CHECK(soup_ok(f.s));
+    }
+    const LineageInfo* info = f.L.lineage(f.id);
+    CHECK(info && info->peak_alive == 2 && f.ended() == 0);
+    // The last members die: the lineage ends, once.
+    f.s.cpu_mut(f.s.body(f.a).cpus).halted = 1;
+    f.s.cpu_mut(f.s.body(f.b).cpus).halted = 1;
+    f.s.begin_tick(4);
+    f.s.death_sweep();
+    CHECK(!f.s.body(f.a).alive && !f.s.body(f.b).alive);
+    CHECK(f.L.lineage(f.id) == nullptr && f.L.living() == 0 && f.ended() == 1);
+    CHECK(soup_ok(f.s));
+
+    // Drifting off: it leaves its lineage once (going dormant), and its
+    // departure, which frees its block, leaves nothing more. Its tag goes with it.
+    LineageFix g;
+    CHECK(g.init());
+    const u32 edges[1] = {0};
+    const u32 in_flight[1] = {0};
+    DispersalPorts ports;
+    ports.edges = edges;
+    ports.in_flight = in_flight;
+    ports.degree = 1;
+    ports.capacity = 2;
+    g.s.set_ports(ports);
+    CHECK(g.s.force_dormant(g.b) && !g.s.dormant(g.b) && g.s.departures().size() == 1);
+    CHECK(g.alive() == 1 && g.L.living() == 1 && g.ended() == 0);
+    const CargoTag t = g.s.departures()[0].tag;
+    CHECK(t.lineage == g.id && t.depth == 1 && g.s.departures()[0].dormant == 1);
+
+    // Dying while it rests: it isn't a member then, so its death changes nothing.
+    LineageFix h;
+    CHECK(h.init("dormant.disk_loss = 8\n"));
+    CHECK(h.s.force_dormant(h.b) && h.s.dormant(h.b) && h.alive() == 1);
+    CHECK(plant(h.s, 600, "INC INC INC INC", h.s.free_units()) != kNone && h.s.free_units() == 0); // it can't wake
+    h.s.begin_tick(1);
+    h.s.death_sweep();
+    h.s.begin_tick(2);
+    h.s.death_sweep(); // its reserve spent
+    CHECK(!h.s.body(h.b).alive && h.s.tally().dormant_expired == 1);
+    CHECK(h.alive() == 1 && h.ended() == 0);
+    // ... and if it was the last member, the lineage ended when it went dormant.
+    h.s.cpu_mut(h.s.body(h.a).cpus).halted = 1;
+    h.s.begin_tick(3);
+    h.s.death_sweep();
+    CHECK(h.L.lineage(h.id) == nullptr && h.ended() == 1);
+    CHECK(soup_ok(h.s));
+}
+
 // A resting dormant program is easy food: no surface shields it from a blind
 // bite (a live body with the same surface would be), and swallowed whole it
 // is gone.
@@ -668,6 +784,7 @@ void suite_ecology() {
     test_bite_shield();
     test_bite_action();
     test_dormant();
+    test_dormant_lineage();
     test_dormant_bitten();
     test_dormant_world();
     test_eco_world();

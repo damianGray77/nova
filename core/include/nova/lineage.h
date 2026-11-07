@@ -6,16 +6,27 @@
 // DIVIDEs; it never writes to the soup or draws from its RNG, so the world
 // hash is identical with detection on or off (a test checks this).
 //
-// Inheritance links come two ways, each counted over same-offset matches /
-// the longer length, against `detect.similarity` (two random blocks match on
-// about 1.6%):
-//   - DIVIDE: the daughter block matches the block the dividing CPU runs in,
-//     counting only codons the parent's body wrote into her since her ALLOC
-//     (`detect.written`, default on). It tells "she was copied" apart from "a
-//     random block was budded off" (random bodies bud a dozen times a tick) and
-//     from "she was budded onto a relative's intact remains".
+// Inheritance links come two ways, each against `detect.similarity` (two
+// random blocks match on about 1.6%):
+//   - DIVIDE (descent, not likeness: disasters plan X12): the daughter block
+//     joins when at least that share of HER codons match the block the
+//     dividing CPU runs in at the best alignment, counting only codons the
+//     parent's body wrote into her since her ALLOC (`detect.written`, default
+//     on). Measured against her length, so a partial copy is a descendant;
+//     but at least 4 codons must match (3/4 of a parent of 4 codons or fewer),
+//     as a single written codon that matches somewhere in a long parent is
+//     chance. Every link the same-offset rule made before X12 is still made.
+//     Alignments, first match wins: the straight comparison; shifts of up to
+//     `detect.shift` (8) codons either way; then rotations, only where her
+//     first 4 codons appear in the parent, at most 8 tried. Every alignment
+//     reads the parent cyclically (her codon i against parent codon (i + r)
+//     mod its length), as a read head wraps at its block's end. "Written"
+//     tells "she was copied" apart from "a random block was budded off"
+//     (random bodies bud a dozen times a tick) and from "she was budded onto a
+//     relative's intact remains".
 //   - INJECT (`detect.inject`, default on): the codons an INJECT just wrote
-//     leave the victim's first block matching the injector's block. The victim
+//     leave the victim's first block matching the injector's block (same
+//     offsets, over the longer of the two lengths, as before X12). The victim
 //     joins the injector's lineage as its offspring. This is how the first
 //     replicators found on the home rig copy themselves: bud a blank daughter,
 //     then inject their own code into her (design.md 6.6).
@@ -51,6 +62,15 @@
 // and the gate is checked per node. The first arrival of a gated lineage on
 // each node other than its founding one is a `colonist` event (design.md 6.9).
 //
+// Dormancy (X12): a program leaves its lineage when it goes dormant, wherever
+// it rests, and rejoins on waking, as an arrival does; its tag waits with it
+// in the soup. So a lineage whose living members are all dormant has ended.
+//
+// Founders by origin (world plan W7): a lineage records how its founding body
+// began (spark, daughter, arrival, wake or unknown; soup.h kOrigin...), and the
+// detector counts foundings by origin. The origin travels in the cargo tag, so
+// each node's entry for a lineage names the same founder.
+//
 // Exact genotypes go to a per-soup genebank (genebank.h).
 //
 // What a Lineages produces during a tick (gate events, genebank saves, extinct
@@ -70,6 +90,7 @@ namespace nova {
 struct DetectParams {
     bool enabled = false;
     double similarity = 0.75;    // detect.similarity
+    u32 shift = 8;               // detect.shift: DIVIDE alignments shifted up to this many codons each way (X12)
     u32 genebank_threshold = 2;  // detect.genebank_threshold
     bool inject = true;          // detect.inject: INJECT can make an inheritance link
     bool written = true;         // detect.written: DIVIDE links count only written codons
@@ -119,7 +140,12 @@ struct LineageInfo {
     u32 signal_detected;  // ... reached signal.sustained
     u32 native_detected;  // ... and then a GPU-born member made an inheriting daughter (Phase 8)
     u32 defences;         // actions aimed at members that failed because they changed in time, once gated (9)
+    u32 founder_origin;   // how its founding body began (kOrigin..., W7)
+    u32 pad;
 };
+
+// An origin as a word: spark, daughter, arrival, wake or unknown (W7).
+const char* origin_name(u32 origin);
 
 inline constexpr u32 kEventReplicator = 0;    // the lineage met the gate
 inline constexpr u32 kEventGpuReplicator = 1; // a gated lineage copied with the GPU
@@ -185,6 +211,10 @@ class Lineages {
     // --- hooks, called by the soup during its tick -------------------------
     void on_new_block(u32 k, u32 start, u32 len);
     void on_free_block(u32 k, u64 tick);
+    // X12: the body whose code is block k went dormant. It leaves its lineage
+    // (the soup keeps its tag for its waking), so freeing the block later, at
+    // its departure or its death, leaves nothing again.
+    void on_dormant(u32 k, u64 tick) { on_free_block(k, tick); }
     // Phase 10: block k is a piece bitten off another block (its codons, and
     // what was written into them, carried over): untagged.
     void on_carve(u32 k) {
@@ -212,7 +242,9 @@ class Lineages {
     // A CPU running in `block` did an NPU op (Phase 2b).
     void on_npu(const Soup& s, u32 block, u64 tick);
     // Phase 3: the tag a daughter in block k carries when she disperses, and
-    // her adoption on arrival in block k of this node.
+    // her adoption on arrival in block k of this node. Also how a dormant
+    // program rejoins on waking (X12); a block that is already a member (taken
+    // over by an INJECT while it rested) stays as it is.
     CargoTag cargo_tag(u32 k) const;
     void on_arrive(const Soup& s, u32 k, const CargoTag& tag, u64 tick);
     // Phase 4: a volatility wipe turned [a, a + n) into random codons (they
@@ -250,6 +282,8 @@ class Lineages {
     bool is_written(u32 a) const { return (written_[a >> 6] >> (a & 63)) & 1; }
     bool is_gpu_written(u32 a) const { return (gpu_written_[a >> 6] >> (a & 63)) & 1; }
     u64 founded() const { return founded_; } // lineages founded so far
+    // ... of them, by the founding body's origin (kOrigin..., W7)
+    u64 founded_by(u32 origin) const { return origin < kOriginCount ? founded_by_[origin] : 0; }
     u64 detections() const { return detections_; }
     u32 max_depth_ever() const { return max_depth_ever_; }
     usize living() const { return table_.size(); }
@@ -270,6 +304,15 @@ class Lineages {
 
   private:
     bool similar(u32 match, u32 len_a, u32 len_b) const;
+    // X12: whether daughter block k descends from parent block p (see the
+    // top); *by_gpu counts her matching codons a GPU op wrote, at the
+    // alignment that passed, and *match all of them.
+    bool descends(const Soup& s, u32 p, u32 k, u32* match, u32* by_gpu) const;
+    // Her codons that match the parent at alignment r (cyclic), counting only
+    // written ones with detect.written; gives up (returning what it has) once
+    // more than `misses` codons fail.
+    u32 aligned(const u8* par, u32 plen, const u8* dau, u32 dstart, u32 dlen, u32 r, u32 misses,
+                u32* by_gpu) const;
     void link(const Soup& s, u32 parent_block, u32 child_block, u64 tick, u32 via, bool gpu);
     void push_event(u32 kind, u64 tick, u64 lineage, const LineageInfo& L, const BlockTag& child,
                     const u8* code, u32 len, u32 via);
@@ -283,6 +326,7 @@ class Lineages {
     u64 links_ = 0, inject_links_ = 0, gpu_links_ = 0, founded_ = 0, detections_ = 0;
     u64 gpu_detections_ = 0, npu_detections_ = 0, colonisations_ = 0, disk_detections_ = 0;
     u64 signal_detections_ = 0, defended_detections_ = 0;
+    u64 founded_by_[kOriginCount] = {};
     u32 max_depth_ever_ = 0;
     Array<BlockTag> tags_;   // by block slot
     Array<u64> written_;     // per codon: written by its owner since its block was allocated

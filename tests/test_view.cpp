@@ -168,10 +168,15 @@ void test_chart_log() {
     r.v[2] = 4;  // ticks
     r.v[4] = 20; // births
     r.v[42] = 7; // bodies
+    const u32 fw = stats_column_index("founded_wake"); // W7: foundings in the window are sums
+    CHECK(fw == 96 && stats_column_index("founded_spark") == 93 && stats_column_index("resting") == 89);
+    CHECK(stats_column_index("archive_held") == 90 && !stats_column_is_sum(90) && stats_column_is_sum(91) &&
+          stats_column_is_sum(92) && stats_column_is_sum(93)); // (the disk tiers' gauge and sums, then W7's)
+    r.v[fw] = 8;
     r.compress = 0.5;
     double out[kStatsColumns];
     chart_row(r, out);
-    CHECK(out[4] == 5 && out[42] == 7 && out[kStatsIntColumns] == 0.5);
+    CHECK(out[4] == 5 && out[42] == 7 && out[fw] == 2 && out[kStatsIntColumns] == 0.5);
     CHECK(stats_column_index("bodies") == 42 && stats_column_index("compress") == kStatsIntColumns &&
           stats_column_index("nope") == kStatsColumns);
 }
@@ -198,7 +203,8 @@ void test_stats_header() {
                          "warp_steps,lane_instr,warp_host,launches,gpu_births,warps,gpu_bodies,"
                          "actions_started,actions_landed,actions_failed,actions_defended,"
                          "threads_started,e_work,e_held,vent_codons,decayed,bites_waste,bites_body,codons_bitten,threads_ended,died_halted,died_frozen,died_worn,dormant_started,dormant_woke,dormant_expired,dormant_eaten,dormant_hops,drifting,resting,"
-                         "archive_held,archive_stores,archive_loads,compress,ambient\n";
+                         "archive_held,archive_stores,archive_loads,"
+                         "founded_spark,founded_daughter,founded_arrival,founded_wake,compress,ambient\n";
     CHECK(bytes.size() > strlen(header) && memcmp(bytes.data(), header, strlen(header)) == 0);
     remove(path);
 }

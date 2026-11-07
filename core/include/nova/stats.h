@@ -75,7 +75,11 @@
 //   archive_loads                     codons held; DISK stores and loads that
 //                                     touched the archive (also in disk_stores,
 //                                     disk_loads)
-//   compress                        soup compressibility (compress.h), mean
+//   founded_spark, founded_daughter,  lineages founded during the window, by how
+//   founded_arrival, founded_wake     the founding body began (world plan W7;
+//                                     zeros when detection is off; founders
+//                                     alive at a resume, or seeded, in none)
+//   compress                          soup compressibility (compress.h), mean
 //                                     over nodes: ~1 random, lower = repetitive
 //   ambient                           the ambient heat input, mean over nodes (4)
 #include "nova/io.h"
@@ -89,10 +93,10 @@ void csv_field(TextBuf& out, Str s);
 
 // The soup model's stats columns (the list above), shared by stats.csv and the
 // viewer's charts (Phase 6) so both show exactly the same numbers.
-inline constexpr u32 kStatsColumns = 95;
-inline constexpr u32 kStatsIntColumns = 93; // tick_first .. live_nodes, Phase 8's warp, Phase 9's action,
-                                            // Phase 9c's thread, Phase 10's, dormancy's and the disk
-                                            // tiers' columns; then compress, ambient
+inline constexpr u32 kStatsColumns = 99;
+inline constexpr u32 kStatsIntColumns = 97; // tick_first .. live_nodes, Phase 8's warp, Phase 9's action,
+                                            // Phase 9c's thread, Phase 10's, dormancy's, the disk tiers'
+                                            // and founders by origin's columns; then compress, ambient
 const char* stats_column(u32 i);
 // Index of a column by name, or kStatsColumns if there is none.
 u32 stats_column_index(Str name);
@@ -104,9 +108,11 @@ struct StatsRow {
         return i < kStatsIntColumns ? static_cast<double>(v[i]) : (i == kStatsIntColumns ? compress : ambient);
     }
 };
-// The detector's link totals at the previous row (each row shows the change).
+// The detector's link totals at the previous row (each row shows the change),
+// and its foundings by origin (W7: spark, daughter, arrival, wake).
 struct StatsMarks {
     u64 links = 0, inject = 0, gpu = 0;
+    u64 founded[4] = {};
 };
 // One soup-model row: `sum` is the window's summed tallies; the rest is the
 // world at the window's end. Updates *marks. `compress` false skips the
