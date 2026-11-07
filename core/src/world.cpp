@@ -70,7 +70,8 @@ bool is_structural(Str key) {
     const char* const prefixes[] = {"world.",  "isa.",    "cpu.",   "heat.", "hazard.", "contact.", "tierra.",
                                     "spark.", "seed.",   "mem.",   "detect.", "gpu.",  "npu.",     "edge.",
                                     "vary.",  "disk.",   "salvage.", "signal.", "node.",
-                                    "substrate."}; // (a varied world, docs/world-plan.md W2)
+                                    // a varied world (docs/world-plan.md W2, W4)
+                                    "substrate.", "archive."};
     if (key.eq("seed"))
         return true;
     for (const char* p : prefixes)
@@ -288,7 +289,7 @@ bool World::init(Config& cfg) {
     disk_folder_.clear();
     if (model_ == Model::soup) {
         const Str dp = key_str(cfg, "disk.path");
-        if (dp.n && soup_params_.disk > 0) {
+        if (dp.n && (soup_params_.disk > 0 || soup_params_.archive > 0)) { // (W4: the archive shares the files)
             static u32 runs = 0;
             disk_folder_.append(dp);
             disk_folder_.append("\\nova-");
@@ -642,6 +643,7 @@ void World::derive_node(u32 n, const Array<double>* z, bool first) {
         p.gpus = m.gpus ? share_gpu_[n] : 0;
         p.npus = m.npus ? share_npu_[n] : 0;
         p.disk = m.disk ? share_disk_[n] : 0;
+        p.archive = m.archive ? share_archive_[n] : 0; // disk tiers (W4): res.archive
         if (!ecpu_w_.empty()) {
             const double e = m.e_share * ecpu_w_[n];
             p.e_share = e < 1.0 ? e : 1.0;
@@ -804,8 +806,10 @@ void World::read_land_params(Config& cfg) {
 
 // The distributions of sparks and each resource (plan C6).
 void World::read_spreads(Config& cfg) {
-    const char* const names[7] = {"spark", "res.memory", "res.cpu", "res.gpu", "res.npu", "res.disk", "res.ecpu"};
-    for (u32 r = 0; r < 7; ++r) {
+    // (W4: res.archive, the disk tiers' archive, last)
+    const char* const names[8] = {"spark",   "res.memory", "res.cpu",  "res.gpu",
+                                  "res.npu", "res.disk",   "res.ecpu", "res.archive"};
+    for (u32 r = 0; r < 8; ++r) {
         Spread& s = spreads_[r];
         TextBuf k;
         auto key = [&](const char* leaf) -> Str {
@@ -824,19 +828,19 @@ void World::read_spreads(Config& cfg) {
         // Phase 8: rich where another distribution is poor (its noise field
         // the opposite way round), so GPU-rich regions can be CPU-poor.
         const Str a = key_choice(cfg, key("against"));
-        const char* const others[7] = {"spark", "memory", "cpu", "gpu", "npu", "disk", "ecpu"};
-        const u32 fields[7] = {kFieldSparkRate, kFieldSoupSize, kFieldMillicores, kFieldGpus,
-                               kFieldNpus,      kFieldDisk,     kFieldEcpu};
+        const char* const others[8] = {"spark", "memory", "cpu", "gpu", "npu", "disk", "ecpu", "archive"};
+        const u32 fields[8] = {kFieldSparkRate, kFieldSoupSize, kFieldMillicores, kFieldGpus,
+                               kFieldNpus,      kFieldDisk,     kFieldEcpu,       kFieldArchive};
         s.against = 0xFFFFFFFFu;
         bool known = a.eq("none");
-        for (u32 o = 0; o < 7 && !known; ++o) {
+        for (u32 o = 0; o < 8 && !known; ++o) {
             if (a.eq(others[o]) && o != r) {
                 s.against = fields[o];
                 known = true;
             }
         }
         if (!known)
-            cfg.fail(key("against"), "must be none or another of spark, memory, cpu, gpu, npu, disk, ecpu");
+            cfg.fail(key("against"), "must be none or another of spark, memory, cpu, gpu, npu, disk, ecpu, archive");
     }
 }
 
@@ -866,6 +870,9 @@ void World::spread_resources() {
     split(3, kFieldGpus, m.gpus, 0, 10000000, &share_gpu_);
     split(4, kFieldNpus, m.npus, 0, 10000000, &share_npu_);
     split(5, kFieldDisk, m.disk, 0, 1u << 24, &share_disk_);
+    share_archive_.clear();
+    if (m.archive) // disk tiers (W4): the archive by its own distribution (its own field, so the rest are as before)
+        split(7, kFieldArchive, m.archive, 0, 1u << 24, &share_archive_);
     spread_weights(seed_, kFieldSparkRate, spreads_[0], node_x_, node_y_, W, &spark_w_);
     ecpu_w_.clear();
     if (m.e_share > 0) // Phase 9c: E-rich and E-poor sites (res.ecpu), the share capped at all of them
@@ -2516,6 +2523,7 @@ void World::take_departures() {
             c.dormant = dep.dormant;
             c.mem_reserve = dep.mem_reserve;
             c.hops = dep.hops;
+            c.archive = dep.archive; // disk tiers (W4)
             c.ticks = static_cast<u32>(c.due - tick_);
             cargo_codons_.append(s.departure_codons() + dep.codon_off, dep.len);
             cargo_.push(c);
@@ -2571,15 +2579,21 @@ void World::deliver_dormant(Cargo& c) {
         const u64 over = np.dormant_mem_loss ? (spend - c.mem_reserve) / np.dormant_mem_loss : 0; // ticks on disk
         c.mem_reserve = 0;
         const u64 dspend = static_cast<u64>(np.dormant_disk_loss) * over;
+        // Disk tiers (W4): the fast disk's reserve first, then the archive's.
+        if (c.archive && dspend > c.disk && np.dormant_disk_loss) {
+            const u64 aspend = static_cast<u64>(np.dormant_disk_loss) * ((dspend - c.disk) / np.dormant_disk_loss);
+            c.archive = aspend < c.archive ? static_cast<u32>(c.archive - aspend) : 0;
+        }
         c.disk = dspend < c.disk ? static_cast<u32>(c.disk - dspend) : 0;
     }
-    if (c.mem_reserve == 0 && c.disk == 0) {
+    if (c.mem_reserve == 0 && c.disk == 0 && c.archive == 0) {
         ++world_dormant_expired_;
         return;
     }
     Dormant d = {};
     d.mem_reserve = c.mem_reserve;
     d.disk_reserve = c.disk;
+    d.archive_reserve = c.archive; // W4
     d.millicores = c.millicores;
     d.emillicores = c.emillicores;
     d.gpus = c.gpus;
@@ -2635,7 +2649,8 @@ void World::deliver_cargo() {
             continue;
         }
         soups_[edge_dst_[c.edge]].arrive(cargo_codons_.data() + c.codon_off, c.len, c.millicores, c.gpus,
-                                         c.npus, c.disk, c.tag, c.form, c.emillicores, static_cast<u8>(c.kind));
+                                         c.npus, c.disk, c.tag, c.form, c.emillicores, static_cast<u8>(c.kind),
+                                         c.archive);
         --in_flight_[c.edge];
     }
     // Keep the rest, in order, with their codons packed; then the dormant
@@ -3020,6 +3035,8 @@ u64 World::hash() const {
                     h.word(c.dormant);
                     h.word((static_cast<u64>(c.mem_reserve) << 32) | c.hops);
                 }
+                if (soup_params_.archive) // disk tiers (W4): her archive share or reserve
+                    h.word(c.archive);
                 h.bytes(cargo_codons_.data() + c.codon_off, c.len);
             }
             if (edge_failure_ > 0) // Phase 4: which links are down, until when
@@ -3101,6 +3118,8 @@ void World::save_state(ByteWriter& w) const {
                     w.put_u32(c.mem_reserve);
                     w.put_u32(c.hops);
                 }
+                if (soup_params_.archive) // disk tiers (W4, v4)
+                    w.put_u32(c.archive);
                 w.put_bytes(cargo_codons_.data() + c.codon_off, c.len);
             }
             if (edge_failure_ > 0)
@@ -3250,6 +3269,8 @@ bool World::load_state(ByteReader& r, TextBuf* err, u32 version) {
                     r.get_u32(&c.mem_reserve);
                     r.get_u32(&c.hops);
                 }
+                if (soup_params_.archive && version >= 4) // disk tiers (W4; before v4 no archive: run.cpp)
+                    r.get_u32(&c.archive);
                 if (!r.ok() || c.edge >= edge_src_.size() || c.len == 0 || c.len > r.remaining() ||
                     c.due < tick || c.seq >= next_seq_ || c.form > kFormGpu || c.kind > kKindE || c.dormant > 1) {
                     err->append("snapshot: cargo out of range");

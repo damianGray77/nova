@@ -81,15 +81,15 @@ inline constexpr u32 kMaxSeedLen = 1024;     // longest seeded genome
 struct SelectorMap {
     u8 sense[kSenseReadingsMax]; // SENSE: BX -> reading (6.5 list; 8-10 GPU, 11-13 NPU, 14 degree,
                                  // 15-16 disk, 17 node health, 18-19 async accelerator)
-    u8 res[6];    // ALLOC and RELEASE: BX -> resource (0 memory, 1 CPU, 2 GPU, 3 disk, 4 NPU,
-                  // 5 E millicores: Phase 9c; 1 is then P millicores)
+    u8 res[7];    // ALLOC and RELEASE: BX -> resource (0 memory, 1 CPU, 2 GPU, 3 disk, 4 NPU,
+                  // 5 E millicores: Phase 9c; 1 is then P millicores; 6 archive: docs/world-plan.md W4)
     u8 head[2];   // SETH and GETH: BX -> head (0 read, 1 write)
     u8 divide[4]; // DIVIDE: BX -> destination (0 here, k neighbour edge k)
     u8 gpu[kGpuOps]; // the accelerator verb, BX 0-15 -> GPU op (0 compare ... 15 mul)
     u8 npu[kNpuOps]; // BX 16-19 -> NPU op (0 dot, 1 matvec, 2 matmul, 3 argmax)
     u8 disk[3];   // DISK: BX -> op (0 compare, 1 store, 2 load) (Phase 4)
     u8 sense_n;   // readings SENSE has: up to the highest enabled one (8, 11, 14, 15, 17, 18, 20, 22, 24)
-    u8 res_n;     // resources ALLOC knows: 4, 5 with an NPU, 6 with E millicores
+    u8 res_n;     // resources ALLOC knows: 4, 5 with an NPU, 6 with E millicores, 7 with an archive
     u8 shuffled;  // 0 nearest, 1 shuffled
     u8 pad;
 };
@@ -165,6 +165,17 @@ struct SoupParams {
     u32 disk_cost_base;   // disk.cost_base: instructions per DISK op
     double disk_cost_per_codon; // disk.cost_per_codon
     double disk_rot;      // disk.rot: chance per disk codon per tick of a bit flip
+    // --- disk tiers (docs/world-plan.md W4) ---------------------------------
+    // The archive: a second, slow, near-permanent tier, after the fast disk
+    // in the same ledger (DiskLedger::fast). archive = 0: none, as before.
+    u32 archive;          // world.archive: archive codons per node
+    double archive_rot;   // archive.rot: like disk.rot, for archive codons
+    double archive_decay; // archive.decay: like disk.decay, for free archive codons
+    double archive_slow;  // archive.slow: an archive DISK op's access and codons cost this x the fast disk's
+    // Each tier's DISK access and per-codon costs are also divided by its
+    // substrate speed, disk_speed and archive_speed (W1, below with the other
+    // substrate speeds; set by the world, 1 = as measured).
+    // --- end disk tiers -------------------------------------------------------
     // volatility (Phase 4): wipes of whole pages into random codons
     double volatility;    // mem.volatility: chance per page per tick that a wipe starts there
     u32 wipe_pages;       // mem.wipe_pages: a wipe covers 1..this many pages
@@ -423,16 +434,22 @@ struct DiskLedger {
     Array<u32> free_ext;   // free extent slots
     Array<u32> head, tail, total; // per body slot
     u32 free = 0;          // free codons
+    // Disk tiers (docs/world-plan.md W4): codons [fast, size) are the
+    // archive, so an extent's tier is where it lies, and none straddles the
+    // boundary. fast == size: no archive (and everything below as before).
+    u32 fast = 0;          // the archive's first codon
+    u32 afree = 0;         // free archive codons (counted in `free` too)
 
     u32 size() const { return static_cast<u32>(mem.size()); }
-    void init(u32 n, Rng& rng); // random contents, all free
+    void init(u32 n, Rng& rng, u32 fast_n); // random contents, all free; [fast_n, n) the archive
     void body_slot(u32 body, usize nbodies);
     // One run of len free codons, first fit from `from`, then from 0; the
-    // offset (in the body's disk) of the new extent, or kNone.
-    u32 alloc_run(Rng& rng, u32 body, u32 len);
+    // offset (in the body's disk) of the new extent, or kNone. W4: within
+    // the archive (arch) or the fast disk.
+    u32 alloc_run(Rng& rng, u32 body, u32 len, bool arch = false);
     // Up to `count` free codons in as many runs as it takes, from a random
-    // start, wrapping once; returns how many were claimed.
-    u32 claim_any(Rng& rng, u32 body, u32 count);
+    // start, wrapping once; returns how many were claimed. W4: within one tier.
+    u32 claim_any(Rng& rng, u32 body, u32 count, bool arch = false);
     // Frees the newest k codons; with stamps, those with stamp 0 take `stamp`.
     void release_tail(u32 body, u32 k, u32 stamp = 0);
     void move_tail(u32 from, u32 to, u32 k); // the newest k codons change hands
@@ -441,15 +458,34 @@ struct DiskLedger {
     bool addresses(u32 body, u32 off, u32 n, Array<u32>* out) const;
     u32 rot(Rng& rng, double rate);        // returns flips
     u32 decay(Rng& rng, double rate);      // Phase 10: free codons lose bits; returns bits lost
+    // --- disk tiers (W4) -----------------------------------------------------
+    bool tiered() const { return fast < size(); }
+    u32 fast_free() const { return free - afree; }
+    u32 held_in(u32 body, bool arch) const; // the body's codons in one tier
+    // The archive codons among [off, off + n) of the body's disk; false if
+    // the range isn't all held.
+    bool archive_in(u32 body, u32 off, u32 n, u32* arch) const;
+    // The newest kf fast and ka archive codons, freed (with stamps as
+    // release_tail) or handed to another body, keeping their claim order.
+    void release_tiers(u32 body, u32 kf, u32 ka, u32 stamp = 0);
+    void move_tiers(u32 from, u32 to, u32 kf, u32 ka);
+    // rot and decay over [lo, hi) only (the old ones: the whole ledger).
+    u32 rot_range(Rng& rng, double rate, u32 lo, u32 hi);
+    u32 decay_range(Rng& rng, double rate, u32 lo, u32 hi);
+    // --- end disk tiers -------------------------------------------------------
     void hash_into(Hasher& h) const;
     void save(ByteWriter& w) const;
     bool load(ByteReader& r, u64 nbodies, TextBuf* err);
     bool check(const Array<Body>& bodies, TextBuf* why) const;
 
   private:
-    u32 find_run(u32 from, u32 len) const;
+    u32 find_run(u32 from, u32 len, u32 lo, u32 hi) const;
     u32 add_extent(u32 body, u32 start, u32 len);
     u32 split_tail(u32 body, u32 k); // detaches the newest k codons; returns the chain head
+    u32 split_tiers(u32 body, u32 kf, u32 ka); // W4: the same, per tier
+    u32 new_slot();
+    void free_chain(u32 x, u32 stamp);   // frees a detached chain (fossils)
+    void append_chain(u32 to, u32 x);    // gives a detached chain to body `to`
 };
 
 // What a collapsed node leaves for its next life (Phase 4 lifecycle): its
@@ -458,6 +494,7 @@ struct Ruins {
     Array<u8> mem, disk;
     Array<u32> mem_stamp, disk_stamp;
     u64 fallow = 0;
+    u32 disk_fast = 0; // disk tiers (W4): where its archive began in `disk`
 };
 
 // Per-tick counters (stats input).
@@ -527,6 +564,9 @@ struct SoupTally {
     u64 dormant_expired;  // ... that died with their reserves spent (some in transit: world)
     u64 dormant_eaten;    // ... swallowed whole while resting
     u64 dormant_hops;     // hops taken by drifting programs (passing through: world)
+    // Disk tiers (docs/world-plan.md W4)
+    u64 archive_stores;   // DISK stores that touched the archive (counted in disk_stores too)
+    u64 archive_loads;    // DISK loads that touched the archive (counted in disk_loads too)
 };
 
 class Lineages; // lineage.h: the replicator detector, a pure observer
@@ -557,6 +597,10 @@ struct Departure {
     u32 dormant;     // 1: a dormant program, 0: a daughter
     u32 mem_reserve; // its memory reserve (codons beyond its code)
     u32 hops;        // hops so far, this one included
+    // Disk tiers (docs/world-plan.md W4): her archive codons claimed on
+    // arrival (`disk` is then her fast disk's); a dormant program's archive
+    // reserve.
+    u32 archive;
 };
 
 // A dormant program resting on this node (docs/dormancy-plan.md): a body with
@@ -565,12 +609,12 @@ struct Dormant {
     u32 on;           // 1 while dormant
     u32 dwell;        // ticks left before it moves on
     u32 mem_reserve;  // its memory beyond its code, spent first by the clock
-    u32 disk_reserve; // its disk holding, spent once memory is gone
+    u32 disk_reserve; // its disk holding, spent once memory is gone (W4: its fast disk's)
     u32 millicores, emillicores, gpus, npus; // what it held at home (P, E, GPU, NPU)
     u32 form;         // kFormCpu or kFormGpu
     u32 kind;         // its thread's preferred kind of core
     u32 hops;         // hops it has drifted
-    u32 pad;
+    u32 archive_reserve; // disk tiers (W4): its archive holding, spent last (was padding: 0 without one)
 };
 static_assert(sizeof(Dormant) == 48, "Dormant must have no implicit padding");
 
@@ -722,10 +766,25 @@ class Soup {
     float ambient() const { return ambient_; }
     // Disk (Phase 4): free disk codons and a body's disk codons (0 without a
     // disk), and the ledger itself.
-    u32 free_disk() const { return p_->disk ? disk_.free : 0; }
+    // W4: free_disk() is the fast disk's; disk_held() a body's whole disk,
+    // both tiers.
+    u32 free_disk() const { return disk_on() ? disk_.fast_free() : 0; }
     u32 disk_held(u32 b) const { return b < disk_.total.size() ? disk_.total[b] : 0; }
     const DiskLedger& disk() const { return disk_; }
     DiskLedger& disk_mut() { return disk_; } // tests
+    // --- disk tiers (docs/world-plan.md W4) ----------------------------------
+    // Whether the node has a disk ledger (a fast disk, an archive or both);
+    // free archive codons; a body's archive codons.
+    bool disk_on() const { return p_->disk > 0 || p_->archive > 0; }
+    u32 free_archive() const { return disk_on() ? disk_.afree : 0; }
+    u32 archive_held(u32 b) const { return disk_.tiered() && b < disk_.total.size() ? disk_.held_in(b, true) : 0; }
+    // Disk failure on one tier (docs/disasters-plan.md X5, amended by W4):
+    // every codon of the fast disk (archive false) or the archive becomes
+    // INERT (codon 0), fossils included, stamps cleared; every holding on it
+    // is released and resting dormant programs here lose that tier's
+    // reserve. Nobody dies directly. Returns the codons lost.
+    u32 fail_disk_tier(bool archive);
+    // --- end disk tiers -------------------------------------------------------
     // Salvage (Phase 4): a body's genome length (its first block), and the
     // stamp on memory codon a (0 without the rule).
     u32 genome_len(u32 b) const {
@@ -791,8 +850,10 @@ class Soup {
     // the other form if she holds only the other's units.
     // Phase 9c: with E millicores, `millicores` are P and `emillicores` E;
     // her thread prefers `kind` (her divider's).
+    // W4: `disk` is fast disk; she also claims `archive` codons of free
+    // archive (capped), after it.
     bool arrive(const u8* code, u32 len, u32 millicores, u32 gpus, u32 npus, u32 disk, const CargoTag& tag,
-                u32 form = kFormCpu, u32 emillicores = 0, u8 kind = kKindP);
+                u32 form = kFormCpu, u32 emillicores = 0, u8 kind = kKindP, u32 archive = 0);
 
     // --- warps (Phase 8, design.md 6.14) ------------------------------------
     // The tick in parts, so that the world can run every node's warps on the

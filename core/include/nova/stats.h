@@ -71,7 +71,11 @@
 //   dormant_hops                      rested; dead with their reserves spent;
 //                                     swallowed while resting; hops taken
 //   drifting, resting                 dormant programs in transit; resting on nodes
-//   compress                         soup compressibility (compress.h), mean
+//   archive_held, archive_stores,     disk tiers (docs/world-plan.md W4): archive
+//   archive_loads                     codons held; DISK stores and loads that
+//                                     touched the archive (also in disk_stores,
+//                                     disk_loads)
+//   compress                        soup compressibility (compress.h), mean
 //                                     over nodes: ~1 random, lower = repetitive
 //   ambient                           the ambient heat input, mean over nodes (4)
 #include "nova/io.h"
@@ -85,10 +89,10 @@ void csv_field(TextBuf& out, Str s);
 
 // The soup model's stats columns (the list above), shared by stats.csv and the
 // viewer's charts (Phase 6) so both show exactly the same numbers.
-inline constexpr u32 kStatsColumns = 92;
-inline constexpr u32 kStatsIntColumns = 90; // tick_first .. live_nodes, Phase 8's warp, Phase 9's action,
-                                            // Phase 9c's thread, Phase 10's and dormancy's columns; then
-                                            // compress, ambient
+inline constexpr u32 kStatsColumns = 95;
+inline constexpr u32 kStatsIntColumns = 93; // tick_first .. live_nodes, Phase 8's warp, Phase 9's action,
+                                            // Phase 9c's thread, Phase 10's, dormancy's and the disk
+                                            // tiers' columns; then compress, ambient
 const char* stats_column(u32 i);
 // Index of a column by name, or kStatsColumns if there is none.
 u32 stats_column_index(Str name);

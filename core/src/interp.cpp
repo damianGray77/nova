@@ -372,8 +372,13 @@ struct Exec {
             s.gpu_.move(parent, d, static_cast<u32>(static_cast<u64>(s.gpu_.count[parent]) * share / 64));
         if (p.npus)
             s.npu_.move(parent, d, static_cast<u32>(static_cast<u64>(s.npu_.count[parent]) * share / 64));
-        if (p.disk) // and the newest share of the disk, contents and all (Phase 4)
+        if (s.disk_on() && !s.disk_.tiered()) // and the newest share of the disk, contents and all (Phase 4)
             s.disk_.move_tail(parent, d, static_cast<u32>(static_cast<u64>(s.disk_.total[parent]) * share / 64));
+        if (s.disk_.tiered()) { // W4: the newest share of each tier, each keeping its tier
+            const u32 ha = s.disk_.held_in(parent, true), hf = s.disk_.total[parent] - ha;
+            s.disk_.move_tiers(parent, d, static_cast<u32>(static_cast<u64>(hf) * share / 64),
+                               static_cast<u32>(static_cast<u64>(ha) * share / 64));
+        }
         // Phase 8: she is born on what divided her (a warp's daughter as a
         // warp), once she holds her shares.
         if (p.warps)
@@ -439,9 +444,15 @@ struct Exec {
             d.npus = static_cast<u32>(static_cast<u64>(s.npu_.count[parent]) * share / 64);
             s.npu_.release(parent, d.npus);
         }
-        if (p.disk) { // released at home, contents left as fossils (Phase 4)
+        if (s.disk_on() && !s.disk_.tiered()) { // released at home, contents left as fossils (Phase 4)
             d.disk = static_cast<u32>(static_cast<u64>(s.disk_.total[parent]) * share / 64);
             s.disk_.release_tail(parent, d.disk, genome());
+        }
+        if (s.disk_.tiered()) { // W4: each tier's share, released at home and claimed there in its tier
+            const u32 ha = s.disk_.held_in(parent, true), hf = s.disk_.total[parent] - ha;
+            d.disk = static_cast<u32>(static_cast<u64>(hf) * share / 64);
+            d.archive = static_cast<u32>(static_cast<u64>(ha) * share / 64);
+            s.disk_.release_tiers(parent, d.disk, d.archive, genome());
         }
         s.stamp_block(k, B.len); // what she leaves behind is her code (Phase 4)
         unlink_block(parent, k);
@@ -454,13 +465,27 @@ struct Exec {
         return true;
     }
 
+    // Disk tiers (docs/world-plan.md W4): a DISK op's cost from `access` (its
+    // slowest tier's) and `per` codon (each codon's own tier's) over nf fast
+    // and na archive codons -- the archive archive.slow times the fast
+    // disk's, each tier's divided by its substrate speed.
+    double disk_scale(double access, double per, u32 nf, u32 na) const {
+        const double ff = 1.0 / static_cast<double>(p.disk_speed);
+        const double fa = p.archive_slow / static_cast<double>(p.archive_speed);
+        const double slowest = na == 0 ? ff : (nf > 0 && ff > fa ? ff : fa);
+        return access * slowest + per * (static_cast<double>(nf) * ff + static_cast<double>(na) * fa);
+    }
+
     // DISK (Phase 4, design.md 6.10): BX through the DISK map (0 compare,
     // 1 store, 2 load), AX = offset in my disk, CX = count; the memory side is
     // the read head (compare, store) or the write head (load), advancing as
     // COPY's do, private code applying. All-or-nothing. Costs disk.cost_base +
     // disk.cost_per_codon x CX. Transfers are exact: the disk's hazard is rot.
+    // W4: the body's disk is all its extents, whatever their tier; the op
+    // costs the slowest tier it touches for access, plus each codon at its
+    // own tier's price (disk_scale).
     bool disk_op(u32* cost) {
-        if (!p.disk || c.bx >= 3)
+        if (!s.disk_on() || c.bx >= 3)
             return false;
         const u32 op = p.sel.disk[c.bx];
         const i32 n = static_cast<i32>(c.cx);
@@ -475,7 +500,15 @@ struct Exec {
                 return false;
             a = next_addr(a);
         }
-        *cost = max_of<u32>(1, p.disk_cost_base + static_cast<u32>(p.disk_cost_per_codon * n));
+        u32 na = 0; // W4: codons on the archive
+        for (i32 i = 0; s.disk_.tiered() && i < n; ++i)
+            na += addr[i] >= s.disk_.fast ? 1u : 0u;
+        if (!s.disk_.tiered() && p.disk_speed == 1.0f) // (exactly as before)
+            *cost = max_of<u32>(1, p.disk_cost_base + static_cast<u32>(p.disk_cost_per_codon * n));
+        else
+            *cost = max_of<u32>(1, static_cast<u32>(min_of(disk_scale(p.disk_cost_base, p.disk_cost_per_codon,
+                                                                      static_cast<u32>(n) - na, na),
+                                                           4e9)));
         u8* disk = s.disk_.mem.data();
         switch (op) {
         case 0: { // compare: CX <- mismatches
@@ -498,6 +531,7 @@ struct Exec {
             if (p.endurance > 0) // disk writes wear the node too
                 s.writes_ += static_cast<u32>(n);
             ++s.tally_.disk_stores;
+            s.tally_.archive_stores += na ? 1 : 0; // W4
             return true;
         default: { // load: memory <- disk
             bool into_self = false;
@@ -511,6 +545,7 @@ struct Exec {
                 c.wh = next_addr(w);
             }
             ++s.tally_.disk_loads;
+            s.tally_.archive_loads += na ? 1 : 0; // W4
             if (s.obs_ && into_self)
                 s.obs_->on_disk_load(s, c.block, s.tick_);
             return true;
@@ -520,7 +555,8 @@ struct Exec {
 
     // ALLOC and RELEASE share one selector map (BX -> resource, D6): 0 memory,
     // 1 CPU, 2 GPU, 3 disk, 4 NPU when the node has one, and 5 E millicores
-    // with them (Phase 9c; 1 is then P millicores).
+    // with them (Phase 9c; 1 is then P millicores); 6 the archive with one
+    // (docs/world-plan.md W4).
     u32 resource() const { return c.bx < p.sel.res_n ? p.sel.res[c.bx] : 99u; }
 
     // The unit ledger for resource r (2 GPU, 4 NPU), or nullptr if absent.
@@ -552,12 +588,13 @@ struct Exec {
                 return false;
             return amount <= 0 || L->claim(s.rng_, c.body, static_cast<u32>(amount)) > 0;
         }
-        case 3: { // disk (Phase 4): one run of CX codons; AX <- its offset in my disk
-            if (!p.disk)
+        case 3:   // disk (Phase 4): one run of CX codons; AX <- its offset in my disk
+        case 6: { // W4: the archive, the same way (its offset in my whole disk)
+            if (r == 3 ? !p.disk : !p.archive)
                 return false;
             if (amount <= 0)
                 return true;
-            const u32 off = s.disk_.alloc_run(s.rng_, c.body, static_cast<u32>(amount));
+            const u32 off = s.disk_.alloc_run(s.rng_, c.body, static_cast<u32>(amount), r == 6);
             if (off == kNone)
                 return false;
             c.ax = off;
@@ -640,9 +677,24 @@ struct Exec {
                 return false;
             if (amount <= 0)
                 return true;
+            if (s.disk_.tiered()) { // W4: the newest CX codons of my fast disk
+                if (s.disk_.held_in(c.body, false) == 0)
+                    return false;
+                s.disk_.release_tiers(c.body, static_cast<u32>(amount), 0, genome());
+                return true;
+            }
             if (s.disk_.total[c.body] == 0)
                 return false;
             s.disk_.release_tail(c.body, static_cast<u32>(amount), genome());
+            return true;
+        case 6: // W4: the archive, the newest CX codons of mine there
+            if (!p.archive)
+                return false;
+            if (amount <= 0)
+                return true;
+            if (s.disk_.held_in(c.body, true) == 0)
+                return false;
+            s.disk_.release_tiers(c.body, 0, static_cast<u32>(amount), genome());
             return true;
         default:
             return false;
@@ -808,7 +860,7 @@ struct Exec {
             s.gpu_.move(prey, eater, s.gpu_.count[prey]);
         if (p.npus)
             s.npu_.move(prey, eater, s.npu_.count[prey]);
-        if (p.disk) // and all of its disk (Phase 4)
+        if (s.disk_on()) // and all of its disk (Phase 4; W4: both tiers, each extent keeping its tier)
             s.disk_.move_all(prey, eater);
         if (p.warps) // and its warps, up to warp.max (Phase 8)
             s.merge_warps(prey, eater);
@@ -1107,6 +1159,8 @@ struct Exec {
             d.mem_reserve -= static_cast<u32>((2 * static_cast<u64>(d.mem_reserve) * share_n + share_d) / (2 * share_d));
             d.disk_reserve -=
                 static_cast<u32>((2 * static_cast<u64>(d.disk_reserve) * share_n + share_d) / (2 * share_d));
+            d.archive_reserve -= // W4 (0 without an archive)
+                static_cast<u32>((2 * static_cast<u64>(d.archive_reserve) * share_n + share_d) / (2 * share_d));
         }
         ++s.tally_.bites_body;
         return taken;
@@ -1339,13 +1393,24 @@ struct Exec {
 
     // A DISK op's picoseconds: a kernel call, then a disk access and its
     // codons in sequence (just the call when it fails on its arguments).
+    // W4: the slowest tier its range touches for the access, each codon at
+    // its own tier's price (a range outside my disk, which will fail, at the
+    // fast disk's, as before tiers).
     u64 disk_time() const {
         const u64 t = costs().call;
-        if (!p.disk || c.bx >= 3 || static_cast<i32>(c.cx) <= 0)
+        if (!s.disk_on() || c.bx >= 3 || static_cast<i32>(c.cx) <= 0)
             return t;
         const u64 n = c.cx;
-        return p.sel.disk[c.bx] == 1 ? t + costs().disk_write + n * costs().disk_write_codon
-                                     : t + costs().disk_read + n * costs().disk_read_codon;
+        const bool store = p.sel.disk[c.bx] == 1;
+        const u64 access = store ? costs().disk_write : costs().disk_read;
+        const u64 per = store ? costs().disk_write_codon : costs().disk_read_codon;
+        if (!s.disk_.tiered() && p.disk_speed == 1.0f) // (exactly as before)
+            return t + access + n * per;
+        u32 na = 0;
+        if (!s.disk_.archive_in(c.body, c.ax, c.cx, &na))
+            na = 0;
+        const double d = disk_scale(static_cast<double>(access), static_cast<double>(per), c.cx - na, na);
+        return t + static_cast<u64>(d < 1.8e19 ? d : 1.8e19);
     }
 
     // An instruction longer than a tick of a whole core's time becomes an
@@ -2589,15 +2654,15 @@ bool Soup::sense_reading(u32 b, u32 r, u32 ci, u32* v) const {
             return false;
         *v = ports_.degree;
         return true;
-    case 15: // Phase 4: my disk codons
-        if (!p_->disk)
+    case 15: // Phase 4: my disk codons (W4: both tiers, the range DISK addresses)
+        if (!disk_on())
             return false;
         *v = disk_.total[b];
         return true;
-    case 16: // free disk codons on the node
-        if (!p_->disk)
+    case 16: // free disk codons on the node (W4: the fast disk's; the archive has no reading)
+        if (!disk_on())
             return false;
-        *v = disk_.free;
+        *v = disk_.fast_free();
         return true;
     case 17: // node health 0-100 (the lifecycle): leaving a dying node can evolve
         if (!lifecycle())

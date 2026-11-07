@@ -9,7 +9,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 - **Families:** a key with a `<placeholder>` stands for one setting per member listed.
 - **Needs:** the switch the setting depends on; it does nothing while that is off.
 
-275 settings, 77 of them from 14 families; 11 hidden (tests and demos).
+285 settings, 83 of them from 14 families; 11 hidden (tests and demos).
 
 ## Contents
 
@@ -113,12 +113,12 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 
 | Key | Kind | Default | Range | Setting |
 |---|---|---|---|---|
-| `<spread>.spread` | number | 0 | 0 to 4 | **Spread of &lt;spread&gt;**. How unevenly &lt;spread&gt; are shared out over the nodes: 0 even; higher, richer and poorer nodes. For each of: `res.memory.spread`, `res.cpu.spread`, `res.gpu.spread`, `res.npu.spread`, `res.disk.spread`, `res.ecpu.spread`. Needs `world.graph=landscape`. |
-| `<spread>.smooth` | number | 0 | 0 to 1 | **Smoothness of &lt;spread&gt;**. 0: each node on its own; 1: rich and poor regions. For each of: `res.memory.smooth`, `res.cpu.smooth`, `res.gpu.smooth`, `res.npu.smooth`, `res.disk.smooth`, `res.ecpu.smooth`. Needs `world.graph=landscape`. |
-| `<spread>.barren` | number | 0 | 0 to 1 | **Barren for &lt;spread&gt;**. The fraction of nodes with (almost) none. For each of: `res.memory.barren`, `res.cpu.barren`, `res.gpu.barren`, `res.npu.barren`, `res.disk.barren`, `res.ecpu.barren`. Needs `world.graph=landscape`. |
-| `<spread>.hotspots` | whole | 0 | 0 to 10000 | **Hotspots of &lt;spread&gt;**. Hotspots: places where there is much more. For each of: `res.memory.hotspots`, `res.cpu.hotspots`, `res.gpu.hotspots`, `res.npu.hotspots`, `res.disk.hotspots`, `res.ecpu.hotspots`. Needs `world.graph=landscape`. |
-| `<spread>.hotspot_boost` | number | 2 | 0 to 1000 | **Hotspot boost for &lt;spread&gt;**. How much more a hotspot has at its centre. For each of: `res.memory.hotspot_boost`, `res.cpu.hotspot_boost`, `res.gpu.hotspot_boost`, `res.npu.hotspot_boost`, `res.disk.hotspot_boost`, `res.ecpu.hotspot_boost`. Needs `world.graph=landscape`. |
-| `<spread>.against` | choice | none | none, spark, memory, cpu, gpu, npu, disk, ecpu | **&lt;spread&gt; against**. Rich where another distribution is poor (its noise field the other way round); not itself. For each of: `res.memory.against`, `res.cpu.against`, `res.gpu.against`, `res.npu.against`, `res.disk.against`, `res.ecpu.against`. Needs `world.graph=landscape`. |
+| `<spread>.spread` | number | 0 | 0 to 4 | **Spread of &lt;spread&gt;**. How unevenly &lt;spread&gt; are shared out over the nodes: 0 even; higher, richer and poorer nodes. For each of: `res.memory.spread`, `res.cpu.spread`, `res.gpu.spread`, `res.npu.spread`, `res.disk.spread`, `res.ecpu.spread`, `res.archive.spread`. Needs `world.graph=landscape`. |
+| `<spread>.smooth` | number | 0 | 0 to 1 | **Smoothness of &lt;spread&gt;**. 0: each node on its own; 1: rich and poor regions. For each of: `res.memory.smooth`, `res.cpu.smooth`, `res.gpu.smooth`, `res.npu.smooth`, `res.disk.smooth`, `res.ecpu.smooth`, `res.archive.smooth`. Needs `world.graph=landscape`. |
+| `<spread>.barren` | number | 0 | 0 to 1 | **Barren for &lt;spread&gt;**. The fraction of nodes with (almost) none. For each of: `res.memory.barren`, `res.cpu.barren`, `res.gpu.barren`, `res.npu.barren`, `res.disk.barren`, `res.ecpu.barren`, `res.archive.barren`. Needs `world.graph=landscape`. |
+| `<spread>.hotspots` | whole | 0 | 0 to 10000 | **Hotspots of &lt;spread&gt;**. Hotspots: places where there is much more. For each of: `res.memory.hotspots`, `res.cpu.hotspots`, `res.gpu.hotspots`, `res.npu.hotspots`, `res.disk.hotspots`, `res.ecpu.hotspots`, `res.archive.hotspots`. Needs `world.graph=landscape`. |
+| `<spread>.hotspot_boost` | number | 2 | 0 to 1000 | **Hotspot boost for &lt;spread&gt;**. How much more a hotspot has at its centre. For each of: `res.memory.hotspot_boost`, `res.cpu.hotspot_boost`, `res.gpu.hotspot_boost`, `res.npu.hotspot_boost`, `res.disk.hotspot_boost`, `res.ecpu.hotspot_boost`, `res.archive.hotspot_boost`. Needs `world.graph=landscape`. |
+| `<spread>.against` | choice | none | none, spark, memory, cpu, gpu, npu, disk, ecpu, archive | **&lt;spread&gt; against**. Rich where another distribution is poor (its noise field the other way round); not itself. For each of: `res.memory.against`, `res.cpu.against`, `res.gpu.against`, `res.npu.against`, `res.disk.against`, `res.ecpu.against`, `res.archive.against`. Needs `world.graph=landscape`. |
 | `vary.<vres>` | number | 0 | 0 to 1 | **Vary &lt;vres&gt;**. How much &lt;vres&gt; varies from node to node: each node gets 1 + this x its noise field (0 = all the same). For each of: `vary.soup_size`, `vary.millicores`, `vary.gpus`, `vary.npus`, `vary.spark_rate`, `vary.disk`. Needs `world.graph=procedural`. |
 | `vary.<vprop>` | number | 0 | 0 to 1 | **Vary &lt;vprop&gt;**. How much &lt;vprop&gt; varies from node to node: each node gets 1 + this x its noise field (0 = all the same). For each of: `vary.cool`, `vary.radiation`, `vary.volatility`, `vary.endurance`, `vary.noise`. Needs `world.graph=procedural\|landscape`. |
 | `vent.spacing` | whole | 4096 | 0 to 16777216 | **Vent spacing**. Codons of soup per vent (0 = no vents). Vents write fresh random codons into waste near them. |
@@ -148,7 +148,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `spark.barren` | number | 0 | 0 to 1 | **Barren for sparks**. The fraction of nodes with (almost) none. Needs `world.graph=landscape`. |
 | `spark.hotspots` | whole | 0 | 0 to 10000 | **Hotspots of sparks**. Hotspots: places where there is much more. Needs `world.graph=landscape`. |
 | `spark.hotspot_boost` | number | 2 | 0 to 1000 | **Hotspot boost for sparks**. How much more a hotspot has at its centre. Needs `world.graph=landscape`. |
-| `spark.against` | choice | none | none, spark, memory, cpu, gpu, npu, disk, ecpu | **sparks against**. Rich where another distribution is poor (its noise field the other way round); not itself. Needs `world.graph=landscape`. |
+| `spark.against` | choice | none | none, spark, memory, cpu, gpu, npu, disk, ecpu, archive | **sparks against**. Rich where another distribution is poor (its noise field the other way round); not itself. Needs `world.graph=landscape`. |
 | `spark.rate` | number, log | 0 | 0 to 1000000 | **Spark rate**. Expected sparks per node per tick: a random run of waste gets a CPU (a live knob). |
 | `spark.initial` | whole | 0 | 0 to 10000000 | **Initial sparks**. Sparks at tick 0, per node. |
 | `spark.grant` | whole | 10 | 1 to 10000000 | **Spark grant**. Millicores a spark draws from the free pool (a live knob). |
@@ -208,6 +208,10 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `disk.cost_per_codon` | number | 0.25 | 0 to 1000000 | **DISK cost per codon**. ... plus this per codon moved. Needs `world.disk`. |
 | `disk.rot` | number, log | 1e-08 (computed) | 0 to 1 | **Disk rot**. The chance per disk codon per tick of a bit flip (default 1e-8 with nova_v2, 1e-6 with other tables). Needs `world.disk`. |
 | `disk.decay` | number, log | 1e-06 (computed) | 0 to 1 | **Fossil decay**. The chance per free disk codon (a fossil) per tick that it loses a set bit (default 1e-6 with nova_v2, else 0). Needs `world.disk`. |
+| `world.archive` | whole | 1024 (computed) | 0 to 16777216 | **Archive size**. Archive codons per node: a slow, near-permanent second disk tier (default a quarter of world.disk; 0 = no archive). |
+| `archive.rot` | number, log | 1e-10 (computed) | 0 to 1 | **Archive rot**. The chance per archive codon per tick of a bit flip (default a hundredth of disk.rot). Needs `world.archive`. |
+| `archive.decay` | number, log | 1e-08 (computed) | 0 to 1 | **Archive fossil decay**. The chance per free archive codon (a fossil) per tick that it loses a set bit (default a hundredth of disk.decay). Needs `world.archive`. |
+| `archive.slow` | number | 10 | 1 to 1000000 | **Archive slowness**. Each DISK op on the archive costs this many times the fast disk's, for its access and per codon. Needs `world.archive`. |
 
 ## GPU
 
@@ -339,7 +343,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | Key | Kind | Default | Range | Setting |
 |---|---|---|---|---|
 | `budget.memory` | text | off | text | **Memory budget**. off, a percentage of the RAM available (25%) or an amount (24GB): sets world.soup_size, the mean per node. |
-| `budget.disk` | text | off | text | **Disk budget**. off, a percentage of the free space at disk.path (20%) or an amount (100GB): sets world.disk. Needs `disk.path`. |
+| `budget.disk` | text | off | text | **Disk budget**. off, a percentage of the free space at disk.path (20%) or an amount (100GB): sets world.disk (the archive, world.archive, comes on top). Needs `disk.path`. |
 | `budget.gpu` | text | off | text | **GPU budget**. off or a percentage (50%): a calibration sizes gpu.elements (and warp.capacity, with warps) to keep the GPU about that busy. |
 | `budget.npu` | text | off | text | **NPU budget**. off or a percentage (50%): a calibration sizes npu.macs to keep the NPU about that busy. Needs `accel.mode=async`. |
 | `budget.threads` | text | all_but_one | text | **Threads**. Threads when run.threads is 0: all, all_but_one, a count, or a percentage of the logical processors. |

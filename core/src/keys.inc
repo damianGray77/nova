@@ -175,6 +175,7 @@ NOVA_MEMBER("spread", "res.gpu", "GPU units", "Resources")
 NOVA_MEMBER("spread", "res.npu", "NPU units", "Resources")
 NOVA_MEMBER("spread", "res.disk", "disk", "Resources")
 NOVA_MEMBER("spread", "res.ecpu", "E cores", "Resources")
+NOVA_MEMBER("spread", "res.archive", "archive", "Resources") // disk tiers (docs/world-plan.md W4)
 NOVA_NUMBER("<spread>.spread", 0, 0, 4, 0, "", "Spread of <spread>", "world.graph=landscape",
             "How unevenly <spread> are shared out over the nodes: 0 even; higher, richer and poorer nodes.")
 NOVA_NUMBER("<spread>.smooth", 0, 0, 1, 0, "", "Smoothness of <spread>", "world.graph=landscape",
@@ -185,7 +186,7 @@ NOVA_WHOLE("<spread>.hotspots", 0, 0, 10000, 0, "", "Hotspots of <spread>", "wor
            "Hotspots: places where there is much more.")
 NOVA_NUMBER("<spread>.hotspot_boost", 2, 0, 1000, 0, "", "Hotspot boost for <spread>", "world.graph=landscape",
             "How much more a hotspot has at its centre.")
-NOVA_CHOICE("<spread>.against", "none", "none spark memory cpu gpu npu disk ecpu", 0, "",
+NOVA_CHOICE("<spread>.against", "none", "none spark memory cpu gpu npu disk ecpu archive", 0, "",
             "<spread> against", "world.graph=landscape",
             "Rich where another distribution is poor (its noise field the other way round); not itself.")
 // vary.*: node properties varied by noise fields (procedural worlds; in a
@@ -344,6 +345,18 @@ NOVA_NUMBER("disk.rot", 1e-8, 0, 1, kKeyLog | kKeyComputed, "Disk", "Disk rot", 
 NOVA_NUMBER("disk.decay", 1e-6, 0, 1, kKeyLog | kKeyComputed, "Disk", "Fossil decay", "world.disk",
             "The chance per free disk codon (a fossil) per tick that it loses a set bit (default 1e-6 with nova_v2, "
             "else 0).")
+// Disk tiers (docs/world-plan.md W4): the archive, a slow, near-permanent
+// second tier on every node.
+NOVA_WHOLE("world.archive", 1024, 0, 1u << 24, kKeyComputed, "Disk", "Archive size", "",
+           "Archive codons per node: a slow, near-permanent second disk tier (default a quarter of world.disk; 0 = "
+           "no archive).")
+NOVA_NUMBER("archive.rot", 1e-10, 0, 1, kKeyLog | kKeyComputed, "Disk", "Archive rot", "world.archive",
+            "The chance per archive codon per tick of a bit flip (default a hundredth of disk.rot).")
+NOVA_NUMBER("archive.decay", 1e-8, 0, 1, kKeyLog | kKeyComputed, "Disk", "Archive fossil decay", "world.archive",
+            "The chance per free archive codon (a fossil) per tick that it loses a set bit (default a hundredth of "
+            "disk.decay).")
+NOVA_NUMBER("archive.slow", 10, 1, 1000000, 0, "Disk", "Archive slowness", "world.archive",
+            "Each DISK op on the archive costs this many times the fast disk's, for its access and per codon.")
 
 // ---------------------------------------------------------------------------
 // GPU: the in-world GPU, warps, and the real devices
@@ -550,7 +563,8 @@ NOVA_TEXT("budget.memory", "off", 0, "Budgets", "Memory budget", "",
           "off, a percentage of the RAM available (25%) or an amount (24GB): sets world.soup_size, the mean per "
           "node.")
 NOVA_TEXT("budget.disk", "off", 0, "Budgets", "Disk budget", "disk.path",
-          "off, a percentage of the free space at disk.path (20%) or an amount (100GB): sets world.disk.")
+          "off, a percentage of the free space at disk.path (20%) or an amount (100GB): sets world.disk (the "
+          "archive, world.archive, comes on top).")
 NOVA_TEXT("budget.gpu", "off", 0, "Budgets", "GPU budget", "",
           "off or a percentage (50%): a calibration sizes gpu.elements (and warp.capacity, with warps) to keep the "
           "GPU about that busy.")

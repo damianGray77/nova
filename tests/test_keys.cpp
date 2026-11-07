@@ -141,7 +141,8 @@ void test_entries() {
 
 // Families are written once and expand for every member.
 void test_families() {
-    const char* const spreads[] = {"spark", "res.memory", "res.cpu", "res.gpu", "res.npu", "res.disk", "res.ecpu"};
+    const char* const spreads[] = {"spark",   "res.memory", "res.cpu",  "res.gpu",
+                                   "res.npu", "res.disk",   "res.ecpu", "res.archive"}; // (archive: W4)
     const char* const leaves[] = {"spread", "smooth", "barren", "hotspots", "hotspot_boost", "against"};
     u32 found = 0;
     for (const char* s : spreads) {
@@ -152,7 +153,7 @@ void test_families() {
             found += k && k->family && strncmp(k->family, "<spread>.", 9) == 0;
         }
     }
-    CHECK(found == 42);
+    CHECK(found == 48);
     CHECK(strcmp(key_find("spark.spread")->group, "Sparks") == 0);
     CHECK(strcmp(key_find("res.cpu.spread")->group, "Resources") == 0);
     CHECK(strcmp(key_find("res.gpu.against")->def_text, "none") == 0);

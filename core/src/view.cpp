@@ -304,11 +304,12 @@ void ViewFrame::clear_new() {
 }
 
 // Sums: the early tallies, the link counts, the warp tallies, Phase 9's
-// actions and 9c's thread tallies, Phase 10's (e_held, 73, is a gauge), and
-// dormancy's five (drifting and resting, 88 and 89, are gauges).
+// actions and 9c's thread tallies, Phase 10's (e_held, 73, is a gauge),
+// dormancy's five (drifting and resting, 88 and 89, are gauges), and the disk
+// tiers' archive stores and loads (91, 92; archive_held, 90, is a gauge).
 bool stats_column_is_sum(u32 i) {
     return (i >= 3 && i < 42) || (i >= 49 && i <= 51) || (i >= 60 && i <= 64) || (i >= 67 && i <= 72) ||
-           (i >= 74 && i <= 82) || (i >= 83 && i <= 87);
+           (i >= 74 && i <= 82) || (i >= 83 && i <= 87) || (i >= 91 && i <= 92);
 }
 
 void chart_row(const StatsRow& r, double* out) {

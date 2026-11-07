@@ -45,6 +45,7 @@ void suite_costs();
 void suite_ecology();
 void suite_keys();
 void suite_substrates(); // a varied world (docs/world-plan.md W1, W2, W5)
+void suite_tiers();      // disk tiers (docs/world-plan.md W4)
 
 namespace {
 
@@ -94,6 +95,7 @@ const Suite kSuites[] = {
     {"ecology", suite_ecology},
     {"keys", suite_keys},
     {"substrates", suite_substrates},
+    {"tiers", suite_tiers},
 };
 
 } // namespace
@@ -133,9 +135,11 @@ const char* const kLegacyDefaults ="accel.mode = instant\n"
                                     "edge.failure = 0\n"
                                     "world.land = 1\n"
                                     "world.drift = 0\n"
-                                    // a varied world (docs/world-plan.md W9): substrates and sparks by activity off
+                                    // a varied world (docs/world-plan.md W9): substrates, sparks by activity
+                                    // and the archive (disk tiers, W4) off
                                     "substrate.enabled = false\n"
-                                    "spark.activity = 0\n";
+                                    "spark.activity = 0\n"
+                                    "world.archive = 0\n";
 
 int main(int argc, char** argv) {
     nova::Config::ParseError pe;

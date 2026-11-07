@@ -458,7 +458,11 @@ bool resolve_budgets(Config& cfg, u32 threads, TextBuf* notes, TextBuf* err) {
     // --- does it fit? (C9) ------------------------------------------------------------
     if (soup) {
         const double size = static_cast<double>(key_peek_u64(cfg, "world.soup_size"));
-        const double disk = static_cast<double>(key_peek_u64(cfg, "world.disk"));
+        // Disk tiers (docs/world-plan.md W4): the archive shares the disk
+        // tier's storage, on top of world.disk (a quarter more by default).
+        const u64 fast = key_peek_u64(cfg, "world.disk");
+        const u32 archive = key_u32(cfg, "world.archive", key_default(static_cast<double>(fast / 4)));
+        const double disk = static_cast<double>(fast) + static_cast<double>(archive);
         const bool in_file = dpath.size() > 0;
         double ram = static_cast<double>(nodes) * size * kRamPerCodon;
         if (!in_file)
@@ -484,7 +488,7 @@ bool resolve_budgets(Config& cfg, u32 threads, TextBuf* notes, TextBuf* err) {
                 gb(t, need);
                 t.append(" and the volume has ");
                 gb(t, static_cast<double>(free_b));
-                t.append(" free: lower world.disk or use budget.disk");
+                t.append(" free: lower world.disk or world.archive, or use budget.disk");
                 return fail("world.disk", t.c_str());
             }
         }

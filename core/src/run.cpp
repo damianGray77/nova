@@ -51,8 +51,9 @@ bool Run::init_from_snapshot(const u8* data, usize n, u32 threads, TextBuf* err,
         return false;
     }
     // A varied world (docs/world-plan.md W9): a snapshot from before v4 comes
-    // from a world without substrates or sparks by activity, so it resumes
-    // with both off, unless its config (or an edit above) names them.
+    // from a world without substrates, sparks by activity or the archive (disk
+    // tiers, W4; its disk section has none), so it resumes with all three
+    // off, unless its config (or an edit above) names them.
     if (h.version < 4 && key_peek_str(config_, "world.model").eq("soup")) {
         const Str g = key_peek_str(config_, "world.graph");
         const bool map = g.eq("procedural") || g.eq("landscape"); // (substrates are read only there)
@@ -60,6 +61,8 @@ bool Run::init_from_snapshot(const u8* data, usize n, u32 threads, TextBuf* err,
             config_.set("spark.activity", "0");
         if (map && !config_.has("substrate.enabled"))
             config_.set("substrate.enabled", "false");
+        if (!config_.has("world.archive"))
+            config_.set("world.archive", "0");
     }
     budget_notes_.clear(); // a snapshot's budgets were resolved when it ran: this only checks the fit
     if (!resolve_budgets(config_, threads ? threads : ThreadPool::hardware_threads(), &budget_notes_, err))

@@ -40,14 +40,17 @@ const char* const kColumns[kStatsColumns] = {
     "died_halted",  "died_frozen",  "died_worn",
     // dormancy and drift (five sums, then two gauges)
     "dormant_started", "dormant_woke", "dormant_expired", "dormant_eaten", "dormant_hops", "drifting", "resting",
+    // disk tiers (docs/world-plan.md W4): a gauge, then two sums
+    "archive_held", "archive_stores", "archive_loads",
     "compress",     "ambient"};
 // The first 39 tally fields fill columns 3-41; Phase 8's five go after
 // live_nodes, then Phase 9's four after the warp gauges, then Phase 9c's two
-// and its gauge, then Phase 10's nine, then dormancy's five and its gauges.
+// and its gauge, then Phase 10's nine, then dormancy's five and its gauges,
+// then the disk tiers' gauge and two.
 inline constexpr u32 kTallyEarly = 39, kTallyWarp = 5, kTallyAction = 4, kTallyThread = 2, kTallyLife = 9,
-                     kTallyDormant = 5;
+                     kTallyDormant = 5, kTallyArchive = 2;
 static_assert(sizeof(SoupTally) / sizeof(u64) ==
-                  kTallyEarly + kTallyWarp + kTallyAction + kTallyThread + kTallyLife + kTallyDormant,
+                  kTallyEarly + kTallyWarp + kTallyAction + kTallyThread + kTallyLife + kTallyDormant + kTallyArchive,
               "a SoupTally field was added: update kColumns");
 
 } // namespace
@@ -84,7 +87,7 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
     const u64 links = total_links(w, LinkKind::all), inject = total_links(w, LinkKind::inject),
               gpu = total_links(w, LinkKind::gpu);
     u64 gpu_held = 0, npu_held = 0, max_depth = 0, lineages = 0, top = 0, top_genos = 0, colonised = 0,
-        disk_held = 0, warps = 0, gpu_bodies = 0, e_held = 0;
+        disk_held = 0, warps = 0, gpu_bodies = 0, e_held = 0, archive_held = 0;
     double comp = 0, ambient = 0;
     for (u32 n = 0; n < w.node_count(); ++n) {
         const Soup& s = w.node_soup(n);
@@ -97,6 +100,7 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
             comp += estimate_compressibility(s.mem(), s.size()).ratio;
         ambient += s.ambient();
         disk_held += s.params().disk - s.free_disk();
+        archive_held += s.params().archive - s.free_archive(); // disk tiers (W4)
         e_held += s.e_held(); // Phase 9c
         gpu_held += s.params().gpus - s.free_gpus();
         npu_held += s.params().npus - s.free_npus();
@@ -119,7 +123,7 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
                         disk_held,       w.live_nodes()};
     const usize nt = sizeof tail / sizeof tail[0];
     static_assert(3 + kTallyEarly + sizeof tail / sizeof tail[0] + kTallyWarp + 2 + kTallyAction + kTallyThread + 1 +
-                          kTallyLife + kTallyDormant + 2 ==
+                          kTallyLife + kTallyDormant + 2 + 1 + kTallyArchive ==
                       kStatsIntColumns,
                   "stats row shape");
     for (usize i = 0; i < nt; ++i)
@@ -144,6 +148,11 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
         resting += w.node_soup(n).resting_count();
     v[dz + kTallyDormant] = w.drifting();
     v[dz + kTallyDormant + 1] = resting;
+    // Disk tiers (W4): archive held now, then the archive's DISK stores and loads.
+    const usize az = dz + kTallyDormant + 2;
+    v[az] = archive_held;
+    for (usize i = 0; i < kTallyArchive; ++i)
+        v[az + 1 + i] = t[kTallyEarly + kTallyWarp + kTallyAction + kTallyThread + kTallyLife + kTallyDormant + i];
     marks->links = links;
     marks->inject = inject;
     marks->gpu = gpu;

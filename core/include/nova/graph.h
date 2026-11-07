@@ -66,7 +66,11 @@ enum NoiseField : u32 {
     kFieldWarpY,
     // Phase 9c
     kFieldEcpu,    // E millicores' share of a site's (landscapes: res.ecpu)
+    // Disk tiers (docs/world-plan.md W4)
+    kFieldArchive, // the archive (landscapes: res.archive)
     kFieldCount
+    // (Ids from 256 up are the substrates' fields, kFieldSubstrate + type in
+    // landscape.h: kFieldCount must stay below it, which landscape.cpp checks.)
 };
 
 struct GraphParams {

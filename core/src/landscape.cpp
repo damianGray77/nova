@@ -312,6 +312,11 @@ void spread_total(const Array<double>& w, u64 total, u64 minimum, Array<u64>* ou
 
 // --- substrates (docs/world-plan.md W1, W2) ----------------------------------------
 
+// The substrates' noise fields (kFieldSubstrate + type) sit above every
+// NoiseField id, so no type shares a field (a permutation) with a resource or
+// with the archive's (disk tiers' kFieldArchive, the enum's last).
+static_assert(kFieldCount <= kFieldSubstrate, "a NoiseField id would collide with the substrates' fields");
+
 const char* substrate_label(u32 type) {
     static const char* const n[kSubstrateTypes] = {"P cores",     "E cores",     "GPU",       "NPU",
                                                    "fast memory", "slow memory", "fast disk", "slow disk"};

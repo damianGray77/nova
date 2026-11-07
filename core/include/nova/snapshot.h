@@ -27,10 +27,16 @@ namespace nova {
 // v3 (docs/dormancy-plan.md D7): the lifecycle section is kept only with wear
 // on (node.endurance > 0); before, every map world had one for its starvation
 // meter, which v2 and v1 snapshots still carry and Soup::load drops.
-// v4 (docs/world-plan.md W9; shared with the disasters): with substrates on,
-// each node's substrate levels after the lifecycle section (checked against
-// those the config gives). Snapshots before v4 resume with substrates and
-// sparks by activity off unless their config says otherwise (Run).
+// v4 (docs/world-plan.md W9; one bump shared by the varied world's features
+// and the disasters):
+//   - substrates (W2): with substrates on, each node's substrate levels after
+//     the lifecycle section (checked against those the config gives);
+//   - disk tiers (W4): each soup's disk section holds the archive after the
+//     fast disk (contents, owners, extents and stamps in the same arrays),
+//     and a cargo carries its archive share.
+// Snapshots before v4 resume with substrates, sparks by activity and the
+// archive off (substrate.enabled = false, spark.activity = 0, world.archive =
+// 0) unless their config or an edit names them (Run::init_from_snapshot).
 inline constexpr u32 kSnapshotVersion = 4;
 inline constexpr u32 kSnapshotOldest = 1;
 

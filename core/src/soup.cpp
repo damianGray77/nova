@@ -218,6 +218,14 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     p->disk_cost_base = key_u32(cfg, "disk.cost_base");
     p->disk_cost_per_codon = key_f64(cfg, "disk.cost_per_codon");
     p->disk_rot = key_f64(cfg, "disk.rot", key_default(p->disk ? (p->table.op[0] == Op::inert ? 1e-8 : 1e-6) : 0.0)); // Phase 10: rarer with decay
+    // Disk tiers (docs/world-plan.md W4): the archive, a quarter of the disk,
+    // rotting at a hundredth of its rate, archive.slow times dearer to use.
+    // 0 = no archive: everything as before. (archive.decay: after disk.decay.)
+    p->archive = key_u32(cfg, "world.archive", key_default(p->disk / 4));
+    p->archive_rot = key_f64(cfg, "archive.rot", key_default(p->disk_rot / 100));
+    p->archive_slow = key_f64(cfg, "archive.slow");
+    // (the tiers' substrate speeds, disk_speed and archive_speed, are set to 1
+    // below with the others; the world sets them per node: W1)
     p->volatility = key_f64(cfg, "mem.volatility");
     p->wipe_pages = key_u32(cfg, "mem.wipe_pages");
     // Remnants and salvage (Phase 4, Damian): 0 = off, every read as before.
@@ -256,7 +264,7 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
         sense_n = kSenseReadingsNpu;
     if (p->dispersal)
         sense_n = kSenseReadingsWorld;
-    if (p->disk)
+    if (p->disk || p->archive) // (W4: an archive alone is a disk too)
         sense_n = kSenseReadingsDisk;
     if (p->endurance > 0)
         sense_n = kSenseReadingsLife; // + node health
@@ -330,6 +338,7 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     if (p->mem_decay < 0) // (below 0 means the default too)
         p->mem_decay = auto_decay;
     p->disk_decay = key_f64(cfg, "disk.decay", key_default(p->disk && p->table.op[0] == Op::inert ? 1e-6 : 0.0));
+    p->archive_decay = key_f64(cfg, "archive.decay", key_default(p->disk_decay / 100)); // disk tiers (W4)
     p->vent_spacing = key_u32(cfg, "vent.spacing");
     p->vent_rate = key_u32(cfg, "vent.rate");
     p->vent_radius = key_u32(cfg, "vent.radius");
@@ -347,9 +356,11 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
         sense_n = kSenseReadingsThreads; // + my threads, my kind, my E millicores, free E millicores
     m.sense_n = static_cast<u8>(sense_n);
     m.res_n = static_cast<u8>(p->e_share > 0 ? 6 : (p->npus ? 5 : 4)); // Phase 9c: 5 is E millicores
+    if (p->archive) // disk tiers (W4): 6 is the archive (without one, the maps and draws are as before)
+        m.res_n = 7;
     identity_map(m.sense, kSenseReadingsMax);
     identity_map(m.disk, 3);
-    identity_map(m.res, 6);
+    identity_map(m.res, 7);
     identity_map(m.head, 2);
     identity_map(m.divide, 4);
     identity_map(m.gpu, kGpuOps);
@@ -368,7 +379,7 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
             draw_selector_map(r, m.gpu, kGpuOps); // compare (the no-op) never stays at 0
         if (p->npus)
             draw_selector_map(r, m.npu, kNpuOps);
-        if (p->disk) // compare (changes nothing) never stays at 0
+        if (p->disk || p->archive) // compare (changes nothing) never stays at 0 (W4: an archive alone too)
             draw_selector_map(r, m.disk, 3);
         m.shuffled = 1;
     }
@@ -536,16 +547,18 @@ void Soup::init(const SoupParams* p, u64 seed, u32 node, u32 life, const Ruins* 
     gpu_.init(p->gpus);
     npu_.init(p->npus);
     // The disk (Phase 4): random contents, all free, from its own stream so the
-    // memory and sparks above are drawn exactly as without one.
-    if (p->disk) {
+    // memory and sparks above are drawn exactly as without one. W4: the
+    // archive follows the fast disk in the same ledger (and the same files),
+    // its contents the same stream's next draws.
+    if (p->disk || p->archive) {
         // Phase 7b: on real disk, in this node's files (bound once, kept for
         // every life of the node).
         if (disk_folder_ && !disk_.mem.in_file() && !disk_.bind_files(disk_folder_, node))
             NOVA_FATAL("Soup: cannot create the disk tier's files in disk.path");
         Rng dr(seed ^ 0x6469736B00000000ull, node, Rng::kInitTick - life); // "disk"
-        disk_.init(p->disk, dr);
+        disk_.init(p->disk + p->archive, dr, p->disk);
     } else {
-        disk_.init(0, rng_);
+        disk_.init(0, rng_, 0);
     }
     // Signals (Phase 4): nothing emitted or heard yet.
     emit_.resize(p->signal_channels);
@@ -561,7 +574,7 @@ void Soup::init(const SoupParams* p, u64 seed, u32 node, u32 life, const Ruins* 
     disk_.stamp.clear();
     if (p->salvage_ratio > 0) {
         stamp_.resize(n);
-        disk_.stamp.resize(p->disk);
+        disk_.stamp.resize(disk_.size()); // (W4: both tiers)
     }
     // Asynchronous accelerator ops (Phase 5): nothing issued yet.
     issued_.clear();
@@ -627,14 +640,24 @@ void Soup::init(const SoupParams* p, u64 seed, u32 node, u32 life, const Ruins* 
             for (u32 i = 0; i < mo && i < ruins->mem_stamp.size(); ++i)
                 stamp_[i] = ruins->mem_stamp[i];
         weather(mem_.data(), mo, p->rot_rate * static_cast<double>(ruins->fallow));
-        const u32 dn = disk_.size();
-        const u32 dov = min_of(dn, static_cast<u32>(ruins->disk.size()));
+        // W4: each tier's overlap with its own old tier (rf: where the old
+        // archive began; without archives both are the whole disk).
+        const u32 rn = static_cast<u32>(ruins->disk.size());
+        const u32 rf = min_of(ruins->disk_fast, rn);
+        const u32 dov = min_of(disk_.fast, rf);
+        const u32 aov = min_of(disk_.size() - disk_.fast, rn - rf);
         for (u32 i = 0; i < dov; ++i)
             disk_.mem[i] = ruins->disk[i];
-        if (!disk_.stamp.empty())
+        for (u32 i = 0; i < aov; ++i)
+            disk_.mem[disk_.fast + i] = ruins->disk[rf + i];
+        if (!disk_.stamp.empty()) {
             for (u32 i = 0; i < dov && i < ruins->disk_stamp.size(); ++i)
                 disk_.stamp[i] = ruins->disk_stamp[i];
+            for (u32 i = 0; i < aov && rf + i < ruins->disk_stamp.size(); ++i)
+                disk_.stamp[disk_.fast + i] = ruins->disk_stamp[rf + i];
+        }
         weather(disk_.mem.data(), dov, p->disk_rot * static_cast<double>(ruins->fallow));
+        weather(disk_.mem.data() + disk_.fast, aov, p->archive_rot * static_cast<double>(ruins->fallow));
         // Phase 10: and decayed (dead matter loses bits; past 8 expected
         // losses a codon, simply gone).
         auto fade = [&wr](u8* m, u32 len, double lambda) {
@@ -655,6 +678,7 @@ void Soup::init(const SoupParams* p, u64 seed, u32 node, u32 life, const Ruins* 
         };
         fade(mem_.data(), mo, p->mem_decay * static_cast<double>(ruins->fallow));
         fade(disk_.mem.data(), dov, p->disk_decay * static_cast<double>(ruins->fallow));
+        fade(disk_.mem.data() + disk_.fast, aov, p->archive_decay * static_cast<double>(ruins->fallow)); // W4
     }
     // Phase 10: the vents' places for this life, from their own stream (so
     // every other draw is as without them).
@@ -875,7 +899,7 @@ u32 Soup::new_body() {
         gpu_.body_slot(b, bodies_.size());
     if (p_->npus)
         npu_.body_slot(b, bodies_.size());
-    if (p_->disk)
+    if (disk_on()) // (W4: a fast disk or an archive)
         disk_.body_slot(b, bodies_.size());
     if (p_->warps) { // Phase 8: no warps yet, nothing carried
         if (warp_head_.size() < bodies_.size()) {
@@ -995,7 +1019,7 @@ u32 Soup::create_body_form(u32 start, u32 len, u32 units, u32 gpus, u32 form) {
 }
 
 bool Soup::arrive(const u8* code, u32 len, u32 millicores, u32 gpus, u32 npus, u32 disk, const CargoTag& tag,
-                  u32 form, u32 emillicores, u8 kind) {
+                  u32 form, u32 emillicores, u8 kind, u32 archive) {
     if (len == 0 || len > p_->size) {
         ++tally_.lost;
         return false;
@@ -1038,6 +1062,8 @@ bool Soup::arrive(const u8* code, u32 len, u32 millicores, u32 gpus, u32 npus, u
         claim_npus(b, npus);
     if (disk && p_->disk) // her disk share, empty, capped by what's free (Phase 4)
         disk_.claim_any(rng_, b, disk);
+    if (archive && p_->archive) // W4: and her archive share, the same way in the archive
+        disk_.claim_any(rng_, b, archive, true);
     if (p_->warps)
         birth(b, at, form);
     if (kinds_on() && bodies_[b].cpus != kNone) // Phase 9c: her thread prefers her divider's kind
@@ -1069,7 +1095,7 @@ void Soup::kill(u32 b) {
         gpu_.release(b, gpu_.count[b]);
     if (p_->npus)
         npu_.release(b, npu_.count[b]);
-    if (p_->disk) // the disk is freed; its contents stay as fossils
+    if (disk_on()) // the disk is freed; its contents stay as fossils (W4: both tiers)
         disk_.release_tail(b, disk_.total[b], g);
     if (p_->warps) // Phase 8: its warps end with it
         kill_warps(b);
@@ -1122,7 +1148,7 @@ bool Soup::go_dormant(u32 b) {
         return false;
     const u32 code = blocks_[k].owned;
     const u32 mem_reserve = B.mem > code ? B.mem - code : 0;
-    const u32 disk_reserve = p_->disk ? disk_.total[b] : 0;
+    const u32 disk_reserve = disk_on() ? disk_.total[b] : 0; // (W4: both tiers)
     if (code == 0 || (mem_reserve == 0 && disk_reserve == 0)) {
         ++frozen_bare_;
         return false;
@@ -1131,7 +1157,10 @@ bool Soup::go_dormant(u32 b) {
     d.on = 1;
     d.dwell = p_->dormant_dwell;
     d.mem_reserve = mem_reserve;
-    d.disk_reserve = disk_reserve;
+    // W4: each tier's reserve apart (the clock spends the fast disk's first;
+    // waking claims each tier's).
+    d.archive_reserve = disk_.tiered() ? disk_.held_in(b, true) : 0;
+    d.disk_reserve = disk_reserve - d.archive_reserve;
     const u32 e = e_units(b);
     d.millicores = B.units - e;
     d.emillicores = e;
@@ -1159,7 +1188,7 @@ bool Soup::go_dormant(u32 b) {
         gpu_.release(b, gpu_.count[b]);
     if (p_->npus)
         npu_.release(b, npu_.count[b]);
-    if (p_->disk)
+    if (disk_on()) // (W4: both tiers)
         disk_.release_tail(b, disk_.total[b], g);
     if (p_->warps)
         kill_warps(b);
@@ -1204,6 +1233,7 @@ void Soup::depart_dormant(u32 b, u32 nbr) {
     dep.gpus = d.gpus;
     dep.npus = d.npus;
     dep.disk = d.disk_reserve;
+    dep.archive = d.archive_reserve; // W4
     dep.form = d.form;
     dep.kind = d.kind;
     dep.dormant = 1;
@@ -1250,6 +1280,8 @@ void Soup::wake(u32 b) {
         claim_npus(b, d.npus);
     if (d.disk_reserve && p_->disk)
         disk_.claim_any(rng_, b, d.disk_reserve);
+    if (d.archive_reserve && p_->archive) // W4: each tier it held, capped by that tier's free codons
+        disk_.claim_any(rng_, b, d.archive_reserve, true);
     d.on = 0;
     if (p_->warps)
         birth(b, start, d.form);
@@ -1284,7 +1316,9 @@ void Soup::rest_tick(u32 b) {
         d.mem_reserve -= d.mem_reserve < p_->dormant_mem_loss ? d.mem_reserve : p_->dormant_mem_loss;
     else if (d.disk_reserve > 0)
         d.disk_reserve -= d.disk_reserve < p_->dormant_disk_loss ? d.disk_reserve : p_->dormant_disk_loss;
-    if (d.mem_reserve == 0 && d.disk_reserve == 0) {
+    else if (d.archive_reserve > 0) // W4: the archive's reserve last, at the disk's rate
+        d.archive_reserve -= d.archive_reserve < p_->dormant_disk_loss ? d.archive_reserve : p_->dormant_disk_loss;
+    if (d.mem_reserve == 0 && d.disk_reserve == 0 && d.archive_reserve == 0) {
         ++tally_.dormant_expired;
         kill(b);
         return;
@@ -1747,7 +1781,7 @@ bool DiskLedger::bind_files(const char* folder, u32 node) {
     return true;
 }
 
-void DiskLedger::init(u32 n, Rng& rng) {
+void DiskLedger::init(u32 n, Rng& rng, u32 fast_n) {
     mem.resize(n);
     for (u32 i = 0; i < n; ++i)
         mem[i] = static_cast<u8>(rng.next() & 63);
@@ -1761,6 +1795,8 @@ void DiskLedger::init(u32 n, Rng& rng) {
     tail.clear();
     total.clear();
     free = n;
+    fast = fast_n < n ? fast_n : n; // W4: [fast, n) is the archive
+    afree = n - fast;
 }
 
 void DiskLedger::body_slot(u32 body, usize nbodies) {
@@ -1776,22 +1812,27 @@ void DiskLedger::body_slot(u32 body, usize nbodies) {
     total[body] = 0;
 }
 
-u32 DiskLedger::find_run(u32 from, u32 len) const {
-    u32 at = free_run_fwd(used.data(), size(), from, len);
-    if (at == kNone && from > 0)
-        at = free_run_fwd(used.data(), size(), 0, len);
+// First fit in [lo, hi) from `from`, then from lo (W4: one tier's range; the
+// whole ledger without an archive, exactly as before).
+u32 DiskLedger::find_run(u32 from, u32 len, u32 lo, u32 hi) const {
+    u32 at = free_run_fwd(used.data(), hi, from, len);
+    if (at == kNone && from > lo)
+        at = free_run_fwd(used.data(), hi, lo, len);
     return at;
 }
 
-u32 DiskLedger::add_extent(u32 body, u32 start, u32 len) {
-    u32 x;
+u32 DiskLedger::new_slot() {
     if (!free_ext.empty()) {
-        x = free_ext.back();
+        const u32 x = free_ext.back();
         free_ext.pop();
-    } else {
-        x = static_cast<u32>(ext.size());
-        ext.push(DiskExtent{});
+        return x;
     }
+    ext.push(DiskExtent{});
+    return static_cast<u32>(ext.size() - 1);
+}
+
+u32 DiskLedger::add_extent(u32 body, u32 start, u32 len) {
+    const u32 x = new_slot();
     ext[x] = DiskExtent{start, len, body, kNone};
     for (u32 a = start; a < start + len; ++a) {
         owner[a] = x;
@@ -1804,13 +1845,18 @@ u32 DiskLedger::add_extent(u32 body, u32 start, u32 len) {
     tail[body] = x;
     total[body] += len;
     free -= len;
+    if (start >= fast) // W4: an archive extent (never without an archive)
+        afree -= len;
     return x;
 }
 
-u32 DiskLedger::alloc_run(Rng& rng, u32 body, u32 len) {
-    if (len == 0 || len > free)
+// W4: each tier is its own range, [0, fast) or [fast, size); without an
+// archive the fast disk is the whole ledger, so every draw is as before.
+u32 DiskLedger::alloc_run(Rng& rng, u32 body, u32 len, bool arch) {
+    const u32 lo = arch ? fast : 0, hi = arch ? size() : fast;
+    if (len == 0 || len > (arch ? afree : free - afree))
         return kNone;
-    const u32 at = find_run(static_cast<u32>(rng.below(size())), len);
+    const u32 at = find_run(lo + static_cast<u32>(rng.below(hi - lo)), len, lo, hi);
     if (at == kNone)
         return kNone;
     const u32 off = total[body];
@@ -1818,11 +1864,11 @@ u32 DiskLedger::alloc_run(Rng& rng, u32 body, u32 len) {
     return off;
 }
 
-u32 DiskLedger::claim_any(Rng& rng, u32 body, u32 count) {
-    const u32 n = size();
-    if (count == 0 || free == 0 || n == 0)
+u32 DiskLedger::claim_any(Rng& rng, u32 body, u32 count, bool arch) {
+    const u32 lo = arch ? fast : 0, hi = arch ? size() : fast, n = hi - lo; // W4: one tier
+    if (count == 0 || (arch ? afree : free - afree) == 0 || n == 0)
         return 0;
-    u32 need = count, a = static_cast<u32>(rng.below(n)), scanned = 0;
+    u32 need = count, a = lo + static_cast<u32>(rng.below(n)), scanned = 0;
     while (need > 0 && scanned < n) {
         if ((used[a >> 6] >> (a & 63)) & 1) {
             ++a;
@@ -1830,7 +1876,7 @@ u32 DiskLedger::claim_any(Rng& rng, u32 body, u32 count) {
         } else {
             const u32 st = a;
             u32 len = 0;
-            while (len < need && a < n && !((used[a >> 6] >> (a & 63)) & 1)) {
+            while (len < need && a < hi && !((used[a >> 6] >> (a & 63)) & 1)) {
                 ++len;
                 ++a;
             }
@@ -1838,8 +1884,8 @@ u32 DiskLedger::claim_any(Rng& rng, u32 body, u32 count) {
             need -= len;
             scanned += len;
         }
-        if (a == n)
-            a = 0;
+        if (a == hi)
+            a = lo;
     }
     return count - need;
 }
@@ -1866,14 +1912,7 @@ u32 DiskLedger::split_tail(u32 body, u32 k) {
         chain = ext[x].next;
     } else { // split x: its first part stays
         const u32 stay = keep - cum;
-        u32 y;
-        if (!free_ext.empty()) {
-            y = free_ext.back();
-            free_ext.pop();
-        } else {
-            y = static_cast<u32>(ext.size());
-            ext.push(DiskExtent{});
-        }
+        const u32 y = new_slot();
         DiskExtent& X = ext[x];
         ext[y] = DiskExtent{X.start + stay, X.len - stay, body, X.next};
         X.len = stay;
@@ -1887,8 +1926,9 @@ u32 DiskLedger::split_tail(u32 body, u32 k) {
     return chain;
 }
 
-void DiskLedger::release_tail(u32 body, u32 k, u32 st) {
-    u32 x = split_tail(body, k);
+// Frees a detached chain: contents stay (fossils); with stamps, codons with
+// stamp 0 take st.
+void DiskLedger::free_chain(u32 x, u32 st) {
     while (x != kNone) {
         DiskExtent& X = ext[x];
         for (u32 a = X.start; a < X.start + X.len; ++a) { // contents stay: fossils
@@ -1898,6 +1938,8 @@ void DiskLedger::release_tail(u32 body, u32 k, u32 st) {
                 stamp[a] = st;
         }
         free += X.len;
+        if (X.start >= fast) // W4: archive codons (never without an archive)
+            afree += X.len;
         const u32 next = X.next;
         X = DiskExtent{0, 0, kNone, kNone};
         free_ext.push(x);
@@ -1905,8 +1947,8 @@ void DiskLedger::release_tail(u32 body, u32 k, u32 st) {
     }
 }
 
-void DiskLedger::move_tail(u32 from, u32 to, u32 k) {
-    u32 x = split_tail(from, k);
+// Appends a detached chain to body `to`'s extents, in order.
+void DiskLedger::append_chain(u32 to, u32 x) {
     if (x == kNone)
         return;
     if (tail[to] == kNone)
@@ -1920,7 +1962,105 @@ void DiskLedger::move_tail(u32 from, u32 to, u32 k) {
     }
 }
 
+void DiskLedger::release_tail(u32 body, u32 k, u32 st) { free_chain(split_tail(body, k), st); }
+
+void DiskLedger::move_tail(u32 from, u32 to, u32 k) { append_chain(to, split_tail(from, k)); }
+
 void DiskLedger::move_all(u32 from, u32 to) { move_tail(from, to, total[from]); }
+
+// --- disk tiers (docs/world-plan.md W4) --------------------------------------
+
+u32 DiskLedger::held_in(u32 body, bool arch) const {
+    u32 n = 0;
+    for (u32 x = head[body]; x != kNone; x = ext[x].next)
+        if ((ext[x].start >= fast) == arch)
+            n += ext[x].len;
+    return n;
+}
+
+bool DiskLedger::archive_in(u32 body, u32 off, u32 n, u32* arch) const {
+    *arch = 0;
+    if (n == 0 || static_cast<u64>(off) + n > total[body])
+        return false;
+    u32 x = head[body];
+    while (off >= ext[x].len) {
+        off -= ext[x].len;
+        x = ext[x].next;
+    }
+    u32 left = n;
+    while (left > 0 && x != kNone) {
+        const u32 take = min_of(left, ext[x].len - off);
+        if (ext[x].start >= fast)
+            *arch += take;
+        left -= take;
+        off = 0;
+        x = ext[x].next;
+    }
+    return left == 0;
+}
+
+// Detaches the body's newest kf fast and ka archive codons (each capped by
+// what it holds there), splitting at most one extent of each tier, and
+// returns the detached chain; both what stays and what goes keep their
+// claim order.
+u32 DiskLedger::split_tiers(u32 body, u32 kf, u32 ka) {
+    const u32 ha = held_in(body, true), hf = total[body] - ha;
+    kf = min_of(kf, hf);
+    ka = min_of(ka, ha);
+    if (kf + ka == 0)
+        return kNone;
+    const u32 keep_f = hf - kf, keep_a = ha - ka;
+    u32 seen_f = 0, seen_a = 0; // codons of each tier passed so far
+    u32 kept_tail = kNone, gone_head = kNone, gone_tail = kNone;
+    u32 x = head[body];
+    head[body] = kNone;
+    auto keep = [&](u32 e) {
+        if (kept_tail == kNone)
+            head[body] = e;
+        else
+            ext[kept_tail].next = e;
+        kept_tail = e;
+    };
+    auto drop = [&](u32 e) {
+        if (gone_tail == kNone)
+            gone_head = e;
+        else
+            ext[gone_tail].next = e;
+        gone_tail = e;
+    };
+    while (x != kNone) {
+        const u32 next = ext[x].next;
+        ext[x].next = kNone;
+        const bool arch = ext[x].start >= fast;
+        u32& seen = arch ? seen_a : seen_f;
+        const u32 limit = arch ? keep_a : keep_f, len = ext[x].len;
+        const u32 stay = seen >= limit ? 0 : min_of(len, limit - seen);
+        seen += len;
+        if (stay == len) {
+            keep(x);
+        } else if (stay == 0) {
+            drop(x);
+        } else { // split x: its first part stays
+            const u32 y = new_slot();
+            ext[y] = DiskExtent{ext[x].start + stay, len - stay, body, kNone};
+            ext[x].len = stay;
+            for (u32 a = ext[y].start; a < ext[y].start + ext[y].len; ++a)
+                owner[a] = y;
+            keep(x);
+            drop(y);
+        }
+        x = next;
+    }
+    tail[body] = kept_tail;
+    total[body] = keep_f + keep_a;
+    return gone_head;
+}
+
+void DiskLedger::release_tiers(u32 body, u32 kf, u32 ka, u32 st) { free_chain(split_tiers(body, kf, ka), st); }
+
+void DiskLedger::move_tiers(u32 from, u32 to, u32 kf, u32 ka) { append_chain(to, split_tiers(from, kf, ka)); }
+
+// --- end disk tiers ------------------------------------------------------------
 
 bool DiskLedger::addresses(u32 body, u32 off, u32 n, Array<u32>* out) const {
     out->clear();
@@ -1944,12 +2084,15 @@ bool DiskLedger::addresses(u32 body, u32 off, u32 n, Array<u32>* out) const {
 }
 
 // Phase 10: free disk codons (fossils) decay like memory's dead matter.
-u32 DiskLedger::decay(Rng& rng, double rate) {
+u32 DiskLedger::decay(Rng& rng, double rate) { return decay_range(rng, rate, 0, size()); }
+
+// W4: over [lo, hi) only (one tier).
+u32 DiskLedger::decay_range(Rng& rng, double rate, u32 lo, u32 hi) {
     u32 n = 0;
-    const double size_d = static_cast<double>(size());
+    const double size_d = static_cast<double>(hi - lo);
     double pos = -log(1.0 - rng.unit()) / rate;
     while (pos < size_d) {
-        const u32 a = static_cast<u32>(pos);
+        const u32 a = lo + static_cast<u32>(pos);
         if (owner[a] == kNone && mem[a]) {
             mem[a] = fade_bit(mem[a], rng);
             ++n;
@@ -1960,12 +2103,15 @@ u32 DiskLedger::decay(Rng& rng, double rate) {
 }
 
 // Slow bit rot over the whole disk, owned or not, sampled like memory's.
-u32 DiskLedger::rot(Rng& rng, double rate) {
+u32 DiskLedger::rot(Rng& rng, double rate) { return rot_range(rng, rate, 0, size()); }
+
+// W4: over [lo, hi) only (one tier).
+u32 DiskLedger::rot_range(Rng& rng, double rate, u32 lo, u32 hi) {
     u32 flips = 0;
-    const double n = static_cast<double>(size());
+    const double n = static_cast<double>(hi - lo);
     double pos = -log(1.0 - rng.unit()) / rate;
     while (pos < n) {
-        mem[static_cast<u32>(pos)] ^= static_cast<u8>(1u << rng.below(6));
+        mem[lo + static_cast<u32>(pos)] ^= static_cast<u8>(1u << rng.below(6));
         ++flips;
         pos += -log(1.0 - rng.unit()) / rate;
     }
@@ -2009,6 +2155,8 @@ bool DiskLedger::check(const Array<Body>& bodies, TextBuf* why) const {
                 return fail("extent list out of range or cyclic at body", b);
             if (ext[x].body != b)
                 return fail("extent list crosses bodies at extent", x);
+            if (ext[x].start < fast && ext[x].start + ext[x].len > fast) // W4: one tier each
+                return fail("extent straddles the archive's boundary at extent", x);
             for (u32 a = ext[x].start; a < ext[x].start + ext[x].len; ++a)
                 if (a >= size() || owner[a] != x || !((used[a >> 6] >> (a & 63)) & 1))
                     return fail("extent ownership wrong at codon", a);
@@ -2024,7 +2172,43 @@ bool DiskLedger::check(const Array<Body>& bodies, TextBuf* why) const {
     for (u32 a = 0; a < size(); ++a)
         if ((owner[a] == kNone) == static_cast<bool>((used[a >> 6] >> (a & 63)) & 1))
             return fail("bitmap disagrees at codon", a);
+    // W4: the archive's free codons counted (none without one).
+    u32 af = 0;
+    for (u32 a = fast; a < size(); ++a)
+        af += owner[a] == kNone ? 1u : 0u;
+    if (fast > size() || af != afree)
+        return fail("archive free count wrong, actual", af);
     return true;
+}
+
+// Disk failure on one tier (docs/disasters-plan.md X5, amended by W4): the
+// tier's holdings are released (in schedule order), resting dormant programs
+// lose that tier's reserve, and every codon of it becomes INERT, stamps
+// cleared. Draws nothing.
+u32 Soup::fail_disk_tier(bool archive) {
+    if (!disk_on())
+        return 0;
+    const u32 lo = archive ? disk_.fast : 0, hi = archive ? disk_.size() : disk_.fast;
+    if (lo == hi)
+        return 0;
+    for (usize k = 0; k < order_.size(); ++k) {
+        const u32 b = order_[k];
+        if (!bodies_[b].alive)
+            continue;
+        const u32 held = disk_.tiered() ? disk_.held_in(b, archive) : disk_.total[b];
+        if (held && disk_.tiered())
+            disk_.release_tiers(b, archive ? 0 : held, archive ? held : 0);
+        else if (held)
+            disk_.release_tail(b, held);
+        if (dormant(b))
+            (archive ? dorm_[b].archive_reserve : dorm_[b].disk_reserve) = 0;
+    }
+    for (u32 a = lo; a < hi; ++a)
+        disk_.mem[a] = 0;
+    if (!disk_.stamp.empty())
+        for (u32 a = lo; a < hi; ++a)
+            disk_.stamp[a] = 0;
+    return hi - lo;
 }
 
 // ---------------------------------------------------------------------------
@@ -2181,6 +2365,7 @@ void Soup::take_ruins(Ruins* out, u64 fallow) const {
     out->mem_stamp.assign(stamp_.data(), stamp_.size());
     out->disk.assign(disk_.mem.data(), disk_.mem.size());
     out->disk_stamp.assign(disk_.stamp.data(), disk_.stamp.size());
+    out->disk_fast = disk_.fast; // W4: where its archive began
     out->fallow = fallow;
 }
 
@@ -2262,15 +2447,23 @@ void Soup::tick_second_parts() {
     accel_wear();
     // Phase 4 hazards, after every earlier draw so worlds without them are
     // unchanged.
-    if (p_->disk && p_->disk_rot > 0)
-        tally_.disk_rot += disk_.rot(rng_, p_->disk_rot);
+    if (p_->disk && p_->disk_rot > 0) // (W4: the fast disk, [0, fast): without an archive, all of it)
+        tally_.disk_rot += disk_.rot_range(rng_, p_->disk_rot, 0, disk_.fast);
     if (p_->volatility > 0)
         volatility();
     // Phase 10, after every earlier draw so worlds without it are unchanged.
     if (p_->mem_decay > 0)
         decay();
     if (p_->disk && p_->disk_decay > 0)
-        tally_.decayed += disk_.decay(rng_, p_->disk_decay);
+        tally_.decayed += disk_.decay_range(rng_, p_->disk_decay, 0, disk_.fast);
+    // Disk tiers (W4): the archive's rot and fossil decay, after every
+    // earlier draw so worlds without an archive are unchanged.
+    if (disk_.tiered()) {
+        if (p_->archive_rot > 0)
+            tally_.disk_rot += disk_.rot_range(rng_, p_->archive_rot, disk_.fast, disk_.size());
+        if (p_->archive_decay > 0)
+            tally_.decayed += disk_.decay_range(rng_, p_->archive_decay, disk_.fast, disk_.size());
+    }
     death_sweep();
     if (!actions_.empty()) // Phase 9
         sweep_actions();
@@ -3039,7 +3232,7 @@ void Soup::hash_into(Hasher& h) const {
         gpu_.hash_into(h);
     if (p_->npus)
         npu_.hash_into(h);
-    if (p_->disk) // Phase 4, likewise
+    if (disk_on()) // Phase 4, likewise (W4: the archive is in the same ledger)
         disk_.hash_into(h);
     if (!stamp_.empty())
         h.bytes(stamp_.data(), stamp_.size() * sizeof(u32));
@@ -3235,6 +3428,11 @@ bool DiskLedger::load(ByteReader& r, u64 nbodies, TextBuf* why) {
             return false;
         }
     }
+    // W4: the archive's free codons follow from its owners (its boundary,
+    // `fast`, from the config, as at init).
+    afree = 0;
+    for (u32 a = fast; a < n; ++a)
+        afree += owner[a] == kNone ? 1u : 0u;
     return true;
 }
 
@@ -3328,7 +3526,7 @@ void Soup::save(ByteWriter& w) const {
         gpu_.save(w);
     if (p_->npus)
         npu_.save(w);
-    if (p_->disk)
+    if (disk_on()) // (W4: the archive is in the same ledger, after the fast disk)
         disk_.save(w);
     if (p_->salvage_ratio > 0)
         put_array(w, stamp_);
@@ -3398,7 +3596,7 @@ bool Soup::load(ByteReader& r, TextBuf* err, u32 version) {
         return false;
     if (p_->npus && !npu_.load(r, nb, err))
         return false;
-    if (p_->disk && !disk_.load(r, nb, err))
+    if (disk_on() && !disk_.load(r, nb, err)) // (W4: both tiers; none before v4, see run.cpp)
         return false;
     if (p_->salvage_ratio > 0 && (!get_array(r, &stamp_, n) || stamp_.size() != n)) {
         err->append("snapshot: stamp section truncated or the wrong shape");
@@ -3685,7 +3883,7 @@ bool Soup::check(TextBuf* why) const {
         for (u32 b = 0; b < bodies_.size(); ++b)
             if (bodies_[b].alive && dorm_[b].on &&
                 (bodies_[b].units || bodies_[b].cpus != kNone || (p_->gpus && gpu_.count[b]) ||
-                 (p_->npus && npu_.count[b]) || (p_->disk && disk_.total[b]) ||
+                 (p_->npus && npu_.count[b]) || (disk_on() && disk_.total[b]) ||
                  (p_->warps && warp_count_[b])))
                 return fail("a dormant body holds more than its code", b);
     }
@@ -3703,7 +3901,7 @@ bool Soup::check(TextBuf* why) const {
         return false;
     if (p_->npus && !npu_.check(bodies_, "NPU", why))
         return false;
-    if (p_->disk && !disk_.check(bodies_, why))
+    if (disk_on() && !disk_.check(bodies_, why))
         return false;
 
     // Warps (Phase 8): per-body lists, owners, counts, every slot used or free.

@@ -374,8 +374,13 @@ class World {
         u32 dormant;     // 1: a dormant program, 0: a daughter
         u32 mem_reserve; // its memory reserve (its disk reserve is `disk`)
         u32 hops;        // hops so far, this one included
+        // Disk tiers (docs/world-plan.md W4): her archive codons, claimed on
+        // arrival in the archive (`disk` is then her fast disk's); a dormant
+        // program's archive reserve.
+        u32 archive;
+        u32 pad;
     };
-    static_assert(sizeof(Cargo) == 104, "Cargo must have no implicit padding");
+    static_assert(sizeof(Cargo) == 112, "Cargo must have no implicit padding");
 
     bool build_edges(const u64* keys, usize n); // keys: (src << 32 | dst), strictly increasing
     void update_node(u32 node);
@@ -478,8 +483,9 @@ class World {
     Array<u8> shut_;              // per edge: a bridge shut this tick
     Array<u8> port_down_;         // per edge: refuses departures (failed, shut, fallow end)
     bool ports_dirty_ = false;
-    Spread spreads_[7];           // spark, then res.memory, cpu, gpu, npu, disk, ecpu (9c)
+    Spread spreads_[8];           // spark, then res.memory, cpu, gpu, npu, disk, ecpu (9c), archive (W4)
     Array<u32> share_mem_, share_cpu_, share_gpu_, share_npu_, share_disk_;
+    Array<u32> share_archive_;    // disk tiers (docs/world-plan.md W4): each site's archive
     Array<double> spark_w_;
     Array<double> ecpu_w_;        // Phase 9c: each site's weight for its E millicores' share
     void read_land_params(Config& cfg);

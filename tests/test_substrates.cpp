@@ -671,24 +671,30 @@ void test_nodes_file() {
     remove(nodes);
 }
 
-// The legacy defaults without this plan's two switches: the registry's then apply.
+// The legacy defaults without the varied world's three switches (this plan's
+// two and the disk tiers' archive): the registry's then apply.
 void fallback_without_switches(TextBuf* out) {
     const char* p = kLegacyDefaults;
     while (*p) {
         const char* e = strchr(p, '\n');
         const usize n = e ? static_cast<usize>(e - p + 1) : strlen(p);
-        if (strncmp(p, "substrate.enabled", 17) != 0 && strncmp(p, "spark.activity", 14) != 0)
+        if (strncmp(p, "substrate.enabled", 17) != 0 && strncmp(p, "spark.activity", 14) != 0 &&
+            strncmp(p, "world.archive", 13) != 0)
             out->append(Str(p, n));
         p += n;
     }
 }
 
-// A snapshot from before v4 comes from a world without substrates or sparks
-// by activity: it resumes with both off, though the registry's defaults turn
-// them on.
+// A snapshot from before v4 comes from a world without substrates, sparks by
+// activity or the archive (disk tiers): it resumes with all three off, though
+// the registry's defaults turn them on. The world has a disk, so the
+// archive's default (a quarter of it) would change its disk section's shape.
 void test_old_snapshot() {
-    Run a; // the legacy fallback turns both off: its config names neither
-    CHECK(make_run(a, kLandBase, 2));
+    TextBuf land;
+    land.append(kLandBase);
+    land.append("world.disk = 256\n");
+    Run a; // the legacy fallback turns all three off: its config names none
+    CHECK(make_run(a, land.c_str(), 2));
     a.run_until(40);
     ByteWriter snap;
     a.snapshot(snap);
@@ -709,6 +715,8 @@ void test_old_snapshot() {
     CHECK(loaded);
     if (loaded) {
         CHECK(!b.world().substrates() && b.world().node_params(0).spark_activity == 0.0);
+        CHECK(b.world().node_params(0).disk > 0 && b.world().node_params(0).archive == 0 &&
+              b.config().get_str("world.archive", "").eq("0"));
         b.run_until(80);
         CHECK_EQ_U64(b.world().hash(), want);
     }
