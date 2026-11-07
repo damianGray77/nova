@@ -10,6 +10,7 @@
 
 #include "nova/accel.h"
 #include "nova/accelop.h"
+#include "nova/keys.h" // the settings registry
 #include "nova/pool.h"
 #include "nova/soup.h"
 
@@ -255,16 +256,18 @@ double warp_rate(u32 index, u32 lanes) {
 } // namespace
 
 bool resolve_budgets(Config& cfg, u32 threads, TextBuf* notes, TextBuf* err) {
-    const u64 nodes = cfg.get_u64("world.nodes", 64);
-    const bool soup = cfg.get_str("world.model", "demo").eq("soup");
+    // Settings the world reads (and checks) later are peeked here: the value or
+    // the registry's default, no range check (nova/keys.h).
+    const u64 nodes = key_peek_u64(cfg, "world.nodes");
+    const bool soup = key_peek_str(cfg, "world.model").eq("soup");
     // The record of what was asked is read at the end (it may be written here).
     struct MarkRecord {
         Config& c;
         ~MarkRecord() {
-            (void)c.get_str("budget.memory_was", "");
-            (void)c.get_str("budget.disk_was", "");
-            (void)c.get_str("budget.gpu_was", "");
-            (void)c.get_str("budget.npu_was", "");
+            (void)key_str(c, "budget.memory_was");
+            (void)key_str(c, "budget.disk_was");
+            (void)key_str(c, "budget.gpu_was");
+            (void)key_str(c, "budget.npu_was");
         }
     } mark{cfg};
     auto fail = [&](const char* key, const char* what) {
@@ -277,7 +280,7 @@ bool resolve_budgets(Config& cfg, u32 threads, TextBuf* notes, TextBuf* err) {
 
     // --- memory -----------------------------------------------------------------
     TextBuf req;
-    req.append(cfg.get_str("budget.memory", "off"));
+    req.append(key_str(cfg, "budget.memory"));
     if (!is_off(req.view())) {
         if (!soup)
             return fail("budget.memory", "needs world.model = soup");
@@ -308,10 +311,11 @@ bool resolve_budgets(Config& cfg, u32 threads, TextBuf* notes, TextBuf* err) {
 
     // --- disk -------------------------------------------------------------------
     TextBuf dpath;
-    dpath.append(cfg.get_str("disk.path", ""));
+    dpath.append(key_peek_str(cfg, "disk.path"));
     req.clear();
-    req.append(cfg.get_str("budget.disk", "off"));
-    const bool salvage = cfg.get_f64("salvage.ratio", 0.0) > 0;
+    req.append(key_str(cfg, "budget.disk"));
+    // (assumed off when not set, as before the registry: its default is now 4)
+    const bool salvage = key_peek_f64_assuming(cfg, "salvage.ratio", 0.0) > 0;
     if (!is_off(req.view())) {
         if (!soup)
             return fail("budget.disk", "needs world.model = soup");
@@ -349,18 +353,18 @@ bool resolve_budgets(Config& cfg, u32 threads, TextBuf* notes, TextBuf* err) {
     for (u32 dev = 0; dev < 2; ++dev) {
         const char* key = dev == 0 ? "budget.gpu" : "budget.npu";
         req.clear();
-        req.append(cfg.get_str(key, "off"));
+        req.append(key_str(cfg, key));
         if (is_off(req.view()))
             continue;
         double pct = 0;
         if (!parse_amount(req.view(), 100.0, &pct) || req.view().p[req.size() - 1] != '%')
             return fail(key, "must be off or a percentage (50%)");
-        const bool async = cfg.get_str("accel.mode", "async").eq("async"); // (the defaults, as soup.cpp's)
-        const bool warps = dev == 0 && cfg.get_bool("gpu.warps", true); // Phase 8: warps run on the real GPU
+        const bool async = key_peek_str(cfg, "accel.mode").eq("async");
+        const bool warps = dev == 0 && key_peek_flag(cfg, "gpu.warps"); // Phase 8: warps run on the real GPU
         if (!async && !warps)
             return fail(key, dev == 0 ? "needs accel.mode = async (the real devices) or gpu.warps = true"
                                       : "needs accel.mode = async (the real devices)");
-        const u64 units = cfg.get_u64(dev == 0 ? "world.gpus" : "world.npus", dev == 0 ? 400 : 200);
+        const u64 units = key_peek_u64(cfg, dev == 0 ? "world.gpus" : "world.npus");
         if (units == 0)
             return fail(key, dev == 0 ? "needs world.gpus (GPU units a node)" : "needs world.npus (NPU units a node)");
         AccelDevice devs[16];
@@ -368,14 +372,15 @@ bool resolve_budgets(Config& cfg, u32 threads, TextBuf* notes, TextBuf* err) {
         // The tick rate the CPU allows: a fully busy world's instructions a tick
         // over what this run's threads do a second (about 70% of linear).
         const double cpu = cpu_rate() * (threads ? threads : 1) * 0.7;
-        const double millicores = static_cast<double>(cfg.get_u64("world.millicores", 4000));
-        const double per_core = static_cast<double>(cfg.get_u64("cpu.instr_per_core", 25000));
+        const double millicores = static_cast<double>(key_peek_u64(cfg, "world.millicores"));
+        // (assumed the presets' 25,000 when not set, as before the registry: its default is 1,000)
+        const double per_core = static_cast<double>(key_peek_u64_assuming(cfg, "cpu.instr_per_core", 25000));
         const double per_tick = static_cast<double>(nodes) * millicores * per_core / 1000.0;
         const double tps = per_tick > 0 && cpu > 0 ? cpu / per_tick : 1.0;
         if (warps) {
             // Phase 8: warp.capacity, so a world whose every GPU unit runs warps
             // flat out keeps the GPU about this busy.
-            const u64 lanes = cfg.get_u64("warp.lanes", 32);
+            const u64 lanes = key_peek_u64(cfg, "warp.lanes");
             double wrate = 0;
             const char* wdev = "";
             for (u32 i = 0; i < nd && wrate == 0; ++i) {
@@ -452,8 +457,8 @@ bool resolve_budgets(Config& cfg, u32 threads, TextBuf* notes, TextBuf* err) {
 
     // --- does it fit? (C9) ------------------------------------------------------------
     if (soup) {
-        const double size = static_cast<double>(cfg.get_u64("world.soup_size", 256));
-        const double disk = static_cast<double>(cfg.get_u64("world.disk", 4096)); // (soup.cpp's default)
+        const double size = static_cast<double>(key_peek_u64(cfg, "world.soup_size"));
+        const double disk = static_cast<double>(key_peek_u64(cfg, "world.disk"));
         const bool in_file = dpath.size() > 0;
         double ram = static_cast<double>(nodes) * size * kRamPerCodon;
         if (!in_file)

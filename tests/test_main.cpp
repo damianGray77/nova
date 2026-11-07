@@ -43,6 +43,7 @@ void suite_budget();
 void suite_warp();
 void suite_costs();
 void suite_ecology();
+void suite_keys();
 
 namespace {
 
@@ -90,6 +91,7 @@ const Suite kSuites[] = {
     {"warp", suite_warp},
     {"costs", suite_costs},
     {"ecology", suite_ecology},
+    {"keys", suite_keys},
 };
 
 } // namespace

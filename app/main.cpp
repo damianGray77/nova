@@ -37,7 +37,13 @@
 //       The analysis UI (Phase 6, view_cmd.cpp): a run watched live, a
 //       snapshot continued, or a finished run's files browsed.
 //
-// Any config key that nothing reads is an error (typo protection).
+//   nova keys [--md <path>]
+//       The settings registry (nova/keys.h): every setting with its kind,
+//       default, range, group and help, as a table; --md writes the Markdown
+//       reference (docs/keys.md).
+//
+// Any config key that nothing reads is an error (typo protection). Every
+// setting's default and range live in its registry entry (core/src/keys.inc).
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -51,6 +57,7 @@
 #include "nova/config.h"
 #include "nova/hash.h"
 #include "nova/io.h"
+#include "nova/keys.h"
 #include "nova/replay.h"
 #include "nova/run.h"
 
@@ -169,6 +176,29 @@ int cmd_land(int argc, char** argv) {
     return 0;
 }
 
+// nova keys [--md <path>]: the settings registry (docs/config-plan.md C1, C5):
+// every setting as a table, or the Markdown reference (docs/keys.md).
+int cmd_keys(int argc, char** argv) {
+    TextBuf out;
+    if (argc == 2) {
+        keys_table(out);
+        fwrite(out.view().p, 1, out.size(), stdout);
+        return 0;
+    }
+    if (argc == 4 && strcmp(argv[2], "--md") == 0) {
+        keys_markdown(out);
+        ensure_parent_dir(argv[3]);
+        if (!write_file(argv[3], out.view().p, out.size())) {
+            fprintf(stderr, "nova: cannot write '%s'\n", argv[3]);
+            return 1;
+        }
+        printf("nova: wrote %s (%llu settings)\n", argv[3], static_cast<unsigned long long>(key_count()));
+        return 0;
+    }
+    fprintf(stderr, "usage: nova keys [--md <path>]\n");
+    return 2;
+}
+
 namespace {
 
 int usage() {
@@ -187,6 +217,8 @@ int usage() {
                     "            [--render out.png --ticks N [--size WxH]]\n"
                     "  nova view --run <run directory> [--render out.png [--window K] [--size WxH]]\n"
                     "  nova land <config> [--set key=value]...  (what a landscape's settings generate)\n"
+                    "  nova keys [--md <path>]            (every setting: kind, default, range, help;\n"
+                    "                                      --md writes the reference, docs/keys.md)\n"
                     "  (threads 0 = all hardware threads)\n");
     return 2;
 }
@@ -402,18 +434,17 @@ bool apply_set(Config& cfg, const char* kv) {
 }
 
 void read_run_keys(Config& cfg, RunKeys* k) {
-    k->ticks = cfg.get_u64("run.ticks", 1000);
-    k->threads = cfg.get_u64("run.threads", 0);
-    k->seconds = cfg.get_f64("run.seconds", 0.0);
-    k->after = cfg.get_i64("run.after_replicator", -1);
-    k->window = cfg.get_u64("stats.window", 100);
-    k->every = cfg.get_u64("replay.checkpoint_every", 100);
-    k->snapshot_every = cfg.get_u64("output.snapshot_every", 0);
-    k->nodes_every = cfg.get_u64("stats.nodes_every", 1);
-    if (k->nodes_every == 0 || k->nodes_every > 1000000000)
-        cfg.fail("stats.nodes_every", "must be between 1 and 1000000000");
-    k->budget_threads.append(cfg.get_str("budget.threads", "all_but_one"));
-    k->priority.append(cfg.get_str("budget.priority", "below_normal"));
+    // Defaults and ranges: the settings registry (core/src/keys.inc).
+    k->ticks = key_u64(cfg, "run.ticks");
+    k->threads = key_u64(cfg, "run.threads");
+    k->seconds = key_f64(cfg, "run.seconds");
+    k->after = key_i64(cfg, "run.after_replicator");
+    k->window = key_u64(cfg, "stats.window");
+    k->every = key_u64(cfg, "replay.checkpoint_every");
+    k->snapshot_every = key_u64(cfg, "output.snapshot_every");
+    k->nodes_every = key_u64(cfg, "stats.nodes_every");
+    k->budget_threads.append(key_str(cfg, "budget.threads"));
+    k->priority.append(key_choice(cfg, "budget.priority"));
     {
         const Str t = k->budget_threads.view();
         u64 v = 0;
@@ -422,26 +453,15 @@ void read_run_keys(Config& cfg, RunKeys* k) {
                         (t.n > 1 && t.p[t.n - 1] == '%' && parse_f64(t.sub(0, t.n - 1), &pc) && pc > 0 && pc <= 100);
         if (!ok)
             cfg.fail("budget.threads", "must be all, all_but_one, a count or a percentage");
-        const Str p = k->priority.view();
-        if (!p.eq("below_normal") && !p.eq("normal") && !p.eq("idle"))
-            cfg.fail("budget.priority", "must be below_normal, normal or idle");
     }
-    k->csv.append(cfg.get_str("output.csv", ""));
-    k->nodes.append(cfg.get_str("output.nodes", ""));
-    k->signals.append(cfg.get_str("output.signals", ""));
-    k->replay.append(cfg.get_str("output.replay", ""));
-    k->snap.append(cfg.get_str("output.snapshot", ""));
-    k->bank.append(cfg.get_str("output.genebank", ""));
-    k->lin.append(cfg.get_str("output.lineages", ""));
-    k->result.append(cfg.get_str("output.result", ""));
-    if (k->window == 0 || k->window > 0xFFFFFFFFull)
-        cfg.fail("stats.window", "must be between 1 and 4294967295");
-    if (k->threads > 1024)
-        cfg.fail("run.threads", "must be between 0 and 1024");
-    if (!(k->seconds >= 0))
-        cfg.fail("run.seconds", "must be 0 (no limit) or more");
-    if (k->after < -1)
-        cfg.fail("run.after_replicator", "must be -1 (keep going) or a tick count");
+    k->csv.append(key_str(cfg, "output.csv"));
+    k->nodes.append(key_str(cfg, "output.nodes"));
+    k->signals.append(key_str(cfg, "output.signals"));
+    k->replay.append(key_str(cfg, "output.replay"));
+    k->snap.append(key_str(cfg, "output.snapshot"));
+    k->bank.append(key_str(cfg, "output.genebank"));
+    k->lin.append(key_str(cfg, "output.lineages"));
+    k->result.append(key_str(cfg, "output.result"));
     if (k->snapshot_every && k->snap.size() == 0)
         cfg.fail("output.snapshot_every", "needs output.snapshot (the numbered snapshots' path)");
 }
@@ -1110,7 +1130,7 @@ int cmd_resume(const Args& a) {
         return 1;
     }
     bytes = Array<u8>();
-    const u64 every = run.config().get_u64("replay.checkpoint_every", 100);
+    const u64 every = key_u64(run.config(), "replay.checkpoint_every");
     const World& w = run.world();
     const u64 ticks = a.has_ticks ? a.ticks : w.tick() + 1000;
     printf("nova: resumed at tick %llu (hash %016llx) on %u threads, to tick %llu\n",
@@ -1309,6 +1329,8 @@ int nova_main(int argc, char** argv) {
         return cmd_view(argc, argv);
     if (argc >= 2 && strcmp(argv[1], "land") == 0)
         return cmd_land(argc, argv);
+    if (argc >= 2 && strcmp(argv[1], "keys") == 0)
+        return cmd_keys(argc, argv);
     Args a;
     if (!parse_args(argc, argv, &a))
         return usage();

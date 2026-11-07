@@ -5,6 +5,7 @@
 #include <cmath>  // floor, log, pow
 #include <cstdio> // snprintf
 
+#include "nova/keys.h" // the settings registry
 #include "nova/lineage.h"
 #include "nova/pool.h" // clock_seconds (profiling)
 
@@ -46,42 +47,20 @@ u8 fade_bit(u8 v, Rng& rng) {
     return static_cast<u8>(v & ~(1u << bits[rng.below(n)]));
 }
 
-u32 get_u32(Config& cfg, Str key, u64 def, u64 lo, u64 hi) {
-    u64 v = cfg.get_u64(key, def);
-    if (v < lo || v > hi) {
-        char what[96];
-        snprintf(what, sizeof what, "must be between %llu and %llu",
-                 static_cast<unsigned long long>(lo), static_cast<unsigned long long>(hi));
-        cfg.fail(key, what);
-        return static_cast<u32>(lo);
-    }
-    return static_cast<u32>(v);
-}
-
-double get_f64(Config& cfg, Str key, double def, double lo, double hi) {
-    double v = cfg.get_f64(key, def);
-    if (!(v >= lo && v <= hi)) {
-        char what[96];
-        snprintf(what, sizeof what, "must be between %g and %g", lo, hi);
-        cfg.fail(key, what);
-        return lo;
-    }
-    return v;
-}
-
-HeatCurve get_curve(Config& cfg, const char* prefix, HeatCurve def) {
+// A unit's heat curve: the heat.<unit>.* family (keys.inc).
+HeatCurve get_curve(Config& cfg, const char* prefix) {
     char key[64];
     HeatCurve c = {};
     snprintf(key, sizeof key, "%s.warm", prefix);
-    c.warm = static_cast<float>(get_f64(cfg, key, def.warm, 0, 1e9));
+    c.warm = static_cast<float>(key_f64(cfg, key));
     snprintf(key, sizeof key, "%s.hot", prefix);
-    c.hot = static_cast<float>(get_f64(cfg, key, def.hot, 0, 1e9));
+    c.hot = static_cast<float>(key_f64(cfg, key));
     snprintf(key, sizeof key, "%s.max", prefix);
-    c.max = static_cast<float>(get_f64(cfg, key, def.max, 0, 1e9));
+    c.max = static_cast<float>(key_f64(cfg, key));
     snprintf(key, sizeof key, "%s.speed_min", prefix);
-    c.speed_min = static_cast<float>(get_f64(cfg, key, def.speed_min, 0.001, 1));
+    c.speed_min = static_cast<float>(key_f64(cfg, key));
     snprintf(key, sizeof key, "%s.err_max", prefix);
-    c.err_max = static_cast<float>(get_f64(cfg, key, def.err_max, 1, 1e6));
+    c.err_max = static_cast<float>(key_f64(cfg, key));
     if (!(c.warm < c.hot && c.hot < c.max)) {
         snprintf(key, sizeof key, "%s.warm", prefix);
         cfg.fail(key, "onsets must be staggered: warm < hot < max");
@@ -181,9 +160,9 @@ bool genome_from_names(const CodonTable& t, Str names, Array<u8>* out, TextBuf* 
 
 bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     p->size = soup_size;
-    p->millicores = get_u32(cfg, "world.millicores", 4000, 1, 10000000);
-    p->instr_per_core = get_u32(cfg, "cpu.instr_per_core", 1000, 1, 100000000);
-    p->halt_after = get_u32(cfg, "cpu.halt_after", 8, 1, 255);
+    p->millicores = key_u32(cfg, "world.millicores");
+    p->instr_per_core = key_u32(cfg, "cpu.instr_per_core");
+    p->halt_after = key_u32(cfg, "cpu.halt_after");
 
     // The in-world GPU (Phase 2, design.md 6.7). No units = no GPU: every GPU
     // selector fails as in Phase 1, and nothing else changes.
@@ -191,90 +170,80 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     // with a high-volume profile by default (Damian: GPUs are built for
     // volume, so expensive per op and nearly free per element). Instant mode
     // is exactly Phase 4.
-    Str mode = cfg.get_str("accel.mode", "async"); // Phase 10: every feature on by default
+    Str mode = key_choice(cfg, "accel.mode"); // Phase 10: every feature on by default
     p->accel_async = mode.eq("async");
-    if (!p->accel_async && !mode.eq("instant"))
-        cfg.fail("accel.mode", "must be instant or async");
-    p->accel_latency = get_u32(cfg, "accel.latency", 2, 1, 64);
+    p->accel_latency = key_u32(cfg, "accel.latency");
     const bool hv = p->accel_async;
-    p->gpus = get_u32(cfg, "world.gpus", 400, 0, 10000000);
-    p->gpu_elements = get_u32(cfg, "gpu.elements", hv ? 4096 : 32, 1, 100000000);
-    p->gpu_setup = get_u32(cfg, "gpu.setup", hv ? 32 : 4, 0, 1000000);
-    p->gpu_cpu_per_element = get_f64(cfg, "gpu.cpu_per_element", hv ? 1.0 / 1024.0 : 0.0625, 0, 1e6);
-    p->gpu_wear = get_f64(cfg, "gpu.wear", 0.0, 0, 1);
+    p->gpus = key_u32(cfg, "world.gpus");
+    p->gpu_elements = key_u32(cfg, "gpu.elements", key_default(hv ? 4096 : 32));
+    p->gpu_setup = key_u32(cfg, "gpu.setup", key_default(hv ? 32 : 4));
+    p->gpu_cpu_per_element = key_f64(cfg, "gpu.cpu_per_element", key_default(hv ? 1.0 / 1024.0 : 0.0625));
+    p->gpu_wear = key_f64(cfg, "gpu.wear");
     // The in-world NPU (Phase 2b, design.md 6.8), the same way.
-    p->npus = get_u32(cfg, "world.npus", 200, 0, 10000000);
-    p->npu_macs = get_u32(cfg, "npu.macs", hv ? 65536 : 256, 1, 1000000000);
-    p->npu_cpu_per_mac = get_f64(cfg, "npu.cpu_per_mac", hv ? 1.0 / 16384.0 : 1.0 / 64.0, 0, 1e6);
+    p->npus = key_u32(cfg, "world.npus");
+    p->npu_macs = key_u32(cfg, "npu.macs", key_default(hv ? 65536 : 256));
+    p->npu_cpu_per_mac = key_f64(cfg, "npu.cpu_per_mac", key_default(hv ? 1.0 / 16384.0 : 1.0 / 64.0));
     p->npu_max_matvec = hv ? 256 : 64;
     p->npu_max_matmul = hv ? 64 : 32;
-    p->npu_wear = get_f64(cfg, "npu.wear", 0.0, 0, 1);
+    p->npu_wear = key_f64(cfg, "npu.wear");
 
     // Phase 1b rules (design.md 6.6). mem.upkeep = 0 is exactly Phase 1a.
-    p->upkeep = get_f64(cfg, "mem.upkeep", 2.0, 0, 1e9);
-    p->upkeep_exp = get_f64(cfg, "mem.upkeep_exp", 4.0 / 3.0, 0.5, 4.0);
-    p->cpu_wear = get_f64(cfg, "cpu.wear", 0.001, 0, 1);
-    Str timing = cfg.get_str("spark.timing", "first");
-    if (timing.eq("first"))
-        p->spark_late = false;
-    else if (timing.eq("last"))
-        p->spark_late = true;
-    else
-        cfg.fail("spark.timing", "must be first or last");
+    p->upkeep = key_f64(cfg, "mem.upkeep");
+    p->upkeep_exp = key_f64(cfg, "mem.upkeep_exp");
+    p->cpu_wear = key_f64(cfg, "cpu.wear");
+    p->spark_late = key_choice(cfg, "spark.timing").eq("last");
 
-    Str table = cfg.get_str("isa.table", "nova_v2");
+    Str table = key_choice(cfg, "isa.table");
     if (table.eq("custom")) {
-        Str codons = cfg.get_str("isa.codons", "");
+        Str codons = key_str(cfg, "isa.codons");
         TextBuf err;
         if (!parse_table(codons, &p->table, &err))
             cfg.fail("isa.codons", err.c_str());
     } else if (!builtin_table(table, &p->table)) {
-        cfg.fail("isa.table", "must be nova_v1, nova_v1_plain, nova_v1_inv2, nova_v2, tierra0 or custom");
+        NOVA_FATAL("soup_params_from_config: an isa.table option with no built-in table");
     }
 
     // Selector numbering (D6): nearest-to-self, or a per-run shuffle drawn from
     // isa.selector_seed (0 = the world seed, so paired runs differ by seed).
-    Str sel = cfg.get_str("isa.selectors", "nearest");
-    u64 sel_seed = cfg.get_u64("isa.selector_seed", 0);
+    Str sel = key_choice(cfg, "isa.selectors");
+    u64 sel_seed = key_u64(cfg, "isa.selector_seed");
     // Dispersal (Phase 3): DIVIDE to a neighbour, on by default only in
     // procedural worlds, so ring worlds stay exactly as before.
-    const Str graph = cfg.get_str("world.graph", "ring");
+    const Str graph = key_choice(cfg, "world.graph");
     const bool spatial = graph.eq("procedural") || graph.eq("landscape"); // Phase 7: landscapes too
-    p->dispersal = cfg.get_bool("world.dispersal", spatial);
+    p->dispersal = key_flag(cfg, "world.dispersal", key_default(spatial));
     // The disk tier and volatility (Phase 4): no disk = everything disk fails,
     // as before; no volatility = no wipes.
-    p->disk = get_u32(cfg, "world.disk", 4096, 0, 1u << 24);
-    p->disk_cost_base = get_u32(cfg, "disk.cost_base", 4, 0, 1000000);
-    p->disk_cost_per_codon = get_f64(cfg, "disk.cost_per_codon", 0.25, 0, 1e6);
-    p->disk_rot = get_f64(cfg, "disk.rot", p->disk ? (p->table.op[0] == Op::inert ? 1e-8 : 1e-6) : 0.0, 0, 1); // Phase 10: rarer with decay
-    p->volatility = get_f64(cfg, "mem.volatility", 0.00001, 0, 1);
-    p->wipe_pages = get_u32(cfg, "mem.wipe_pages", 4, 1, 1u << 18);
+    p->disk = key_u32(cfg, "world.disk");
+    p->disk_cost_base = key_u32(cfg, "disk.cost_base");
+    p->disk_cost_per_codon = key_f64(cfg, "disk.cost_per_codon");
+    p->disk_rot = key_f64(cfg, "disk.rot", key_default(p->disk ? (p->table.op[0] == Op::inert ? 1e-8 : 1e-6) : 0.0)); // Phase 10: rarer with decay
+    p->volatility = key_f64(cfg, "mem.volatility");
+    p->wipe_pages = key_u32(cfg, "mem.wipe_pages");
     // Remnants and salvage (Phase 4, Damian): 0 = off, every read as before.
-    p->salvage_ratio = get_f64(cfg, "salvage.ratio", 4.0, 0, 1e6);
+    p->salvage_ratio = key_f64(cfg, "salvage.ratio");
     // The signal channel (Phase 4): 0 channels = EMIT and LISTEN fail.
-    p->signal_channels = get_u32(cfg, "signal.channels", 16, 0, 256);
-    p->signal_cost_base = get_u32(cfg, "signal.cost_base", 2, 0, 1000000);
-    p->signal_cost_per_amp = get_f64(cfg, "signal.cost_per_amp", 1.0 / 32.0, 0, 1e6);
-    p->signal_floor = get_f64(cfg, "signal.floor", 1.0, 0, 1e9);
+    p->signal_channels = key_u32(cfg, "signal.channels");
+    p->signal_cost_base = key_u32(cfg, "signal.cost_base");
+    p->signal_cost_per_amp = key_f64(cfg, "signal.cost_per_amp");
+    p->signal_floor = key_f64(cfg, "signal.floor");
     // The node lifecycle (Phase 4): endurance 0 = off. Collapse is wear alone
     // (Damian, docs/dormancy-plan.md D7): the starvation rule and its keys
     // (node.starve_below, node.starve_ticks, node.starve_ebb) are gone.
-    p->endurance = get_f64(cfg, "node.endurance", spatial ? 1e9 : 0.0, 0, 1e18); // (the lifecycle needs a map)
-    p->decline = get_f64(cfg, "node.decline", 4.0, 0, 1e6);
+    p->endurance = key_f64(cfg, "node.endurance", key_default(spatial ? 1e9 : 0.0)); // (the lifecycle needs a map)
+    p->decline = key_f64(cfg, "node.decline");
     p->map = spatial;
 
     // Measured costs (Phase 9, design.md 6.15): classic = exactly Phase 8.
-    const Str ct = cfg.get_str("cost.table", "home_v1");
-    if (!builtin_costs(ct, &p->cost)) {
-        cfg.fail("cost.table", "must be classic or home_v1");
-        builtin_costs("classic", &p->cost);
-    }
+    const Str ct = key_choice(cfg, "cost.table");
+    if (!builtin_costs(ct, &p->cost))
+        NOVA_FATAL("soup_params_from_config: a cost.table option with no built-in table");
     if (!builtin_costs_e(Str(p->cost.name), &p->ecost)) // Phase 9c: on an E-core
         p->ecost = p->cost;
     p->plain = p->cost.timed ? static_cast<double>(p->cost.alu) : 1.0;
     p->tick_units = static_cast<double>(p->instr_per_core) * p->plain;
-    p->engulf_cpt = get_u32(cfg, "engulf.codons_per_tick", 8, 1, 1u << 24); // Phase 10: halved, so prey can react
-    p->inject_cpt = get_u32(cfg, "inject.codons_per_tick", 16, 1, 1u << 24);
+    p->engulf_cpt = key_u32(cfg, "engulf.codons_per_tick"); // Phase 10: halved, so prey can react
+    p->inject_cpt = key_u32(cfg, "inject.codons_per_tick");
 
     SelectorMap& m = p->sel;
     m = SelectorMap{};
@@ -295,15 +264,15 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
         sense_n = kSenseReadingsAsync; // + my last accelerator result, my ops pending
 
     // Warps (Phase 8, design.md 6.14): off = everything exactly as Phase 7.
-    p->warps = cfg.get_bool("gpu.warps", true);
-    p->warp_lanes = get_u32(cfg, "warp.lanes", 32, 1, kMaxLanes);
-    p->warp_max = get_u32(cfg, "warp.max", 4, 1, 64);
-    p->warp_capacity = get_u32(cfg, "warp.capacity", 256, 1, 100000000);
-    p->warp_step_cost = get_u32(cfg, "warp.step_cost", 16, 0, 1000000);
-    p->warp_lane_cost = get_u32(cfg, "warp.lane_cost", 1, 0, 1000000);
-    p->warp_rounds = get_u32(cfg, "warp.rounds", 1, 1, 64);
-    p->spark_gpu_grant = get_u32(cfg, "spark.gpu_grant", p->warps ? 8 : 0, 0, 10000000);
-    p->spark_gpu_born = get_f64(cfg, "spark.gpu_born", 0.5, 0, 1);
+    p->warps = key_flag(cfg, "gpu.warps");
+    p->warp_lanes = key_u32(cfg, "warp.lanes"); // (at most kMaxLanes)
+    p->warp_max = key_u32(cfg, "warp.max");
+    p->warp_capacity = key_u32(cfg, "warp.capacity");
+    p->warp_step_cost = key_u32(cfg, "warp.step_cost");
+    p->warp_lane_cost = key_u32(cfg, "warp.lane_cost");
+    p->warp_rounds = key_u32(cfg, "warp.rounds");
+    p->spark_gpu_grant = key_u32(cfg, "spark.gpu_grant", key_default(p->warps ? 8 : 0));
+    p->spark_gpu_born = key_f64(cfg, "spark.gpu_born");
     if (p->warps && p->warp_step_cost + p->warp_lane_cost == 0)
         cfg.fail("warp.step_cost", "warp.step_cost and warp.lane_cost can't both be 0");
     // Phase 9b (design.md 6.15): with a timed table the devices' capacities
@@ -340,28 +309,39 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     if (p->cost.timed)
         sense_n = kSenseReadingsActions; // + an action on me: ticks until it ends, what it is
     // Threads and cores (Phase 9c, design.md 6.15): off = exactly as before.
-    p->threads = cfg.get_bool("cpu.threads", true);
-    p->slices = get_u32(cfg, "cpu.slices", 8, 1, 64);
-    p->max_threads = get_u32(cfg, "cpu.max_threads", 8, 1, 64);
-    p->e_share = get_f64(cfg, "cpu.e_share", p->cost.timed ? 0.5 : 0.0, 0, 1);
-    p->e_gain = static_cast<float>(get_f64(cfg, "heat.e_gain", 0.4, 0, 1e3));
+    p->threads = key_flag(cfg, "cpu.threads");
+    p->slices = key_u32(cfg, "cpu.slices");
+    p->max_threads = key_u32(cfg, "cpu.max_threads");
+    p->e_share = key_f64(cfg, "cpu.e_share", key_default(p->cost.timed ? 0.5 : 0.0));
+    p->e_gain = static_cast<float>(key_f64(cfg, "heat.e_gain"));
     if (p->e_share > 0 && !p->cost.timed) // an E-core's speed is the table's E column
         cfg.fail("cpu.e_share", "needs a timed cost table (cost.table = home_v1)");
     // Phase 10 (design.md 6.16): vents, decay, bites and death.
-    p->mem_decay = get_f64(cfg, "mem.decay", -1.0, -1.0, 1); // -1: the default, below
-    p->disk_decay = get_f64(cfg, "disk.decay", p->disk && p->table.op[0] == Op::inert ? 1e-6 : 0.0, 0, 1);
-    p->vent_spacing = get_u32(cfg, "vent.spacing", 4096, 0, 1u << 24);
-    p->vent_rate = get_u32(cfg, "vent.rate", 64, 0, 1u << 20);
-    p->vent_radius = get_u32(cfg, "vent.radius", 256, 1, 1u << 24);
-    p->bites = cfg.get_bool("engulf.bite", true);
-    p->threads_end = cfg.get_bool("life.threads_end", true);
-    p->frozen_ticks = get_u32(cfg, "life.frozen_ticks", 200, 0, 1000000000);
+    // Ray's background flip rate (design.md 6.3): about 1 per 10,000
+    // instructions executed, which at full load is 1e-4 * millicores *
+    // instr_per_core / 1000 flips per tick, spread over the soup. Decay needs
+    // a table whose codon 0 is INERT (nova_v2): under the others zeros are
+    // labels, so there it stays off and rot keeps Ray's rate.
+    const double nominal = static_cast<double>(p->millicores) * p->instr_per_core / 1000.0;
+    const bool inert0 = p->table.op[0] == Op::inert;
+    const double rot0 = 1e-4 * nominal / soup_size;
+    const double auto_decay = inert0 ? (rot0 < 1 ? rot0 : 1.0) : 0.0;
+    p->mem_decay = key_f64(cfg, "mem.decay", key_default(auto_decay));
+    if (p->mem_decay < 0) // (below 0 means the default too)
+        p->mem_decay = auto_decay;
+    p->disk_decay = key_f64(cfg, "disk.decay", key_default(p->disk && p->table.op[0] == Op::inert ? 1e-6 : 0.0));
+    p->vent_spacing = key_u32(cfg, "vent.spacing");
+    p->vent_rate = key_u32(cfg, "vent.rate");
+    p->vent_radius = key_u32(cfg, "vent.radius");
+    p->bites = key_flag(cfg, "engulf.bite");
+    p->threads_end = key_flag(cfg, "life.threads_end");
+    p->frozen_ticks = key_u32(cfg, "life.frozen_ticks");
     // Dormancy and drift (docs/dormancy-plan.md): the watchdog's frozen body
     // goes dormant instead of dying, if it has reserves to spend.
-    p->dormancy = cfg.get_bool("life.dormancy", true);
-    p->dormant_mem_loss = get_u32(cfg, "dormant.mem_loss", 1, 0, 1u << 24);
-    p->dormant_disk_loss = get_u32(cfg, "dormant.disk_loss", 1, 0, 1u << 24);
-    p->dormant_dwell = get_u32(cfg, "dormant.dwell", 15, 1, 1000000000);
+    p->dormancy = key_flag(cfg, "life.dormancy");
+    p->dormant_mem_loss = key_u32(cfg, "dormant.mem_loss");
+    p->dormant_disk_loss = key_u32(cfg, "dormant.disk_loss");
+    p->dormant_dwell = key_u32(cfg, "dormant.dwell");
     p->kinds = p->threads || p->e_share > 0;
     if (p->kinds)
         sense_n = kSenseReadingsThreads; // + my threads, my kind, my E millicores, free E millicores
@@ -375,7 +355,7 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     identity_map(m.gpu, kGpuOps);
     identity_map(m.npu, kNpuOps);
     if (sel.eq("shuffled")) {
-        const u64 world_seed = cfg.get_u64("seed", 1);
+        const u64 world_seed = key_u64(cfg, "seed");
         if (sel_seed == 0)
             sel_seed = world_seed;
         Rng r(sel_seed, Rng::kWorldNode, 0x73656C6563746F72ull); // "selector"
@@ -391,82 +371,61 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
         if (p->disk) // compare (changes nothing) never stays at 0
             draw_selector_map(r, m.disk, 3);
         m.shuffled = 1;
-    } else if (!sel.eq("nearest")) {
-        cfg.fail("isa.selectors", "must be nearest or shuffled");
     }
-    Str membrane = cfg.get_str("isa.membrane", "private");
-    if (membrane.eq("private"))
-        p->open_membrane = false;
-    else if (membrane.eq("open"))
-        p->open_membrane = true;
-    else
-        cfg.fail("isa.membrane", "must be private or open");
-    p->stack_depth = get_u32(cfg, "isa.stack_depth", 8, 1, kMaxStack);
-    p->search_limit = get_u32(cfg, "isa.search_limit", 400, 1, soup_size);
-    p->max_template = get_u32(cfg, "isa.max_template", 8, 1, 64);
-    p->tierra_share = get_u32(cfg, "tierra.divide_share", 32, 0, 64);
+    p->open_membrane = key_choice(cfg, "isa.membrane").eq("open");
+    p->stack_depth = key_u32(cfg, "isa.stack_depth"); // (at most kMaxStack)
+    p->search_limit = key_u32(cfg, "isa.search_limit", key_max(soup_size));
+    p->max_template = key_u32(cfg, "isa.max_template");
+    p->tierra_share = key_u32(cfg, "tierra.divide_share");
 
-    p->spark_rate = get_f64(cfg, "spark.rate", 0.0, 0.0, 1e6);
-    p->spark_initial = get_u32(cfg, "spark.initial", 0, 0, 10000000);
-    p->spark_grant = get_u32(cfg, "spark.grant", 10, 1, 10000000);
-    p->spark_min = get_u32(cfg, "spark.min_len", 8, 1, soup_size);
-    p->spark_max = get_u32(cfg, "spark.max_len", 128 < soup_size ? 128 : soup_size, 1, soup_size);
+    p->spark_rate = key_f64(cfg, "spark.rate");
+    p->spark_initial = key_u32(cfg, "spark.initial");
+    p->spark_grant = key_u32(cfg, "spark.grant");
+    p->spark_min = key_u32(cfg, "spark.min_len", key_max(soup_size));
+    p->spark_max = key_u32(cfg, "spark.max_len", key_default_max(128 < soup_size ? 128 : soup_size, soup_size));
     if (p->spark_min > p->spark_max)
         cfg.fail("spark.min_len", "must not exceed spark.max_len");
 
-    p->heat_on = cfg.get_bool("heat.enabled", true);
-    p->cool = static_cast<float>(get_f64(cfg, "heat.cool", 0.1, 0.0001, 1.0));
-    p->cpu_gain = static_cast<float>(get_f64(cfg, "heat.cpu_gain", 6.0, 0, 1e9));
-    p->fetch_gain = static_cast<float>(get_f64(cfg, "heat.fetch_gain", 0.001, 0, 1e9));
-    p->write_gain = static_cast<float>(get_f64(cfg, "heat.write_gain", 0.01, 0, 1e9));
-    p->cpu = get_curve(cfg, "heat.cpu", HeatCurve{40, 60, 100, 0.25f, 10, 0});
-    p->mem = get_curve(cfg, "heat.mem", HeatCurve{40, 70, 100, 0.25f, 10, 0});
+    p->heat_on = key_flag(cfg, "heat.enabled");
+    p->cool = static_cast<float>(key_f64(cfg, "heat.cool"));
+    p->cpu_gain = static_cast<float>(key_f64(cfg, "heat.cpu_gain"));
+    p->fetch_gain = static_cast<float>(key_f64(cfg, "heat.fetch_gain"));
+    p->write_gain = static_cast<float>(key_f64(cfg, "heat.write_gain"));
+    p->cpu = get_curve(cfg, "heat.cpu");
+    p->mem = get_curve(cfg, "heat.mem");
     // The GPU runs hot: flat out it settles at 90, deep in its throttle band.
-    p->gpu_gain = static_cast<float>(get_f64(cfg, "heat.gpu_gain", 9.0, 0, 1e9));
-    p->gpu = get_curve(cfg, "heat.gpu", HeatCurve{40, 60, 100, 0.25f, 10, 0});
-    p->npu_gain = static_cast<float>(get_f64(cfg, "heat.npu_gain", 9.0, 0, 1e9));
-    p->npu = get_curve(cfg, "heat.npu", HeatCurve{40, 60, 100, 0.25f, 10, 0});
+    p->gpu_gain = static_cast<float>(key_f64(cfg, "heat.gpu_gain"));
+    p->gpu = get_curve(cfg, "heat.gpu");
+    p->npu_gain = static_cast<float>(key_f64(cfg, "heat.npu_gain"));
+    p->npu = get_curve(cfg, "heat.npu");
     // The ambient leak (Phase 4): 0 = off, every unit's heat its own.
-    p->ambient = static_cast<float>(get_f64(cfg, "heat.ambient", 0.05, 0, 1e6));
+    p->ambient = static_cast<float>(key_f64(cfg, "heat.ambient"));
 
     // Ray's baselines (design.md 6.3): about 1 copy error per 2,000 codons
-    // copied; about 1 background flip per 10,000 instructions executed, which
-    // at full load is 1e-4 * millicores * instr_per_core / 1000 flips per tick,
-    // spread over the soup.
-    double nominal = static_cast<double>(p->millicores) * p->instr_per_core / 1000.0;
-    p->copy_rate = get_f64(cfg, "hazard.copy", 5e-4, 0, 1);
-    p->flaw_rate = get_f64(cfg, "hazard.flaw", 1e-4, 0, 1);
+    // copied; about 1 background flip per 10,000 instructions executed (rot0,
+    // above).
+    p->copy_rate = key_f64(cfg, "hazard.copy");
+    p->flaw_rate = key_f64(cfg, "hazard.flaw");
     // Phase 10 (design.md 6.16): rot is now cosmic rays, a hundredth of Ray's
     // background rate by default (hazard.rot_scale); dead matter decays at
     // that rate instead (mem.decay).
-    // Decay needs a table whose codon 0 is INERT (nova_v2): under the others
-    // zeros are labels, so there it stays off and rot keeps Ray's rate.
-    const bool inert0 = p->table.op[0] == Op::inert;
-    const double rot0 = 1e-4 * nominal / soup_size;
-    if (p->mem_decay < 0)
-        p->mem_decay = inert0 ? (rot0 < 1 ? rot0 : 1.0) : 0.0;
-    const double rot_scale = get_f64(cfg, "hazard.rot_scale", p->mem_decay > 0 ? 0.01 : 1.0, 0, 1e6);
-    p->rot_rate = get_f64(cfg, "hazard.rot", rot0 * rot_scale < 1 ? rot0 * rot_scale : 1.0, 0, 1);
+    const double rot_scale = key_f64(cfg, "hazard.rot_scale", key_default(p->mem_decay > 0 ? 0.01 : 1.0));
+    p->rot_rate = key_f64(cfg, "hazard.rot", key_default(rot0 * rot_scale < 1 ? rot0 * rot_scale : 1.0));
 
-    p->contact_range = get_u32(cfg, "contact.range", 256, 0, soup_size);
-    p->contact_base = get_u32(cfg, "contact.cost_base", 8, 0, 1000000);
-    p->contact_per_codon = get_f64(cfg, "contact.cost_per_codon", 1.0, 0, 1e6);
+    p->contact_range = key_u32(cfg, "contact.range", key_max(soup_size));
+    p->contact_base = key_u32(cfg, "contact.cost_base");
+    p->contact_per_codon = key_f64(cfg, "contact.cost_per_codon");
     // INJECT needs a weakness to exploit and a host it fits in (Phase 1b,
     // design.md 6.6). false / 0 restore the Phase 1a contest for INJECT.
-    p->inject_key = cfg.get_bool("contact.inject_key", true);
-    p->inject_room = get_f64(cfg, "contact.inject_room", 1.0, 0, 1e6);
+    p->inject_key = key_flag(cfg, "contact.inject_key");
+    p->inject_room = key_f64(cfg, "contact.inject_room");
 
-    Str genome = cfg.get_str("seed.genome", "");
-    p->seed_at = get_u32(cfg, "seed.at", 0, 0, soup_size - 1);
-    p->seed_millicores = get_u32(cfg, "seed.millicores", 1000, 0, 10000000);
-    p->seed_gpus = get_u32(cfg, "seed.gpus", 0, 0, 10000000);
-    p->seed_npus = get_u32(cfg, "seed.npus", 0, 0, 10000000);
-    const Str form = cfg.get_str("seed.form", "cpu");
-    p->seed_form = kFormCpu;
-    if (form.eq("gpu"))
-        p->seed_form = kFormGpu;
-    else if (!form.eq("cpu"))
-        cfg.fail("seed.form", "must be cpu or gpu");
+    Str genome = key_str(cfg, "seed.genome");
+    p->seed_at = key_u32(cfg, "seed.at", key_max(soup_size - 1));
+    p->seed_millicores = key_u32(cfg, "seed.millicores");
+    p->seed_gpus = key_u32(cfg, "seed.gpus");
+    p->seed_npus = key_u32(cfg, "seed.npus");
+    p->seed_form = key_choice(cfg, "seed.form").eq("gpu") ? kFormGpu : kFormCpu;
     if (p->seed_form == kFormGpu && !p->warps)
         cfg.fail("seed.form", "gpu needs gpu.warps = true");
     p->seed_len = 0;

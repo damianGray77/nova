@@ -5,6 +5,7 @@
 #include <cstring> // strlen, memcmp
 
 #include "nova/hash.h"
+#include "nova/keys.h" // the settings registry
 #include "nova/rng.h"
 
 #include "warp_layout.inc" // the warp image's layout (Phase 8)
@@ -77,12 +78,18 @@ bool is_structural(Str key) {
     return false;
 }
 
-bool parse_u32_in(Str v, u32 lo, u32 hi, u32* out) {
-    u64 x;
-    if (!parse_u64(v, &x) || x < lo || x > hi)
-        return false;
-    *out = static_cast<u32>(x);
-    return true;
+// A live knob's value, checked against its registry entry (keys.inc), as
+// World::init's read checks it.
+KnobResult knob_f(Str key, Str v, double* out) {
+    return key_check(key, v, KeyAt{}, out) ? KnobResult::ok : KnobResult::bad_value;
+}
+
+KnobResult knob_u(Str key, Str v, KeyAt at, u32* out) {
+    double d = 0;
+    if (!key_check(key, v, at, &d))
+        return KnobResult::bad_value;
+    *out = static_cast<u32>(d);
+    return KnobResult::ok;
 }
 
 KnobResult parse_knob(Str key, Str v, Model model, u32 soup_size, bool dispersal, KnobValue* out) {
@@ -94,67 +101,32 @@ KnobResult parse_knob(Str key, Str v, Model model, u32 soup_size, bool dispersal
         // and never read the key.
         if (out->knob == Knob::edge_corruption && !dispersal)
             return KnobResult::not_live;
-        if (!parse_f64(v, &out->f) || !(out->f >= 0.0 && out->f <= 1.0))
-            return KnobResult::bad_value;
-        return KnobResult::ok;
+        return knob_f(key, v, &out->f);
     case Knob::heat_ambient:
-        if (!parse_f64(v, &out->f) || !(out->f >= 0.0 && out->f <= 1e6))
-            return KnobResult::bad_value;
-        return KnobResult::ok;
+        return knob_f(key, v, &out->f);
     case Knob::none:
         return is_structural(key) ? KnobResult::not_live : KnobResult::unknown_key;
     case Knob::send_rate:
-        if (!parse_f64(v, &out->f) || !(out->f >= 0.0 && out->f <= 1.0))
-            return KnobResult::bad_value;
-        return KnobResult::ok;
+        return knob_f(key, v, &out->f);
     case Knob::sends_per_tick:
-        return parse_u32_in(v, 0, 1024, &out->u) ? KnobResult::ok : KnobResult::bad_value;
     case Knob::mutations_per_tick:
-        return parse_u32_in(v, 0, 1000000, &out->u) ? KnobResult::ok : KnobResult::bad_value;
     case Knob::max_parcel:
-        return parse_u32_in(v, 1, 1000000000, &out->u) ? KnobResult::ok : KnobResult::bad_value;
+        return knob_u(key, v, KeyAt{}, &out->u);
     case Knob::spark_rate:
-        if (!parse_f64(v, &out->f) || !(out->f >= 0.0 && out->f <= 1e6))
-            return KnobResult::bad_value;
-        return KnobResult::ok;
+        return knob_f(key, v, &out->f);
     case Knob::spark_grant:
-        return parse_u32_in(v, 1, 10000000, &out->u) ? KnobResult::ok : KnobResult::bad_value;
+        return knob_u(key, v, KeyAt{}, &out->u);
     case Knob::spark_min:
     case Knob::spark_max:
         // Each length is checked on its own; a min above the max (for a while,
         // between two changes) is read as the range between them.
-        return parse_u32_in(v, 1, soup_size, &out->u) ? KnobResult::ok : KnobResult::bad_value;
+        return knob_u(key, v, key_max(soup_size), &out->u);
     }
     return KnobResult::unknown_key;
 }
 
 const char* const kKnobKeys[] = {"demo.send_rate", "demo.sends_per_tick", "demo.mutations_per_tick",
                                  "demo.max_parcel"};
-const char* const kKnobDefaults[] = {"0.5", "4", "4", "100"};
-
-// Reads a structural u32 key with a range check, reporting through cfg.
-u32 get_u32_in(Config& cfg, Str key, u64 def, u64 lo, u64 hi) {
-    u64 v = cfg.get_u64(key, def);
-    if (v < lo || v > hi) {
-        char what[96];
-        snprintf(what, sizeof what, "must be between %llu and %llu",
-                 static_cast<unsigned long long>(lo), static_cast<unsigned long long>(hi));
-        cfg.fail(key, what);
-        return static_cast<u32>(lo);
-    }
-    return static_cast<u32>(v);
-}
-
-double get_f64_in(Config& cfg, Str key, double def, double lo, double hi) {
-    double v = cfg.get_f64(key, def);
-    if (!(v >= lo && v <= hi)) {
-        char what[96];
-        snprintf(what, sizeof what, "must be between %g and %g", lo, hi);
-        cfg.fail(key, what);
-        return lo;
-    }
-    return v;
-}
 
 // The vary.* key for each noise field (kFieldRugged has none).
 // (kFieldLand has none: world.land and world.drift drive it.)
@@ -191,45 +163,37 @@ const char* describe(KnobResult r) {
 }
 
 bool World::init(Config& cfg) {
-    seed_ = cfg.get_u64("seed", 1);
-    nodes_ = get_u32_in(cfg, "world.nodes", 64, 1, 1000000);
-    Str graph = cfg.get_str("world.graph", "ring");
+    seed_ = key_u64(cfg, "seed");
+    nodes_ = key_u32(cfg, "world.nodes");
+    Str graph = key_choice(cfg, "world.graph");
     procedural_ = graph.eq("procedural");
     landscape_ = graph.eq("landscape");
     spatial_ = procedural_ || landscape_;
-    if (!spatial_ && !graph.eq("ring"))
-        cfg.fail("world.graph", "must be ring, procedural or landscape");
-    u32 chords = spatial_ ? 0 : get_u32_in(cfg, "world.chords", nodes_ / 2, 0, 10000000);
+    u32 chords = spatial_ ? 0 : key_u32(cfg, "world.chords", key_default(nodes_ / 2));
     GraphParams gp;
     gp.nodes = nodes_;
     if (procedural_) {
-        gp.links = get_u32_in(cfg, "world.links", 4, 1, 16);
-        gp.ruggedness = get_f64_in(cfg, "world.ruggedness", 0.2, 0.0, 0.9);
-        gp.long_links = get_f64_in(cfg, "world.long_links", 0.02, 0.0, 1.0);
-        gp.latency_scale = get_f64_in(cfg, "edge.latency_scale", 20.0, 0.0, 1e6);
-        gp.bandwidth = get_u32_in(cfg, "edge.bandwidth", 32, 1, 1u << 24);
+        gp.links = key_u32(cfg, "world.links");
+        gp.ruggedness = key_f64(cfg, "world.ruggedness");
+        gp.long_links = key_f64(cfg, "world.long_links");
+        gp.latency_scale = key_f64(cfg, "edge.latency_scale");
+        gp.bandwidth = key_u32(cfg, "edge.bandwidth");
     }
     if (landscape_) // Phase 7 (design.md 6.13): one world generated like a game level
         read_land_params(cfg);
-    soup_size_ = get_u32_in(cfg, "world.soup_size", 256, 1, 1u << 24);
-    Str model = cfg.get_str("world.model", "demo");
-    if (model.eq("demo"))
-        model_ = Model::demo;
-    else if (model.eq("soup"))
-        model_ = Model::soup;
-    else
-        cfg.fail("world.model", "must be demo or soup");
+    soup_size_ = key_u32(cfg, "world.soup_size");
+    model_ = key_choice(cfg, "world.model").eq("soup") ? Model::soup : Model::demo;
     u32 pool_initial = 0;
     if (model_ == Model::demo) {
-        pool_capacity_ = get_u32_in(cfg, "world.pool_capacity", 1000, 1, 1000000000);
-        pool_initial = get_u32_in(cfg, "world.pool_initial", pool_capacity_ / 2, 0, pool_capacity_);
+        pool_capacity_ = key_u32(cfg, "world.pool_capacity");
+        pool_initial = key_u32(cfg, "world.pool_initial", key_default_max(pool_capacity_ / 2, pool_capacity_));
     }
-    outbox_capacity_ = get_u32_in(cfg, "world.outbox_capacity", 2, 1, 1024);
+    outbox_capacity_ = key_u32(cfg, "world.outbox_capacity");
 
     if (model_ == Model::demo) {
         for (usize i = 0; i < sizeof kKnobKeys / sizeof kKnobKeys[0]; ++i) {
             Str key = kKnobKeys[i];
-            Str v = cfg.get_str(key, kKnobDefaults[i]);
+            Str v = key_text(cfg, key); // (checked as a live knob: set_knob)
             KnobResult r = set_knob(key, v);
             if (r != KnobResult::ok)
                 cfg.fail(key, describe(r));
@@ -256,14 +220,11 @@ bool World::init(Config& cfg) {
         if (spatial_)
             for (u32 f = 1; f < kFieldCount; ++f)
                 if (kVaryKeys[f] && (procedural_ || !resource_field(f)))
-                    vary[f] = get_f64_in(cfg, kVaryKeys[f], 0.0, 0.0, 1.0);
+                    vary[f] = key_f64(cfg, kVaryKeys[f]);
         if (landscape_)
             read_spreads(cfg);
-        Str origins = cfg.get_str("world.origins", "all");
-        one_origin = origins.eq("one");
-        if (!one_origin && !origins.eq("all"))
-            cfg.fail("world.origins", "must be all or one");
-        Str sn = cfg.get_str("seed.node", "all");
+        one_origin = key_choice(cfg, "world.origins").eq("one");
+        Str sn = key_str(cfg, "seed.node");
         if (!sn.eq("all")) {
             u64 v = 0;
             if (!parse_u64(sn, &v) || v >= nodes_)
@@ -281,12 +242,12 @@ bool World::init(Config& cfg) {
         u32 budget = 0;
         if (spatial_) {
             if (procedural_) { // a landscape's land is its own, and doesn't drift
-                land_ = get_f64_in(cfg, "world.land", 0.8, 0.01, 1.0); // Phase 10: every feature on by default
-                drift_ = get_f64_in(cfg, "world.drift", 0.00001, 0.0, 1.0);
+                land_ = key_f64(cfg, "world.land"); // Phase 10: every feature on by default
+                drift_ = key_f64(cfg, "world.drift");
             }
-            budget = get_u32_in(cfg, "world.budget", 0, 0, nodes_);
-            recover_every_ = get_u32_in(cfg, "node.recover_every", 100, 1, 1000000000);
-            fallow_min_ = cfg.get_u64("node.fallow_min", 2000);
+            budget = key_u32(cfg, "world.budget", key_max(nodes_));
+            recover_every_ = key_u32(cfg, "node.recover_every");
+            fallow_min_ = key_u64(cfg, "node.fallow_min");
         }
         lifecycle_ = soup_params_.endurance > 0 || land_ < 1.0;
         if (lifecycle_ && !spatial_)
@@ -297,17 +258,17 @@ bool World::init(Config& cfg) {
         attenuation_ = 0.25;
         reach_ = 8;
         if (channels_) {
-            attenuation_ = get_f64_in(cfg, "signal.attenuation", 0.25, 0.0, 1.0);
-            reach_ = get_u32_in(cfg, "signal.reach", 8, 0, 64);
+            attenuation_ = key_f64(cfg, "signal.attenuation");
+            reach_ = key_u32(cfg, "signal.reach");
         }
         if (dispersal_) {
-            edge_capacity_ = get_u32_in(cfg, "edge.capacity", 2, 1, 1024);
+            edge_capacity_ = key_u32(cfg, "edge.capacity");
             if (!spatial_)
-                gp.bandwidth = get_u32_in(cfg, "edge.bandwidth", 32, 1, 1u << 24);
+                gp.bandwidth = key_u32(cfg, "edge.bandwidth");
             // Phase 4 (design.md 6.10): transit corruption and link failures.
-            edge_corruption_ = get_f64_in(cfg, "edge.corruption", 0.0002, 0.0, 1.0);
-            edge_failure_ = get_f64_in(cfg, "edge.failure", 0.0001, 0.0, 1.0);
-            edge_downtime_ = get_f64_in(cfg, "edge.downtime", 1000.0, 1.0, 1e9);
+            edge_corruption_ = key_f64(cfg, "edge.corruption");
+            edge_failure_ = key_f64(cfg, "edge.failure");
+            edge_downtime_ = key_f64(cfg, "edge.downtime");
         }
     }
     if (landscape_ && model_ != Model::soup)
@@ -316,7 +277,7 @@ bool World::init(Config& cfg) {
     // under disk.path (its files go when the run ends).
     disk_folder_.clear();
     if (model_ == Model::soup) {
-        const Str dp = cfg.get_str("disk.path", "");
+        const Str dp = key_str(cfg, "disk.path");
         if (dp.n && soup_params_.disk > 0) {
             static u32 runs = 0;
             disk_folder_.append(dp);
@@ -746,37 +707,35 @@ void World::read_land_params(Config& cfg) {
     LandParams& p = lp_;
     p = LandParams{};
     p.nodes = nodes_;
-    p.aspect = get_f64_in(cfg, "land.aspect", 1.6, 0.1, 10.0);
-    p.fraction = get_f64_in(cfg, "land.fraction", 0.45, 0.01, 1.0);
-    p.scale = get_f64_in(cfg, "land.scale", 2.5, 0.1, 100.0);
-    p.warp = get_f64_in(cfg, "land.warp", 0.3, 0.0, 2.0);
-    p.border = get_f64_in(cfg, "land.border", 0.6, 0.0, 4.0);
-    p.resolution = get_u32_in(cfg, "land.resolution", 256, 16, 8192);
-    p.paths_mean = get_f64_in(cfg, "paths.mean", 3.0, 0.0, 64.0);
-    p.paths_spread = get_f64_in(cfg, "paths.spread", 0.5, 0.0, 4.0);
-    p.paths_isolated = get_f64_in(cfg, "paths.isolated", 0.01, 0.0, 1.0);
-    p.paths_hubs = get_f64_in(cfg, "paths.hubs", 0.02, 0.0, 1.0);
-    p.paths_max = get_u32_in(cfg, "paths.max", 12, 1, 64);
-    p.paths_connected = cfg.get_bool("paths.connected", false);
-    p.paths_long = get_f64_in(cfg, "paths.long", 0.01, 0.0, 1.0);
-    p.latency_scale = get_f64_in(cfg, "edge.latency_scale", 20.0, 0.0, 1e6);
-    p.bandwidth = get_u32_in(cfg, "edge.bandwidth", 32, 1, 1u << 24);
-    p.bridge_count = get_u32_in(cfg, "bridge.count", 1, 0, 64);
-    p.bridge_isolated = get_f64_in(cfg, "bridge.isolated", 0.0, 0.0, 1.0);
-    p.bridge_max_length = get_f64_in(cfg, "bridge.max_length", 0.25, 0.0, 100.0);
-    p.bridge_latency_scale = get_f64_in(cfg, "bridge.latency_scale", 100.0, 0.0, 1e6);
-    p.bridge_bandwidth = get_u32_in(cfg, "bridge.bandwidth", 8, 1, 1u << 24);
-    p.open_every = get_u32_in(cfg, "bridge.open_every", 20000, 0, 1000000000);
-    p.open_ticks = get_u32_in(cfg, "bridge.open_ticks", 1000, 0, 1000000000);
-    const Str ph = cfg.get_str("bridge.phase", "staggered");
+    p.aspect = key_f64(cfg, "land.aspect");
+    p.fraction = key_f64(cfg, "land.fraction");
+    p.scale = key_f64(cfg, "land.scale");
+    p.warp = key_f64(cfg, "land.warp");
+    p.border = key_f64(cfg, "land.border");
+    p.resolution = key_u32(cfg, "land.resolution");
+    p.paths_mean = key_f64(cfg, "paths.mean");
+    p.paths_spread = key_f64(cfg, "paths.spread");
+    p.paths_isolated = key_f64(cfg, "paths.isolated");
+    p.paths_hubs = key_f64(cfg, "paths.hubs");
+    p.paths_max = key_u32(cfg, "paths.max");
+    p.paths_connected = key_flag(cfg, "paths.connected");
+    p.paths_long = key_f64(cfg, "paths.long");
+    p.latency_scale = key_f64(cfg, "edge.latency_scale");
+    p.bandwidth = key_u32(cfg, "edge.bandwidth");
+    p.bridge_count = key_u32(cfg, "bridge.count");
+    p.bridge_isolated = key_f64(cfg, "bridge.isolated");
+    p.bridge_max_length = key_f64(cfg, "bridge.max_length");
+    p.bridge_latency_scale = key_f64(cfg, "bridge.latency_scale");
+    p.bridge_bandwidth = key_u32(cfg, "bridge.bandwidth");
+    p.open_every = key_u32(cfg, "bridge.open_every");
+    p.open_ticks = key_u32(cfg, "bridge.open_ticks");
+    const Str ph = key_choice(cfg, "bridge.phase");
     if (ph.eq("together"))
         p.phase = kPhaseTogether;
-    else if (ph.eq("staggered"))
-        p.phase = kPhaseStaggered;
     else if (ph.eq("random"))
         p.phase = kPhaseRandom;
     else
-        cfg.fail("bridge.phase", "must be together, staggered or random");
+        p.phase = kPhaseStaggered;
     if (p.paths_isolated + p.paths_hubs > 1.0)
         cfg.fail("paths.hubs", "paths.isolated + paths.hubs must be at most 1");
 }
@@ -794,14 +753,15 @@ void World::read_spreads(Config& cfg) {
             k.append(leaf);
             return k.view();
         };
-        s.spread = get_f64_in(cfg, key("spread"), 0.0, 0.0, 4.0);
-        s.smooth = get_f64_in(cfg, key("smooth"), 0.0, 0.0, 1.0);
-        s.barren = get_f64_in(cfg, key("barren"), 0.0, 0.0, 1.0);
-        s.hotspots = get_u32_in(cfg, key("hotspots"), 0, 0, 10000);
-        s.boost = get_f64_in(cfg, key("hotspot_boost"), 2.0, 0.0, 1000.0);
+        // The <spread>.* family (keys.inc).
+        s.spread = key_f64(cfg, key("spread"));
+        s.smooth = key_f64(cfg, key("smooth"));
+        s.barren = key_f64(cfg, key("barren"));
+        s.hotspots = key_u32(cfg, key("hotspots"));
+        s.boost = key_f64(cfg, key("hotspot_boost"));
         // Phase 8: rich where another distribution is poor (its noise field
         // the opposite way round), so GPU-rich regions can be CPU-poor.
-        const Str a = cfg.get_str(key("against"), "none");
+        const Str a = key_choice(cfg, key("against"));
         const char* const others[7] = {"spark", "memory", "cpu", "gpu", "npu", "disk", "ecpu"};
         const u32 fields[7] = {kFieldSparkRate, kFieldSoupSize, kFieldMillicores, kFieldGpus,
                                kFieldNpus,      kFieldDisk,     kFieldEcpu};
@@ -1158,11 +1118,9 @@ void World::accel_open(Config& cfg) {
     npu_on_gpu_ = false;
     acc_notes_.clear();
     acc_batches_ = acc_device_ops_ = acc_npu_ops_ = acc_reference_ops_ = acc_verified_ = acc_mismatches_ = 0;
-    const Str g = cfg.get_str("accel.gpu", "auto");
-    const Str npu = cfg.get_str("accel.npu", "auto");
-    if (!npu.eq("auto") && !npu.eq("cpu") && !npu.eq("gpu"))
-        cfg.fail("accel.npu", "must be auto, cpu or gpu");
-    verify_every_ = get_u32_in(cfg, "accel.verify", 0, 0, 1000000000);
+    const Str g = key_str(cfg, "accel.gpu");
+    const Str npu = key_choice(cfg, "accel.npu");
+    verify_every_ = key_u32(cfg, "accel.verify");
     if (!accel_async_ || (g.eq("cpu") && !npu.eq("auto")))
         return;
     AccelDevice devs[16];
@@ -1225,17 +1183,13 @@ void World::warp_open(Config& cfg) {
     warp_auto_ticks_ = warp_plain_ticks_ = 0;
     warp_tick_s_[0] = warp_tick_s_[1] = 0;
     warp_last_plain_ = 2;
-    const Str d = cfg.get_str("warp.device", "auto");
-    if (!d.eq("auto") && !d.eq("gpu") && !d.eq("cpu") && !d.eq("mixed"))
-        cfg.fail("warp.device", "must be auto, gpu, cpu or mixed");
+    const Str d = key_choice(cfg, "warp.device");
     warp_auto_ = d.eq("auto");
     warp_mixed_ = d.eq("mixed"); // a test: nodes split between the two at random, every round
-    warp_verify_ = get_u32_in(cfg, "warp.verify", 0, 0, 1000000000);
+    warp_verify_ = key_u32(cfg, "warp.verify");
     // warp.kernel (docs/dxc-plan.md D3): DXC's kernel where it can run (32
     // lanes, Shader Model 6.0), else FXC's; or FXC's always. The same words.
-    const Str kern = cfg.get_str("warp.kernel", "dxc");
-    if (!kern.eq("dxc") && !kern.eq("fxc"))
-        cfg.fail("warp.kernel", "must be dxc or fxc");
+    const Str kern = key_choice(cfg, "warp.kernel");
     if (!soup_params_.warps || d.eq("cpu"))
         return;
     AccelDevice devs[16];

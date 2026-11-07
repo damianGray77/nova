@@ -1,48 +1,20 @@
 #include "nova/lineage.h"
 
+#include "nova/keys.h" // the settings registry
 #include "nova/soup.h"
 
 namespace nova {
 
 bool detect_params_from_config(Config& cfg, DetectParams* p) {
-    p->enabled = cfg.get_bool("detect.enabled", true);
-    double sim = cfg.get_f64("detect.similarity", 0.75);
-    if (!(sim > 0.0 && sim <= 1.0)) {
-        cfg.fail("detect.similarity", "must be above 0 and at most 1");
-        sim = 0.75;
-    }
-    p->similarity = sim;
-    u64 t = cfg.get_u64("detect.genebank_threshold", 2);
-    if (t < 1 || t > 1000000) {
-        cfg.fail("detect.genebank_threshold", "must be between 1 and 1000000");
-        t = 2;
-    }
-    p->genebank_threshold = static_cast<u32>(t);
-    p->inject = cfg.get_bool("detect.inject", true);
-    p->written = cfg.get_bool("detect.written", true);
-    u64 gd = cfg.get_u64("detect.gate_depth", 2), ga = cfg.get_u64("detect.gate_alive", 2);
-    if (gd < 1 || gd > 1000000) {
-        cfg.fail("detect.gate_depth", "must be between 1 and 1000000");
-        gd = 2;
-    }
-    if (ga < 1 || ga > 1000000) {
-        cfg.fail("detect.gate_alive", "must be between 1 and 1000000");
-        ga = 2;
-    }
-    p->gate_depth = static_cast<u32>(gd);
-    p->gate_alive = static_cast<u32>(ga);
-    u64 ss = cfg.get_u64("signal.sustained", 100);
-    if (ss < 1 || ss > 1000000000) {
-        cfg.fail("signal.sustained", "must be between 1 and 1000000000");
-        ss = 100;
-    }
-    p->signal_sustained = static_cast<u32>(ss);
-    u64 df = cfg.get_u64("detect.defended", 3);
-    if (df < 1 || df > 1000000000) {
-        cfg.fail("detect.defended", "must be between 1 and 1000000000");
-        df = 3;
-    }
-    p->defended = static_cast<u32>(df);
+    p->enabled = key_flag(cfg, "detect.enabled");
+    p->similarity = key_f64(cfg, "detect.similarity");
+    p->genebank_threshold = key_u32(cfg, "detect.genebank_threshold");
+    p->inject = key_flag(cfg, "detect.inject");
+    p->written = key_flag(cfg, "detect.written");
+    p->gate_depth = key_u32(cfg, "detect.gate_depth");
+    p->gate_alive = key_u32(cfg, "detect.gate_alive");
+    p->signal_sustained = key_u32(cfg, "signal.sustained");
+    p->defended = key_u32(cfg, "detect.defended");
     return cfg.ok();
 }
 

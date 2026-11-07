@@ -3,6 +3,8 @@ add_library(nova_core STATIC
     src/str.cpp
     src/io.cpp
     src/config.cpp
+    # The settings registry (docs/config-plan.md C1): its table is src/keys.inc.
+    src/keys.cpp
     src/pool.cpp
     src/world.cpp
     src/graph.cpp
