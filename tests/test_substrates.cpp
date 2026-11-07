@@ -656,7 +656,8 @@ void test_nodes_file() {
     bytes.push(0);
     const char* text = reinterpret_cast<const char*>(bytes.data());
     const char* tail = ",life,born,sub_p_cores,sub_e_cores,sub_gpu,sub_npu,sub_mem_fast,sub_mem_slow,sub_disk_fast,"
-                       "sub_disk_slow,occupancy\n";
+                       "sub_disk_slow,occupancy,"
+                       "symptom_ticks,struck,cores_offline\n"; // (then the disasters', docs/disasters-plan.md X7)
     const char* nl = strchr(text, '\n');
     CHECK(nl != nullptr && strstr(text, tail) == nl + 1 - strlen(tail));
     // The last window's row for node 5 (the rows go window by window, node by
@@ -668,16 +669,16 @@ void test_nodes_file() {
             lines.push(p);
     CHECK(lines.size() == 1 + 2 * w.node_count());
     const char* row = lines[lines.size() - w.node_count() + 5];
-    double v[38] = {};
+    double v[42] = {};
     u32 col = 0;
-    for (const char* p = row; *p && *p != '\n' && col < 38; ++col) {
+    for (const char* p = row; *p && *p != '\n' && col < 42; ++col) {
         const char* e = p;
         while (*e && *e != ',' && *e != '\n')
             ++e;
         parse_f64(Str(p, static_cast<usize>(e - p)), &v[col]);
         p = *e == ',' ? e + 1 : e;
     }
-    bool ok = col == 38 && v[2] == 5;
+    bool ok = col == 41 && v[2] == 5;
     for (u32 t = 0; t < kSubstrateTypes; ++t)
         ok = ok && fabs(v[29 + t] - w.substrate_mult(5, t)) < 1e-9;
     ok = ok && fabs(v[37] - w.node_soup(5).occupancy()) < 1e-6;
@@ -686,24 +687,26 @@ void test_nodes_file() {
     remove(nodes);
 }
 
-// The legacy defaults without the varied world's three switches (this plan's
-// two and the disk tiers' archive): the registry's then apply.
+// The legacy defaults without the switches of the features snapshot v4 brought
+// (this plan's two, the disk tiers' archive and the disasters): the registry's
+// then apply.
 void fallback_without_switches(TextBuf* out) {
     const char* p = kLegacyDefaults;
     while (*p) {
         const char* e = strchr(p, '\n');
         const usize n = e ? static_cast<usize>(e - p + 1) : strlen(p);
         if (strncmp(p, "substrate.enabled", 17) != 0 && strncmp(p, "spark.activity", 14) != 0 &&
-            strncmp(p, "world.archive", 13) != 0)
+            strncmp(p, "world.archive", 13) != 0 && strncmp(p, "disaster.enabled", 16) != 0)
             out->append(Str(p, n));
         p += n;
     }
 }
 
 // A snapshot from before v4 comes from a world without substrates, sparks by
-// activity or the archive (disk tiers): it resumes with all three off, though
-// the registry's defaults turn them on. The world has a disk, so the
-// archive's default (a quarter of it) would change its disk section's shape.
+// activity, the archive (disk tiers) or the disasters: it resumes with all
+// four off, though the registry's defaults turn them on. The world has a
+// disk, so the archive's default (a quarter of it) would change its disk
+// section's shape.
 void test_old_snapshot() {
     TextBuf land;
     land.append(kLandBase);
@@ -732,6 +735,7 @@ void test_old_snapshot() {
         CHECK(!b.world().substrates() && b.world().node_params(0).spark_activity == 0.0);
         CHECK(b.world().node_params(0).disk > 0 && b.world().node_params(0).archive == 0 &&
               b.config().get_str("world.archive", "").eq("0"));
+        CHECK(!b.world().disasters() && b.config().get_str("disaster.enabled", "").eq("false"));
         b.run_until(80);
         CHECK_EQ_U64(b.world().hash(), want);
     }

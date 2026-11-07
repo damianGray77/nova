@@ -351,6 +351,7 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     p->dormant_mem_loss = key_u32(cfg, "dormant.mem_loss");
     p->dormant_disk_loss = key_u32(cfg, "dormant.disk_loss");
     p->dormant_dwell = key_u32(cfg, "dormant.dwell");
+    p->disasters = key_flag(cfg, "disaster.enabled"); // docs/disasters-plan.md (the world reads the rest)
     p->kinds = p->threads || p->e_share > 0;
     if (p->kinds)
         sense_n = kSenseReadingsThreads; // + my threads, my kind, my E millicores, free E millicores
@@ -687,6 +688,9 @@ void Soup::init(const SoupParams* p, u64 seed, u32 node, u32 life, const Ruins* 
     dorm_.clear();
     dorm_tag_.clear();
     origin_.clear();
+    offline_.clear(); // disasters: every core online, nothing brewing
+    weather_ = Weather{};
+    clear_fever();
     if (p->vent_spacing > 0) {
         const u32 nv = n / p->vent_spacing > 0 ? n / p->vent_spacing : 1;
         Rng vr(seed ^ 0x76656E7473000000ull, node, Rng::kInitTick - life); // "vents"
@@ -1146,7 +1150,7 @@ u32 Soup::drift_port() {
 // fossils, its warps and threads. Then it drifts to a random neighbour, or
 // rests here with nowhere to go. With no reserves it has no time to search:
 // false, and it dies as before.
-bool Soup::go_dormant(u32 b) {
+bool Soup::go_dormant(u32 b, u64 offline_until, u32 grace) {
     Body& B = bodies_[b];
     const u32 k = B.blocks;
     if (k == kNone)
@@ -1154,18 +1158,21 @@ bool Soup::go_dormant(u32 b) {
     const u32 code = blocks_[k].owned;
     const u32 mem_reserve = B.mem > code ? B.mem - code : 0;
     const u32 disk_reserve = disk_on() ? disk_.total[b] : 0; // (W4: both tiers)
-    if (code == 0 || (mem_reserve == 0 && disk_reserve == 0)) {
-        ++frozen_bare_;
+    const bool bare = mem_reserve == 0 && disk_reserve == 0;
+    if (code == 0 || (bare && grace == 0)) {
+        if (offline_until == 0) // (a burnout's victims aren't frozen)
+            ++frozen_bare_;
         return false;
     }
     Dormant d = {};
     d.on = 1;
     d.dwell = p_->dormant_dwell;
-    d.mem_reserve = mem_reserve;
+    d.mem_reserve = bare ? grace : mem_reserve; // disasters X4: a bare burnout victim's grace reserve
     // W4: each tier's reserve apart (the clock spends the fast disk's first;
     // waking claims each tier's).
     d.archive_reserve = disk_.tiered() ? disk_.held_in(b, true) : 0;
     d.disk_reserve = disk_reserve - d.archive_reserve;
+    d.flags = static_cast<u8>((offline_until ? kDormantBurnt : 0) | (bare ? kDormantGraced : 0)); // (disasters X4)
     const u32 e = e_units(b);
     d.millicores = B.units - e;
     d.emillicores = e;
@@ -1192,10 +1199,20 @@ bool Soup::go_dormant(u32 b) {
     while (B.unit_head != kNone) {
         const u32 u = B.unit_head;
         unlink_unit(u);
-        pool_push(u);
+        if (offline_until) // disasters X4: burnt, offline for repair (no one's, not free)
+            offline_.push(OfflineCore{offline_until, u, 0});
+        else
+            pool_push(u);
     }
-    if (p_->gpus)
+    if (p_->gpus && offline_until) {
+        while (gpu_.head[b] != kNone) {
+            const u32 u = gpu_.head[b];
+            gpu_.unlink(u);
+            offline_.push(OfflineCore{offline_until, u | kOfflineGpu, 0});
+        }
+    } else if (p_->gpus) {
         gpu_.release(b, gpu_.count[b]);
+    }
     if (p_->npus)
         npu_.release(b, npu_.count[b]);
     if (disk_on()) // (W4: both tiers)
@@ -1218,6 +1235,8 @@ bool Soup::go_dormant(u32 b) {
     ++tally_.dormant_started;
     dormant_mem_sum_ += mem_reserve;
     dormant_disk_sum_ += disk_reserve;
+    if (offline_until) // disasters X4: a burnout's victim rests here for its dwell first
+        return true;
     const u32 nbr = drift_port();
     if (nbr != kNone)
         depart_dormant(b, nbr);
@@ -1762,6 +1781,9 @@ void Soup::accel_heat_update() {
     if (!p_->heat_on)
         return;
     const float decay = 1.0f - p_->cool;
+    for (usize i = 0; i < fever_unit_.size(); ++i) // disasters X10: fevered GPU units
+        if ((fever_unit_[i] & kOfflineGpu) && (fever_unit_[i] & ~kOfflineGpu) < gpu_.units())
+            gpu_.heat[fever_unit_[i] & ~kOfflineGpu] += fever_heat_[i];
     if (p_->gpus)
         tally_.gpu_released += gpu_.heat_update(p_->gpu, p_->gpu_gain, decay,
                                                 static_cast<float>(p_->gpu_elements) * p_->gpu_speed, ambient_);
@@ -2257,6 +2279,10 @@ void Soup::begin_tick(u64 tick) {
     }
     flaw_left_ = p_->flaw_rate > 0 ? -log(1.0 - rng_.unit()) / (p_->flaw_rate * hazard_mult_) : 1e300;
     copy_left_ = p_->copy_rate > 0 ? -log(1.0 - rng_.unit()) / (p_->copy_rate * hazard_mult_) : 1e300;
+    // Disasters X10: an OS crash's instability, spurious faults per
+    // instruction (drawn only while it brews, so other ticks are unchanged).
+    faults_on_ = weather_.faults > 0;
+    fault_left_ = faults_on_ ? -log(1.0 - rng_.unit()) / weather_.faults : 1e300;
 }
 
 // The end of a tick (Phase 4 lifecycle): whether the node is due to collapse,
@@ -2279,6 +2305,7 @@ u32 Soup::health() const {
 // Every body dies an ordinary death: its code stays behind as remnants
 // (stamped, with salvage on) and its disk as fossils; units go to the pools.
 void Soup::collapse() {
+    repair(~0ull); // disasters: offline cores are moot on a fallow node (back to the pools)
     for (usize k = 0; k < order_.size(); ++k)
         if (bodies_[order_[k]].alive)
             kill(order_[k]);
@@ -2476,6 +2503,8 @@ void Soup::tick_second_parts() {
         if (p_->archive_decay > 0)
             tally_.decayed += disk_.decay_range(rng_, p_->archive_decay, disk_.fast, disk_.size());
     }
+    if (weather_.disk_rot > 0 || weather_.static_rot > 0) // disasters X10, after every earlier draw
+        weather_hazards();
     death_sweep();
     if (!actions_.empty()) // Phase 9
         sweep_actions();
@@ -2994,6 +3023,12 @@ void Soup::heat_update() {
         }
         ambient_ = static_cast<float>(p_->ambient * sum / m);
     }
+    // Disasters X10: a surge's brownout warms every unit and page here, and a
+    // burnout's fevered cores run hotter than their work explains.
+    ambient_ += weather_.heat;
+    for (usize i = 0; i < fever_unit_.size(); ++i)
+        if (!(fever_unit_[i] & kOfflineGpu) && fever_unit_[i] < m)
+            unit_heat_[fever_unit_[i]] += fever_heat_[i];
     for (u32 u = 0; u < m; ++u) {
         u32 o = unit_owner_[u];
         float h = unit_heat_[u] * decay + (o != kNone ? (is_e(u) ? eheat_[o] : bodies_[o].speed) : 0.0f);
@@ -3294,6 +3329,10 @@ void Soup::hash_into(Hasher& h) const {
         h.bytes(page_fetch_.data(), page_fetch_.size() * sizeof(u32));
         h.bytes(page_write_.data(), page_write_.size() * sizeof(u32));
     }
+    if (p_->disasters) { // disasters X4: the cores offline for repair
+        h.word(offline_.size());
+        h.bytes(offline_.data(), offline_.size() * sizeof(OfflineCore));
+    }
 }
 
 bool Soup::pages_pending() const {
@@ -3479,7 +3518,7 @@ bool UnitLedger::load(ByteReader& r, u64 nbodies, TextBuf* why) {
     return true;
 }
 
-bool UnitLedger::check(const Array<Body>& bodies, const char* what, TextBuf* why) const {
+bool UnitLedger::check(const Array<Body>& bodies, const char* what, TextBuf* why, u32 offline) const {
     auto fail = [why, what](const char* msg, u64 at) {
         why->append(what);
         why->append_char(' ');
@@ -3511,7 +3550,7 @@ bool UnitLedger::check(const Array<Body>& bodies, const char* what, TextBuf* why
             return fail("body unit count wrong at body", b);
         held += c;
     }
-    if (held + pool.size() != n)
+    if (held + pool.size() + offline != n) // (offline: burnt out, disasters X4)
         return fail("units not conserved: held", held);
     for (u32 i = 0; i < pool.size(); ++i)
         if (owner[pool[i]] != kNone || pool_pos[pool[i]] != i)
@@ -3587,6 +3626,8 @@ void Soup::save(ByteWriter& w) const {
         put_array(w, page_fetch_);
         put_array(w, page_write_);
     }
+    if (p_->disasters) // disasters X9 (v4): the cores offline for repair
+        put_array(w, offline_);
 }
 
 bool Soup::load(ByteReader& r, TextBuf* err, u32 version) {
@@ -3760,6 +3801,24 @@ bool Soup::load(ByteReader& r, TextBuf* err, u32 version) {
         page_write_.resize(page_heat_.size());
         page_write_.fill(0);
     }
+    // Disasters X9: the cores offline for repair (v4; none before). check()
+    // below demands each is neither held nor free, and counts them.
+    offline_.clear();
+    weather_ = Weather{};
+    clear_fever();
+    if (p_->disasters && version >= 4) {
+        if (!get_array(r, &offline_, m + p_->gpus)) {
+            err->append("snapshot: offline cores truncated");
+            return false;
+        }
+        for (usize i = 0; i < offline_.size(); ++i) {
+            const u32 u = offline_[i].unit & ~kOfflineGpu;
+            if ((offline_[i].unit & kOfflineGpu) ? u >= p_->gpus : u >= m) {
+                err->append("snapshot: an offline core out of range");
+                return false;
+            }
+        }
+    }
     collapse_ = false; // a snapshot is taken after the barrier applied any collapse
     // Rebuild the derived structures, then demand every invariant.
     used_.resize((static_cast<usize>(n) + 63) / 64);
@@ -3882,7 +3941,26 @@ bool Soup::check(TextBuf* why) const {
     }
     if (mem_total + waste_ != n)
         return fail("memory not conserved: owned", mem_total);
-    if (units_total + pool_.size() + epool_.size() != p_->millicores)
+    // Disasters X4: offline cores are no one's and not free, each listed once.
+    u32 off_cpu = 0, off_gpu = 0;
+    if (!offline_.empty()) {
+        Array<u8> seen;
+        seen.resize(static_cast<usize>(p_->millicores) + gpu_.units());
+        for (usize i = 0; i < offline_.size(); ++i) {
+            const u32 u = offline_[i].unit & ~kOfflineGpu;
+            const bool gpu = (offline_[i].unit & kOfflineGpu) != 0;
+            if (gpu ? (u >= gpu_.units() || gpu_.owner[u] != kNone || gpu_.pool_pos[u] != kNone)
+                    : (u >= p_->millicores || unit_owner_[u] != kNone || pool_pos_[u] != kNone))
+                return fail("offline core held, free or out of range at", i);
+            u8& s = seen[gpu ? p_->millicores + u : u];
+            if (s)
+                return fail("offline core listed twice at", i);
+            s = 1;
+            off_cpu += gpu ? 0 : 1;
+            off_gpu += gpu ? 1 : 0;
+        }
+    }
+    if (units_total + pool_.size() + epool_.size() + off_cpu != p_->millicores)
         return fail("CPU units not conserved: owned", units_total);
     for (u32 i = 0; i < pool_.size(); ++i)
         if (unit_owner_[pool_[i]] != kNone || pool_pos_[pool_[i]] != i || is_e(pool_[i]))
@@ -3914,7 +3992,7 @@ bool Soup::check(TextBuf* why) const {
     }
 
     // GPU and NPU units: per-body lists, owners, the pool, conservation.
-    if (p_->gpus && !gpu_.check(bodies_, "GPU", why))
+    if (p_->gpus && !gpu_.check(bodies_, "GPU", why, off_gpu))
         return false;
     if (p_->npus && !npu_.check(bodies_, "NPU", why))
         return false;

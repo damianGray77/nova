@@ -33,6 +33,8 @@ add_library(nova_core STATIC
     src/warp.cpp
     # Phase 9: measured costs.
     src/cost.cpp
+    # Disasters (docs/disasters-plan.md): surges, crashes, burnouts, disk failures, storms.
+    src/disaster.cpp
 )
 add_library(nova::core ALIAS nova_core)
 

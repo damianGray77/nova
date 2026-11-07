@@ -2029,6 +2029,20 @@ struct Exec {
         s.flaw_left_ = -log(1.0 - s.rng_.unit()) / (p.flaw_rate * s.hazard_mult_);
     }
 
+    // Disasters X10, an OS crash's instability: the instruction faults
+    // spuriously (its error flag set, as IFERR sees it), and with the
+    // weather's halt share the thread halts outright. Returns false.
+    bool spurious() {
+        const Weather& w = s.weather_;
+        ++s.tally_.spurious_faults;
+        s.fault_left_ = -log(1.0 - s.rng_.unit()) / w.faults;
+        if (w.halts > 0 && s.rng_.chance(w.halts) && !c.halted) {
+            c.halted = 1;
+            ++s.tally_.halts;
+        }
+        return false;
+    }
+
     u32 step() {
         const u32 ip = c.ip;
         if (!resolving) { // (an action's end is the same instruction, counted once)
@@ -2052,7 +2066,7 @@ struct Exec {
         // written over it).
         const Op op = resolving ? static_cast<Op>(resolving->op) : p.table.op[s.mem_[ip]];
         t_ps = 0;
-        const bool ok = exec_op(op, ip, &next, &cost);
+        bool ok = exec_op(op, ip, &next, &cost);
         if (deferred) // Phase 9: it started an action; the CPU waits here, at it, until its end
             return 0;
         if (p.cost.timed) { // Phase 9: world time (the GPU verb adds its devices' own, 9b)
@@ -2063,6 +2077,8 @@ struct Exec {
         s.flaw_left_ -= errm;
         if (s.flaw_left_ <= 0)
             flaw();
+        if (s.faults_on_ && (s.fault_left_ -= 1.0) <= 0) // disasters X10: an OS crash brewing
+            ok = spurious();
         if (ok) {
             c.err = 0;
             c.errs = 0;

@@ -14,8 +14,8 @@
 // same lines among its own.
 //
 // ADDING A FEATURE THAT IS ON BY DEFAULT: add its "off" line to the text,
-// with the plan it comes from (the disasters: disaster.enabled = false; the
-// memory tiers: mem.fast_share = 0). That holds while the build that bumped
+// with the plan it comes from (as the disasters did; the memory tiers will add
+// mem.fast_share = 0). That holds while the build that bumped
 // both formats (snapshot v4, replay v3) is being put together. Once runs have
 // been recorded with it, a later default change needs another bump of both
 // formats and a text of its own for the files between.
@@ -30,7 +30,8 @@ inline constexpr u32 kReplayLegacyBefore = 3;   // and replay logs before format
 inline constexpr const char* kLegacyFormatDefaults = //
     "spark.activity = 0\n"                           // sparks by activity (docs/world-plan.md W5)
     "substrate.enabled = false\n"                    // substrates (W2)
-    "world.archive = 0\n";                           // the archive, the disk tiers' second tier (W4)
+    "world.archive = 0\n"                            // the archive, the disk tiers' second tier (W4)
+    "disaster.enabled = false\n";                    // the disasters (docs/disasters-plan.md X1-X11)
 
 // Sets each line of kLegacyFormatDefaults that cfg doesn't name, where the
 // world will read it, so no unused entry is added: every line is a soup

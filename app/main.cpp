@@ -1268,7 +1268,8 @@ int cmd_resume(const Args& a) {
            static_cast<unsigned long long>(w.accel_mismatches()));
     if (w.model() == Model::soup) {
         const u64 nc = w.collapses_total() - col0;
-        printf("nova: since tick %llu: %llu collapses (worn out; %.0f ticks old and %.0f bodies each on average), "
+        printf("nova: since tick %llu: %llu collapses (worn out or surged; %.0f ticks old and %.0f bodies each on "
+               "average), "
                "%llu recoveries; %llu live nodes of %u\n",
                static_cast<unsigned long long>(ticks0), static_cast<unsigned long long>(nc),
                nc ? static_cast<double>(w.collapse_age_sum()) / static_cast<double>(nc) : 0.0,
@@ -1309,6 +1310,23 @@ int cmd_resume(const Args& a) {
                "first sweep)\n",
                static_cast<unsigned long long>(ticks0), static_cast<unsigned long long>(arr),
                static_cast<unsigned long long>(dry), arr ? 100.0 * static_cast<double>(dry) / arr : 0.0);
+        if (w.disasters()) { // docs/disasters-plan.md X7
+            const auto u = [](u64 v) { return static_cast<unsigned long long>(v); };
+            printf("nova: since tick %llu: disasters: %llu surges (%llu nodes collapsed, %llu bodies), %llu crashes "
+                   "(%llu deleted, %llu restarted), %llu burnouts (%llu cores offline, %llu dormant of which %llu "
+                   "graced, %llu died), %llu disk failures (%llu codons), %llu storms formed, %llu strikes (%llu "
+                   "codons)\n",
+                   u(ticks0), u(since.surges), u(since.surge_nodes), u(since.surge_deaths), u(since.crashes),
+                   u(since.crash_deaths), u(since.crash_restarts), u(since.burnouts), u(since.cores_burnt),
+                   u(since.burnout_dormant), u(since.burnout_graced), u(since.burnout_deaths), u(since.disk_failures),
+                   u(since.disk_lost), u(since.storms_formed), u(since.strikes), u(since.strike_codons));
+            printf("nova: since tick %llu: %llu symptom episodes (%llu false alarms), %llu spurious faults, %llu "
+                   "static flips, %llu sounds; now %llu cores offline, %llu nodes rebooting, %u storms out, %u "
+                   "episodes under way\n",
+                   u(ticks0), u(since.episodes), u(since.false_alarms), u(since.spurious_faults),
+                   u(since.static_flips), u(since.sounds), u(w.cores_offline()), u(w.rebooting_count()),
+                   w.storm_count(), w.episode_count());
+        }
     }
     return 0;
 }

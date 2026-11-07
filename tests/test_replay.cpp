@@ -3,6 +3,7 @@
 
 #include "check.h"
 #include "helpers.h"
+#include "nova/keys.h"
 #include "nova/legacy.h"
 #include "nova/replay.h"
 
@@ -197,7 +198,8 @@ const char* const kOldDiskLog = "nova-replay 2\n"
 const char* const kDiskWorld = "seed = 11\nworld.model = soup\nworld.graph = procedural\nworld.nodes = 12\n"
                                "world.soup_size = 2048\nworld.millicores = 600\nworld.disk = 512\nspark.initial = 20\n"
                                "spark.rate = 0.5\naccel.gpu = cpu\naccel.npu = cpu\nwarp.device = cpu\n";
-const char* const kNewFeaturesOff = "spark.activity = 0\nsubstrate.enabled = false\nworld.archive = 0\n";
+const char* const kNewFeaturesOff =
+    "spark.activity = 0\nsubstrate.enabled = false\nworld.archive = 0\ndisaster.enabled = false\n";
 
 // The logged config a parsed log gives to replay, as a Config.
 bool replayed_config(Str text, Config* out) {
@@ -210,26 +212,32 @@ bool replayed_config(Str text, Config* out) {
 // What a log replays with: a log before v3 takes the legacy defaults for the
 // settings it doesn't name, only where the world reads them; a v3 log doesn't.
 void test_legacy_config() {
+    // The text parses, and every line is a registry setting.
+    Config legacy;
+    Config::ParseError pe;
+    CHECK(legacy.parse(kLegacyFormatDefaults, &pe) && legacy.count() >= 4);
+    bool settings = true;
+    for (usize i = 0; i < legacy.count(); ++i)
+        settings = settings && key_find(legacy.key(i)) != nullptr;
+    CHECK(settings);
+    const usize L = legacy.count();
     Config c;
     CHECK(replayed_config("nova-replay 2\nconfig world.model = soup\nconfig world.graph = procedural\n", &c));
-    CHECK(c.count() == 5 && c.get_str("spark.activity", "").eq("0") &&
-          c.get_str("substrate.enabled", "").eq("false") && c.get_str("world.archive", "").eq("0"));
+    CHECK(c.count() == 2 + L && c.get_str("spark.activity", "").eq("0") &&
+          c.get_str("substrate.enabled", "").eq("false") && c.get_str("world.archive", "").eq("0") &&
+          c.get_str("disaster.enabled", "").eq("false"));
     CHECK(replayed_config("nova-replay 1\nconfig world.model = soup\nconfig world.graph = landscape\n", &c));
-    CHECK(c.count() == 5); // v1 too
+    CHECK(c.count() == 2 + L); // v1 too
     CHECK(replayed_config("nova-replay 3\nconfig world.model = soup\nconfig world.graph = procedural\n", &c));
-    CHECK(c.count() == 2 && !c.has("spark.activity") && !c.has("world.archive"));
+    CHECK(c.count() == 2 && !c.has("spark.activity") && !c.has("world.archive") && !c.has("disaster.enabled"));
     // A setting the log names keeps its value.
     CHECK(replayed_config("nova-replay 2\nconfig world.model = soup\nconfig world.archive = 256\n", &c));
     CHECK(c.get_str("world.archive", "").eq("256") && c.get_str("spark.activity", "").eq("0"));
     // A ring reads no substrate settings, and a demo world none of these.
     CHECK(replayed_config("nova-replay 2\nconfig world.model = soup\n", &c));
-    CHECK(c.count() == 3 && !c.has("substrate.enabled"));
+    CHECK(c.count() == L && !c.has("substrate.enabled"));
     CHECK(replayed_config("nova-replay 2\nconfig seed = 1\n", &c));
     CHECK(c.count() == 1);
-    // The text parses, and every line is a registry setting.
-    Config legacy;
-    Config::ParseError pe;
-    CHECK(legacy.parse(kLegacyFormatDefaults, &pe) && legacy.count() >= 3);
 }
 
 // Rewrites a log as the build before v3 would have written it: header 2, and

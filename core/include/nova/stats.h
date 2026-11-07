@@ -79,6 +79,26 @@
 //   founded_arrival, founded_wake     the founding body began (world plan W7;
 //                                     zeros when detection is off; founders
 //                                     alive at a resume, or seeded, in none)
+// then the disasters' (docs/disasters-plan.md X7, X10, X11; sums, then gauges;
+// zeros with disaster.enabled off):
+//   surges, surge_nodes, surge_deaths power surges; the nodes they collapsed and
+//                                     the bodies those took
+//   crashes, crash_deaths,            OS crashes; programs deleted; programs
+//   crash_restarts                    restarted
+//   burnouts, cores_burnt,            burnouts; cores sent offline; programs
+//   burnout_dormant, burnout_graced,  sent dormant, of which graced; programs
+//   burnout_deaths                    killed
+//   disk_failures, disk_lost          disks lost; codons held on them
+//   storms_formed, strikes,           storms formed; lightning strikes; codons
+//   strike_codons                     they randomised
+//   episodes, false_alarms            symptom episodes begun; of which false
+//   spurious_faults, static_flips     symptoms suffered: a crash's spurious
+//                                     faults; a storm's static bit flips
+//   sounds, sound_amp                 the disasters' sound emissions (a node and
+//                                     channel a tick) and their |amplitude|
+//   cores_offline, rebooting, storms, cores offline, nodes rebooting, storms
+//   episodes_active                   out and symptom episodes under way, now
+// and last, as always, the two floating-point columns:
 //   compress                          soup compressibility (compress.h), mean
 //                                     over nodes: ~1 random, lower = repetitive
 //   ambient                           the ambient heat input, mean over nodes (4)
@@ -93,10 +113,14 @@ void csv_field(TextBuf& out, Str s);
 
 // The soup model's stats columns (the list above), shared by stats.csv and the
 // viewer's charts (Phase 6) so both show exactly the same numbers.
-inline constexpr u32 kStatsColumns = 99;
-inline constexpr u32 kStatsIntColumns = 97; // tick_first .. live_nodes, Phase 8's warp, Phase 9's action,
-                                            // Phase 9c's thread, Phase 10's, dormancy's, the disk tiers'
-                                            // and founders by origin's columns; then compress, ambient
+// The disasters' columns (docs/disasters-plan.md X7): 22 sums, then 4 gauges,
+// the last integer columns.
+inline constexpr u32 kStatsDisasterSums = 22, kStatsDisasterColumns = kStatsDisasterSums + 4;
+inline constexpr u32 kStatsIntColumns = 123; // tick_first .. live_nodes, Phase 8's warp, Phase 9's action,
+                                             // Phase 9c's thread, Phase 10's, dormancy's, the disk tiers',
+                                             // founders by origin's and the disasters' columns
+inline constexpr u32 kStatsColumns = kStatsIntColumns + 2; // then compress, ambient
+inline constexpr u32 kStatsDisasterFirst = kStatsIntColumns - kStatsDisasterColumns; // (97: surges)
 const char* stats_column(u32 i);
 // Index of a column by name, or kStatsColumns if there is none.
 u32 stats_column_index(Str name);
@@ -141,6 +165,9 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
 //                                     without substrates)
 //   occupancy                         the share of its memory held by living
 //                                     bodies, resting dormant ones aside (W5)
+//   symptom_ticks, struck,            disasters (X7, X10): ticks of the window it
+//   cores_offline                     had symptoms; disasters that hit it; its
+//                                     cores offline at the window's end
 class StatsCsv {
   public:
     bool open(const char* path, u32 window, Model model = Model::demo); // writes the header
@@ -162,7 +189,7 @@ class StatsCsv {
 
     TextFile file_;
     TextFile nodes_;
-    Array<u64> node_sum_; // per node: births, deaths, sent, arrived, lost
+    Array<u64> node_sum_; // per node: births, deaths, sent, arrived, lost, symptom ticks, struck
     u32 nodes_every_ = 1, node_windows_ = 0;
     u64 node_first_ = 0; // first tick the next node rows cover
     u64 last_tick_ = 0;  // last tick of the latest whole window
@@ -170,6 +197,7 @@ class StatsCsv {
     u32 channels_ = 0;
     Array<u64> sig_emits_, sig_amp_;
     Array<double> sig_field_; // sum over ticks of the mean |field| per node
+    Array<double> sig_sound_; // disasters (X11): the world's sounds' |amplitude| emitted
     u32 window_ = 0;
     u32 ticks_ = 0;
     u64 first_tick_ = 0;

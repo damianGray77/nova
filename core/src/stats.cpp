@@ -44,14 +44,21 @@ const char* const kColumns[kStatsColumns] = {
     "archive_held", "archive_stores", "archive_loads",
     // founders by origin (world plan W7): lineages founded in the window (sums)
     "founded_spark", "founded_daughter", "founded_arrival", "founded_wake",
+    // disasters (docs/disasters-plan.md X7): twenty-two sums, then four gauges
+    "surges", "surge_nodes", "surge_deaths", "crashes", "crash_deaths", "crash_restarts", "burnouts", "cores_burnt",
+    "burnout_dormant", "burnout_graced", "burnout_deaths", "disk_failures", "disk_lost", "storms_formed", "strikes",
+    "strike_codons", "episodes", "false_alarms", "spurious_faults", "static_flips", "sounds", "sound_amp",
+    "cores_offline", "rebooting", "storms", "episodes_active",
+    // the two floating-point columns, last as always
     "compress",     "ambient"};
 // The first 39 tally fields fill columns 3-41; Phase 8's five go after
 // live_nodes, then Phase 9's four after the warp gauges, then Phase 9c's two
 // and its gauge, then Phase 10's nine, then dormancy's five and its gauges,
 // then the disk tiers' gauge and two, then the detector's foundings by origin
-// (not tallies: the detector's own counts).
+// (not tallies: the detector's own counts), then the disasters' 22 tallies
+// and their four gauges.
 inline constexpr u32 kTallyEarly = 39, kTallyWarp = 5, kTallyAction = 4, kTallyThread = 2, kTallyLife = 9,
-                     kTallyDormant = 5, kTallyArchive = 2, kFoundedColumns = 4;
+                     kTallyDormant = 5, kTallyArchive = 2, kFoundedColumns = 4, kTallyDisaster = kStatsDisasterSums;
 // The origins of those columns, in order (soup.h).
 const u8 kFoundedOrigin[kFoundedColumns] = {kOriginSpark, kOriginDaughter, kOriginArrival, kOriginWake};
 
@@ -62,8 +69,8 @@ u64 total_founded(const World& w, u8 origin) {
             n += L->founded_by(origin);
     return n;
 }
-static_assert(sizeof(SoupTally) / sizeof(u64) ==
-                  kTallyEarly + kTallyWarp + kTallyAction + kTallyThread + kTallyLife + kTallyDormant + kTallyArchive,
+static_assert(sizeof(SoupTally) / sizeof(u64) == kTallyEarly + kTallyWarp + kTallyAction + kTallyThread + kTallyLife +
+                                                     kTallyDormant + kTallyArchive + kTallyDisaster,
               "a SoupTally field was added: update kColumns");
 
 } // namespace
@@ -116,6 +123,8 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
         archive_held += s.params().archive - s.free_archive(); // disk tiers (W4)
         e_held += s.e_held(); // Phase 9c
         gpu_held += s.params().gpus - s.free_gpus();
+        for (usize i = 0; i < s.offline().size(); ++i) // (disasters X4: burnt GPU units are no one's)
+            gpu_held -= (s.offline()[i].unit & kOfflineGpu) ? 1 : 0;
         npu_held += s.params().npus - s.free_npus();
         const Lineages* L = w.node_lineages(n);
         if (!L)
@@ -136,7 +145,7 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
                         disk_held,       w.live_nodes()};
     const usize nt = sizeof tail / sizeof tail[0];
     static_assert(3 + kTallyEarly + sizeof tail / sizeof tail[0] + kTallyWarp + 2 + kTallyAction + kTallyThread + 1 +
-                          kTallyLife + kTallyDormant + 2 + 1 + kTallyArchive + kFoundedColumns ==
+                          kTallyLife + kTallyDormant + 2 + 1 + kTallyArchive + kFoundedColumns + kStatsDisasterColumns ==
                       kStatsIntColumns,
                   "stats row shape");
     for (usize i = 0; i < nt; ++i)
@@ -172,6 +181,16 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
         v[fz + i] = f - marks->founded[i];
         marks->founded[i] = f;
     }
+    // Disasters (X7): their sums, then the gauges.
+    const usize xz = fz + kFoundedColumns;
+    static_assert(3 + 39 + 18 + 5 + 2 + 4 + 2 + 1 + 9 + 5 + 2 + 1 + 2 + 4 == kStatsDisasterFirst, "disasters' first column");
+    for (usize i = 0; i < kTallyDisaster; ++i)
+        v[xz + i] =
+            t[kTallyEarly + kTallyWarp + kTallyAction + kTallyThread + kTallyLife + kTallyDormant + kTallyArchive + i];
+    v[xz + kTallyDisaster] = w.cores_offline();
+    v[xz + kTallyDisaster + 1] = w.rebooting_count();
+    v[xz + kTallyDisaster + 2] = w.storm_count();
+    v[xz + kTallyDisaster + 3] = w.episode_count();
     marks->links = links;
     marks->inject = inject;
     marks->gpu = gpu;
@@ -234,7 +253,9 @@ bool StatsCsv::open_nodes(const char* path, u32 every) {
                  "lost,lineages,colonists,live,health,life,born,"
                  // a varied world (docs/world-plan.md W8), after every earlier column
                  "sub_p_cores,sub_e_cores,sub_gpu,sub_npu,sub_mem_fast,sub_mem_slow,sub_disk_fast,sub_disk_slow,"
-                 "occupancy\n");
+                 "occupancy,"
+                 // the disasters' (docs/disasters-plan.md X7, X10)
+                 "symptom_ticks,struck,cores_offline\n");
     node_sum_.clear();
     return true;
 }
@@ -242,7 +263,7 @@ bool StatsCsv::open_nodes(const char* path, u32 every) {
 bool StatsCsv::open_signals(const char* path, u32 channels) {
     if (!is_open() || model_ != Model::soup || channels == 0 || !signals_.open(path))
         return false;
-    signals_.write("tick_first,tick_last,channel,emits,amplitude,mean_field\n");
+    signals_.write("tick_first,tick_last,channel,emits,amplitude,mean_field,sound_amp\n"); // (sound_amp: disasters, X11)
     channels_ = channels;
     sig_emits_.resize(channels);
     sig_emits_.fill(0);
@@ -250,6 +271,8 @@ bool StatsCsv::open_signals(const char* path, u32 channels) {
     sig_amp_.fill(0);
     sig_field_.resize(channels);
     sig_field_.fill(0);
+    sig_sound_.resize(channels);
+    sig_sound_.fill(0);
     return true;
 }
 
@@ -264,15 +287,17 @@ void StatsCsv::record(const World& w) {
         for (usize i = 0; i < sizeof(SoupTally) / sizeof(u64); ++i)
             sum[i] += t[i];
         if (nodes_.is_open()) {
-            node_sum_.resize(static_cast<usize>(w.node_count()) * 5);
+            node_sum_.resize(static_cast<usize>(w.node_count()) * 7);
             for (u32 n = 0; n < w.node_count(); ++n) {
                 const SoupTally& nt = w.node_soup(n).tally();
-                u64* s = node_sum_.data() + static_cast<usize>(n) * 5;
+                u64* s = node_sum_.data() + static_cast<usize>(n) * 7;
                 s[0] += nt.births;
                 s[1] += nt.deaths;
                 s[2] += nt.sent;
                 s[3] += nt.arrived;
                 s[4] += nt.lost;
+                s[5] += w.node_symptoms(n) ? 1 : 0; // disasters (X10)
+                s[6] += w.node_struck(n);
             }
         }
         if (signals_.is_open()) {
@@ -285,6 +310,8 @@ void StatsCsv::record(const World& w) {
                     sig_field_[c] += (f < 0 ? -static_cast<double>(f) : f) / w.node_count();
                 }
             }
+            for (u32 c = 0; c < channels_; ++c) // disasters (X11): the world's own sounds
+                sig_sound_[c] += w.sound_on_channel(c);
         }
         if (++ticks_ == window_)
             write_row(w, false);
@@ -348,7 +375,7 @@ void StatsCsv::write_node_rows(const World& w) {
         u(s.free_units());
         u(s.free_gpus());
         u(s.free_npus());
-        const u64* sum = node_sum_.size() ? node_sum_.data() + static_cast<usize>(n) * 5 : nullptr;
+        const u64* sum = node_sum_.size() ? node_sum_.data() + static_cast<usize>(n) * 7 : nullptr;
         for (u32 i = 0; i < 5; ++i)
             u(sum ? sum[i] : 0);
         LineageSurvey sv = {};
@@ -365,6 +392,9 @@ void StatsCsv::write_node_rows(const World& w) {
         for (u32 t = 0; t < kSubstrateTypes; ++t)
             f6(w.substrate_mult(n, t));
         f6(s.occupancy());
+        u(sum ? sum[5] : 0); // disasters (X7, X10): symptom ticks, struck, cores offline
+        u(sum ? sum[6] : 0);
+        u(s.offline_count());
         row.append_char('\n');
         nodes_.write(row.view());
     }
@@ -414,6 +444,8 @@ void StatsCsv::write_row(const World& w, bool final) {
                 sig.append_char(',');
                 const double mean = sig_field_[c] / ticks_;
                 sig.append_f64(static_cast<double>(static_cast<i64>(mean * 1e3 + 0.5)) / 1e3);
+                sig.append_char(',');
+                sig.append_u64(static_cast<u64>(sig_sound_[c] + 0.5));
                 sig.append_char('\n');
                 signals_.write(sig.view());
             }
@@ -421,6 +453,7 @@ void StatsCsv::write_row(const World& w, bool final) {
             sig_emits_.fill(0);
             sig_amp_.fill(0);
             sig_field_.fill(0);
+            sig_sound_.fill(0);
         }
         ticks_ = 0;
         soup_sum_ = {};

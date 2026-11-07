@@ -46,6 +46,7 @@ void suite_ecology();
 void suite_keys();
 void suite_substrates(); // a varied world (docs/world-plan.md W1, W2, W5)
 void suite_tiers();      // disk tiers (docs/world-plan.md W4)
+void suite_disasters();  // docs/disasters-plan.md
 
 namespace {
 
@@ -96,6 +97,7 @@ const Suite kSuites[] = {
     {"keys", suite_keys},
     {"substrates", suite_substrates},
     {"tiers", suite_tiers},
+    {"disasters", suite_disasters},
 };
 
 } // namespace
@@ -139,7 +141,8 @@ const char* const kLegacyDefaults ="accel.mode = instant\n"
                                     // and the archive (disk tiers, W4) off
                                     "substrate.enabled = false\n"
                                     "spark.activity = 0\n"
-                                    "world.archive = 0\n";
+                                    "world.archive = 0\n"
+                                    "disaster.enabled = false\n"; // docs/disasters-plan.md: suite disasters tests them
 
 int main(int argc, char** argv) {
     nova::Config::ParseError pe;

@@ -537,6 +537,145 @@ NOVA_WHOLE("dormant.dwell", 15, 1, 1000000000, 0, "Dormancy", "Dwell", "life.dor
            "Ticks a resting program stays on a node before it moves on.")
 
 // ---------------------------------------------------------------------------
+// Disasters (docs/disasters-plan.md X8; core/src/disaster.cpp): set before a
+// run, fixed for it. Intervals are world-wide mean ticks (0 = never).
+// ---------------------------------------------------------------------------
+NOVA_FLAG("disaster.enabled", true, 0, "Disasters", "Disasters", "",
+          "Rare random disasters: power surges, OS crashes, burnouts, disk failures and lightning storms.")
+// X2: power surges
+NOVA_FLAG("disaster.surge", true, 0, "Disasters", "Power surges", "disaster.enabled",
+          "A region collapses: every live node within a few hops of a random one (needs a map world).")
+NOVA_WHOLE("disaster.surge_every", 50000, 0, kKeyNoMax, 0, "Disasters", "Surge interval", "disaster.surge",
+           "Mean ticks between power surges anywhere in the world (0 = none).")
+NOVA_WHOLE("disaster.surge_hops_min", 1, 0, 64, 0, "Disasters", "Surge reach, least", "disaster.surge",
+           "A surge's reach in hops along paths, drawn per surge from here ...")
+NOVA_WHOLE("disaster.surge_hops_max", 2, 0, 64, 0, "Disasters", "Surge reach, most", "disaster.surge",
+           "... to here.")
+NOVA_WHOLE("disaster.surge_lead_min", 1000, 1, 1000000000, 0, "Disasters", "Surge warning, least", "disaster.surge",
+           "Ticks of brownout before a surge (its symptoms), drawn per surge from here ...")
+NOVA_WHOLE("disaster.surge_lead_max", 5000, 1, 1000000000, 0, "Disasters", "Surge warning, most", "disaster.surge",
+           "... to here.")
+// X3: OS crashes
+NOVA_FLAG("disaster.crash", true, 0, "Disasters", "OS crashes", "disaster.enabled",
+          "A node reboots: nothing runs and nothing arrives meanwhile; some of its programs are deleted and the rest "
+          "restart.")
+NOVA_WHOLE("disaster.crash_every", 5000, 0, kKeyNoMax, 0, "Disasters", "Crash interval", "disaster.crash",
+           "Mean ticks between OS crashes anywhere in the world (0 = none).")
+NOVA_WHOLE("disaster.reboot_min", 20, 1, 1000000000, 0, "Disasters", "Reboot, shortest", "disaster.crash",
+           "Ticks a crashed node takes to reboot, drawn per crash from here ...")
+NOVA_WHOLE("disaster.reboot_max", 100, 1, 1000000000, 0, "Disasters", "Reboot, longest", "disaster.crash",
+           "... to here.")
+NOVA_NUMBER("disaster.crash_share_min", 0.1, 0, 1, 0, "Disasters", "Crash deletes, least", "disaster.crash",
+            "The share of a crashed node's running programs deleted (ordinary deaths), drawn per crash from here ...")
+NOVA_NUMBER("disaster.crash_share_max", 0.6, 0, 1, 0, "Disasters", "Crash deletes, most", "disaster.crash",
+            "... to here.")
+NOVA_WHOLE("disaster.crash_lead_min", 200, 1, 1000000000, 0, "Disasters", "Crash warning, least", "disaster.crash",
+           "Ticks of instability before a crash (its symptoms), drawn per crash from here ...")
+NOVA_WHOLE("disaster.crash_lead_max", 1000, 1, 1000000000, 0, "Disasters", "Crash warning, most", "disaster.crash",
+           "... to here.")
+// X4: burnouts
+NOVA_FLAG("disaster.burnout", true, 0, "Disasters", "Burnouts", "disaster.enabled",
+          "Whole programs' cores go offline for repair and the programs go dormant, resting at home first.")
+NOVA_WHOLE("disaster.burnout_every", 2000, 0, kKeyNoMax, 0, "Disasters", "Burnout interval",
+           "disaster.burnout", "Mean ticks between burnouts anywhere in the world (0 = none).")
+NOVA_NUMBER("disaster.burnout_share_min", 0.1, 0, 1, 0, "Disasters", "Burnout share, least", "disaster.burnout",
+            "Programs are picked until they hold this share of the node's cores (millicores and GPU units), drawn "
+            "per burnout from here ...")
+NOVA_NUMBER("disaster.burnout_share_max", 0.4, 0, 1, 0, "Disasters", "Burnout share, most", "disaster.burnout",
+            "... to here.")
+NOVA_WHOLE("disaster.repair_min", 200, 1, 1000000000, 0, "Disasters", "Repair, shortest", "disaster.burnout",
+           "Ticks burnt cores spend offline before they return to the pool, cool, drawn per burnout from here ...")
+NOVA_WHOLE("disaster.repair_max", 2000, 1, 1000000000, 0, "Disasters", "Repair, longest", "disaster.burnout",
+           "... to here.")
+NOVA_NUMBER("disaster.grace_chance", 0.5, 0, 1, 0, "Disasters", "Grace chance", "disaster.burnout",
+            "The chance a burnout victim with no reserves gets a grace reserve; the rest die.")
+NOVA_WHOLE("disaster.grace", 32, 0, 1u << 24, 0, "Disasters", "Grace reserve", "disaster.burnout",
+           "The grace reserve, in codons of memory reserve (about that many ticks at the default clock).")
+NOVA_WHOLE("disaster.burnout_lead_min", 200, 1, 1000000000, 0, "Disasters", "Burnout warning, least",
+           "disaster.burnout", "Ticks of fever before a burnout (its symptoms), drawn per burnout from here ...")
+NOVA_WHOLE("disaster.burnout_lead_max", 1000, 1, 1000000000, 0, "Disasters", "Burnout warning, most",
+           "disaster.burnout", "... to here.")
+// X5: disk failures
+NOVA_FLAG("disaster.diskfail", true, 0, "Disasters", "Disk failures", "disaster.enabled",
+          "A node's disk is lost: every codon INERT, every holding released, resting programs' disk reserves gone.")
+NOVA_WHOLE("disaster.diskfail_every", 10000, 0, kKeyNoMax, 0, "Disasters", "Disk failure interval",
+           "disaster.diskfail", "Mean ticks between disk failures anywhere in the world (0 = none).")
+NOVA_WHOLE("disaster.diskfail_lead_min", 500, 1, 1000000000, 0, "Disasters", "Disk warning, least",
+           "disaster.diskfail", "Ticks of faster disk rot before a disk failure (its symptoms), drawn from here ...")
+NOVA_WHOLE("disaster.diskfail_lead_max", 2000, 1, 1000000000, 0, "Disasters", "Disk warning, most",
+           "disaster.diskfail", "... to here.")
+// X6: lightning storms
+NOVA_FLAG("disaster.storm", true, 0, "Disasters", "Lightning storms", "disaster.enabled",
+          "Storms travel over the map with a heading, striking the node they're over: runs of random codons.")
+NOVA_WHOLE("disaster.storm_every", 5000, 0, kKeyNoMax, 0, "Disasters", "Storm interval", "disaster.storm",
+           "Mean ticks between storms forming anywhere in the world (0 = none).")
+NOVA_WHOLE("disaster.storm_life_min", 2000, 1, 1000000000, 0, "Disasters", "Storm life, shortest", "disaster.storm",
+           "A storm's lifetime in ticks, drawn per storm from here ...")
+NOVA_WHOLE("disaster.storm_life_max", 10000, 1, 1000000000, 0, "Disasters", "Storm life, longest", "disaster.storm",
+           "... to here.")
+NOVA_WHOLE("disaster.storm_move_min", 200, 1, 1000000000, 0, "Disasters", "Storm moves, soonest", "disaster.storm",
+           "Ticks between a storm's moves along a path, drawn per move from here ...")
+NOVA_WHOLE("disaster.storm_move_max", 800, 1, 1000000000, 0, "Disasters", "Storm moves, latest", "disaster.storm",
+           "... to here.")
+NOVA_NUMBER("disaster.storm_turn", 30, 0, 180, 0, "Disasters", "Storm turn", "disaster.storm",
+            "The most a storm's heading turns at a move, in degrees, either way.")
+NOVA_WHOLE("disaster.strike_every_min", 100, 1, 1000000000, 0, "Disasters", "Strikes, most often", "disaster.storm",
+           "A storm's mean ticks between strikes, drawn per storm from here ...")
+NOVA_WHOLE("disaster.strike_every_max", 400, 1, 1000000000, 0, "Disasters", "Strikes, least often",
+           "disaster.storm", "... to here.")
+NOVA_WHOLE("disaster.strike_min", 64, 1, 1u << 24, 0, "Disasters", "Strike size, least", "disaster.storm",
+           "Codons a strike randomises at a random place in memory, drawn per strike from here ...")
+NOVA_WHOLE("disaster.strike_max", 512, 1, 1u << 24, 0, "Disasters", "Strike size, most", "disaster.storm",
+           "... to here.")
+// X10: symptoms
+NOVA_FLAG("disaster.symptoms", true, 0, "Disasters", "Symptoms", "disaster.enabled",
+          "Every disaster is preceded by symptoms that ramp up over its warning time in quantities programs already "
+          "read or suffer.")
+NOVA_NUMBER("disaster.false_alarms", 0.25, 0, 0.9, 0, "Disasters", "False alarms", "disaster.symptoms",
+            "The share of symptom episodes (and storms: dry ones) that fade without a disaster.")
+NOVA_NUMBER("disaster.brownout", 1.0, 0, 1000000, 0, "Disasters", "Brownout heat", "disaster.symptoms",
+            "A surge's warning: extra heat input on every unit and page in its region, a tick, at its peak.")
+NOVA_NUMBER("disaster.noise", 4.0, 0, 1000000, 0, "Disasters", "Static noise", "disaster.symptoms",
+            "Surges and storms raise the signal noise to (1 + this) x the floor at their peak.")
+NOVA_NUMBER("disaster.crash_faults", 5e-4, 0, 1, kKeyLog, "Disasters", "Instability faults", "disaster.symptoms",
+            "A crash's warning: spurious instruction faults per instruction on its node, at the peak.")
+NOVA_NUMBER("disaster.crash_halts", 0.1, 0, 1, 0, "Disasters", "Stray halts", "disaster.symptoms",
+            "The share of those faults that halt their thread outright.")
+NOVA_NUMBER("disaster.fever", 2.0, 0, 1000000, 0, "Disasters", "Burnout fever", "disaster.symptoms",
+            "A burnout's warning: extra heat a tick on the cores about to burn, at the peak.")
+NOVA_NUMBER("disaster.disk_rot", 2e-4, 0, 1, kKeyLog, "Disasters", "Failing disk rot", "disaster.symptoms",
+            "A disk failure's warning: extra disk rot per codon per tick on its node, at the peak.")
+NOVA_NUMBER("disaster.static", 1e-4, 0, 1, kKeyLog, "Disasters", "Storm static", "disaster.symptoms",
+            "A storm's warning: bit flips per memory codon per tick under it, building on the node it moves to next.")
+// X11: sounds
+NOVA_FLAG("disaster.sounds", true, 0, "Disasters", "Sounds", "disaster.enabled",
+          "Each disaster has a voice in the signal field, on its own band of channels (silent without signals).")
+NOVA_WHOLE("disaster.surge_band", 13, 0, 255, 0, "Disasters", "Surge band", "disaster.sounds",
+           "A surge's first channel (3 wide): its hum and its bang.")
+NOVA_NUMBER("disaster.surge_loud", 256, 0, 1e9, 0, "Disasters", "Surge hum", "disaster.sounds",
+            "The hum's amplitude at its peak, from every node of the region.")
+NOVA_NUMBER("disaster.bang", 4096, 0, 1e9, 0, "Disasters", "Surge bang", "disaster.sounds",
+            "The bang's amplitude, from the epicentre, at the surge.")
+NOVA_WHOLE("disaster.crash_band", 8, 0, 255, 0, "Disasters", "Crash band", "disaster.sounds",
+           "A crash's first channel (2 wide): its stuttering clicks.")
+NOVA_NUMBER("disaster.crash_loud", 64, 0, 1e9, 0, "Disasters", "Crash clicks", "disaster.sounds",
+            "A click's amplitude.")
+NOVA_WHOLE("disaster.burnout_band", 6, 0, 255, 0, "Disasters", "Burnout band", "disaster.sounds",
+           "A burnout's first channel (2 wide): its crackle.")
+NOVA_NUMBER("disaster.burnout_loud", 32, 0, 1e9, 0, "Disasters", "Burnout crackle", "disaster.sounds",
+            "A crackle's typical amplitude (half to one and a half times this).")
+NOVA_WHOLE("disaster.diskfail_band", 5, 0, 255, 0, "Disasters", "Disk band", "disaster.sounds",
+           "A failing disk's channel: its grinding, a pulse that speeds up.")
+NOVA_NUMBER("disaster.diskfail_loud", 16, 0, 1e9, 0, "Disasters", "Disk grinding", "disaster.sounds",
+            "A grinding pulse's amplitude.")
+NOVA_WHOLE("disaster.storm_band", 10, 0, 255, 0, "Disasters", "Storm band", "disaster.sounds",
+           "A storm's first channel (3 wide): its rumble and its thunder.")
+NOVA_NUMBER("disaster.rumble", 48, 0, 1e9, 0, "Disasters", "Storm rumble", "disaster.sounds",
+            "The rumble's largest amplitude, wherever a storm is, every tick.")
+NOVA_NUMBER("disaster.thunder", 2048, 0, 1e9, 0, "Disasters", "Thunder", "disaster.sounds",
+            "Thunder's amplitude at each strike: it carries further than static.")
+
+// ---------------------------------------------------------------------------
 // Detection and lineages
 // ---------------------------------------------------------------------------
 NOVA_FLAG("detect.enabled", true, 0, "Detection and lineages", "Detection", "",

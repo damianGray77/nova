@@ -566,7 +566,12 @@ void outputs() {
                        "warp_host,launches,gpu_births,warps,gpu_bodies,actions_started,actions_landed,"
                        "actions_failed,actions_defended,threads_started,e_work,e_held,vent_codons,decayed,bites_waste,bites_body,codons_bitten,threads_ended,died_halted,died_frozen,died_worn,dormant_started,dormant_woke,dormant_expired,dormant_eaten,dormant_hops,drifting,resting,"
                        "archive_held,archive_stores,archive_loads,"
-                       "founded_spark,founded_daughter,founded_arrival,founded_wake,compress,ambient\n") !=
+                       "founded_spark,founded_daughter,founded_arrival,founded_wake,"
+                       // the disasters' (docs/disasters-plan.md X7), the last integer columns
+                       "surges,surge_nodes,surge_deaths,crashes,crash_deaths,crash_restarts,burnouts,cores_burnt,"
+                       "burnout_dormant,burnout_graced,burnout_deaths,disk_failures,disk_lost,storms_formed,strikes,"
+                       "strike_codons,episodes,false_alarms,spurious_faults,static_flips,sounds,sound_amp,"
+                       "cores_offline,rebooting,storms,episodes_active,compress,ambient\n") !=
           nullptr);
     CHECK(read_file(nodes, &bytes));
     bytes.push(0);

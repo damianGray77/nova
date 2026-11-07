@@ -33,11 +33,16 @@ namespace nova {
 //     the lifecycle section (checked against those the config gives);
 //   - disk tiers (W4): each soup's disk section holds the archive after the
 //     fast disk (contents, owners, extents and stamps in the same arrays),
-//     and a cargo carries its archive share.
-// Snapshots before v4 resume with substrates, sparks by activity and the
-// archive off (substrate.enabled = false, spark.activity = 0, world.archive =
-// 0) unless their config or an edit names them: the legacy defaults, kept in
-// one place for snapshots and replay logs alike (legacy.h; Run::init_from_snapshot).
+//     and a cargo carries its archive share;
+//   - disasters (docs/disasters-plan.md X9): with disasters on, each soup's
+//     offline cores after its page heat, and the world's reboots, symptom
+//     episodes and storms at the end of the world section; a dormant
+//     program's burnout flags ride in Dormant (soup.h).
+// Snapshots before v4 resume with substrates, sparks by activity, the archive
+// and the disasters off (substrate.enabled = false, spark.activity = 0,
+// world.archive = 0, disaster.enabled = false) unless their config or an edit
+// names them: the legacy defaults, kept in one place for snapshots and replay
+// logs alike (legacy.h; Run::init_from_snapshot).
 inline constexpr u32 kSnapshotVersion = 4;
 inline constexpr u32 kSnapshotOldest = 1;
 

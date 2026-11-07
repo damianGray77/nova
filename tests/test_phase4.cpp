@@ -667,7 +667,8 @@ void suite_signals() {
         CHECK(read_file(sig, &bytes));
         bytes.push(0);
         const char* text = reinterpret_cast<const char*>(bytes.data());
-        CHECK(strncmp(text, "tick_first,tick_last,channel,emits,amplitude,mean_field\n", 56) == 0);
+        // (sound_amp: the disasters' own sounds on the channel, docs/disasters-plan.md X11)
+        CHECK(strncmp(text, "tick_first,tick_last,channel,emits,amplitude,mean_field,sound_amp\n", 66) == 0);
         CHECK(strstr(text, "\n0,4,2,5,320,") != nullptr); // five emitters of 64 on channel 2
         remove(csv);
         remove(sig);

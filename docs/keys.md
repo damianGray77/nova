@@ -9,7 +9,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 - **Families:** a key with a `<placeholder>` stands for one setting per member listed.
 - **Needs:** the switch the setting depends on; it does nothing while that is off.
 
-286 settings, 83 of them from 14 families; 11 hidden (tests and demos).
+348 settings, 83 of them from 14 families; 11 hidden (tests and demos).
 
 ## Contents
 
@@ -31,6 +31,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 - [Signals](#signals)
 - [Life and death](#life-and-death)
 - [Dormancy](#dormancy)
+- [Disasters](#disasters)
 - [Detection and lineages](#detection-and-lineages)
 - [Budgets](#budgets)
 - [Hidden settings](#hidden-settings)
@@ -324,6 +325,73 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `dormant.mem_loss` | whole | 1 | 0 to 16777216 | **Memory reserve loss**. Codons of its memory reserve a dormant program loses a tick. Needs `life.dormancy`. |
 | `dormant.disk_loss` | whole | 1 | 0 to 16777216 | **Disk reserve loss**. Codons of its disk reserve it loses a tick, once its memory reserve is gone. Needs `life.dormancy`. |
 | `dormant.dwell` | whole | 15 | 1 to 1000000000 | **Dwell**. Ticks a resting program stays on a node before it moves on. Needs `life.dormancy`. |
+
+## Disasters
+
+| Key | Kind | Default | Range | Setting |
+|---|---|---|---|---|
+| `disaster.enabled` | switch | true | true or false | **Disasters**. Rare random disasters: power surges, OS crashes, burnouts, disk failures and lightning storms. |
+| `disaster.surge` | switch | true | true or false | **Power surges**. A region collapses: every live node within a few hops of a random one (needs a map world). Needs `disaster.enabled`. |
+| `disaster.surge_every` | whole | 50000 | at least 0 | **Surge interval**. Mean ticks between power surges anywhere in the world (0 = none). Needs `disaster.surge`. |
+| `disaster.surge_hops_min` | whole | 1 | 0 to 64 | **Surge reach, least**. A surge's reach in hops along paths, drawn per surge from here ... Needs `disaster.surge`. |
+| `disaster.surge_hops_max` | whole | 2 | 0 to 64 | **Surge reach, most**. ... to here. Needs `disaster.surge`. |
+| `disaster.surge_lead_min` | whole | 1000 | 1 to 1000000000 | **Surge warning, least**. Ticks of brownout before a surge (its symptoms), drawn per surge from here ... Needs `disaster.surge`. |
+| `disaster.surge_lead_max` | whole | 5000 | 1 to 1000000000 | **Surge warning, most**. ... to here. Needs `disaster.surge`. |
+| `disaster.crash` | switch | true | true or false | **OS crashes**. A node reboots: nothing runs and nothing arrives meanwhile; some of its programs are deleted and the rest restart. Needs `disaster.enabled`. |
+| `disaster.crash_every` | whole | 5000 | at least 0 | **Crash interval**. Mean ticks between OS crashes anywhere in the world (0 = none). Needs `disaster.crash`. |
+| `disaster.reboot_min` | whole | 20 | 1 to 1000000000 | **Reboot, shortest**. Ticks a crashed node takes to reboot, drawn per crash from here ... Needs `disaster.crash`. |
+| `disaster.reboot_max` | whole | 100 | 1 to 1000000000 | **Reboot, longest**. ... to here. Needs `disaster.crash`. |
+| `disaster.crash_share_min` | number | 0.1 | 0 to 1 | **Crash deletes, least**. The share of a crashed node's running programs deleted (ordinary deaths), drawn per crash from here ... Needs `disaster.crash`. |
+| `disaster.crash_share_max` | number | 0.6 | 0 to 1 | **Crash deletes, most**. ... to here. Needs `disaster.crash`. |
+| `disaster.crash_lead_min` | whole | 200 | 1 to 1000000000 | **Crash warning, least**. Ticks of instability before a crash (its symptoms), drawn per crash from here ... Needs `disaster.crash`. |
+| `disaster.crash_lead_max` | whole | 1000 | 1 to 1000000000 | **Crash warning, most**. ... to here. Needs `disaster.crash`. |
+| `disaster.burnout` | switch | true | true or false | **Burnouts**. Whole programs' cores go offline for repair and the programs go dormant, resting at home first. Needs `disaster.enabled`. |
+| `disaster.burnout_every` | whole | 2000 | at least 0 | **Burnout interval**. Mean ticks between burnouts anywhere in the world (0 = none). Needs `disaster.burnout`. |
+| `disaster.burnout_share_min` | number | 0.1 | 0 to 1 | **Burnout share, least**. Programs are picked until they hold this share of the node's cores (millicores and GPU units), drawn per burnout from here ... Needs `disaster.burnout`. |
+| `disaster.burnout_share_max` | number | 0.4 | 0 to 1 | **Burnout share, most**. ... to here. Needs `disaster.burnout`. |
+| `disaster.repair_min` | whole | 200 | 1 to 1000000000 | **Repair, shortest**. Ticks burnt cores spend offline before they return to the pool, cool, drawn per burnout from here ... Needs `disaster.burnout`. |
+| `disaster.repair_max` | whole | 2000 | 1 to 1000000000 | **Repair, longest**. ... to here. Needs `disaster.burnout`. |
+| `disaster.grace_chance` | number | 0.5 | 0 to 1 | **Grace chance**. The chance a burnout victim with no reserves gets a grace reserve; the rest die. Needs `disaster.burnout`. |
+| `disaster.grace` | whole | 32 | 0 to 16777216 | **Grace reserve**. The grace reserve, in codons of memory reserve (about that many ticks at the default clock). Needs `disaster.burnout`. |
+| `disaster.burnout_lead_min` | whole | 200 | 1 to 1000000000 | **Burnout warning, least**. Ticks of fever before a burnout (its symptoms), drawn per burnout from here ... Needs `disaster.burnout`. |
+| `disaster.burnout_lead_max` | whole | 1000 | 1 to 1000000000 | **Burnout warning, most**. ... to here. Needs `disaster.burnout`. |
+| `disaster.diskfail` | switch | true | true or false | **Disk failures**. A node's disk is lost: every codon INERT, every holding released, resting programs' disk reserves gone. Needs `disaster.enabled`. |
+| `disaster.diskfail_every` | whole | 10000 | at least 0 | **Disk failure interval**. Mean ticks between disk failures anywhere in the world (0 = none). Needs `disaster.diskfail`. |
+| `disaster.diskfail_lead_min` | whole | 500 | 1 to 1000000000 | **Disk warning, least**. Ticks of faster disk rot before a disk failure (its symptoms), drawn from here ... Needs `disaster.diskfail`. |
+| `disaster.diskfail_lead_max` | whole | 2000 | 1 to 1000000000 | **Disk warning, most**. ... to here. Needs `disaster.diskfail`. |
+| `disaster.storm` | switch | true | true or false | **Lightning storms**. Storms travel over the map with a heading, striking the node they're over: runs of random codons. Needs `disaster.enabled`. |
+| `disaster.storm_every` | whole | 5000 | at least 0 | **Storm interval**. Mean ticks between storms forming anywhere in the world (0 = none). Needs `disaster.storm`. |
+| `disaster.storm_life_min` | whole | 2000 | 1 to 1000000000 | **Storm life, shortest**. A storm's lifetime in ticks, drawn per storm from here ... Needs `disaster.storm`. |
+| `disaster.storm_life_max` | whole | 10000 | 1 to 1000000000 | **Storm life, longest**. ... to here. Needs `disaster.storm`. |
+| `disaster.storm_move_min` | whole | 200 | 1 to 1000000000 | **Storm moves, soonest**. Ticks between a storm's moves along a path, drawn per move from here ... Needs `disaster.storm`. |
+| `disaster.storm_move_max` | whole | 800 | 1 to 1000000000 | **Storm moves, latest**. ... to here. Needs `disaster.storm`. |
+| `disaster.storm_turn` | number | 30 | 0 to 180 | **Storm turn**. The most a storm's heading turns at a move, in degrees, either way. Needs `disaster.storm`. |
+| `disaster.strike_every_min` | whole | 100 | 1 to 1000000000 | **Strikes, most often**. A storm's mean ticks between strikes, drawn per storm from here ... Needs `disaster.storm`. |
+| `disaster.strike_every_max` | whole | 400 | 1 to 1000000000 | **Strikes, least often**. ... to here. Needs `disaster.storm`. |
+| `disaster.strike_min` | whole | 64 | 1 to 16777216 | **Strike size, least**. Codons a strike randomises at a random place in memory, drawn per strike from here ... Needs `disaster.storm`. |
+| `disaster.strike_max` | whole | 512 | 1 to 16777216 | **Strike size, most**. ... to here. Needs `disaster.storm`. |
+| `disaster.symptoms` | switch | true | true or false | **Symptoms**. Every disaster is preceded by symptoms that ramp up over its warning time in quantities programs already read or suffer. Needs `disaster.enabled`. |
+| `disaster.false_alarms` | number | 0.25 | 0 to 0.9 | **False alarms**. The share of symptom episodes (and storms: dry ones) that fade without a disaster. Needs `disaster.symptoms`. |
+| `disaster.brownout` | number | 1 | 0 to 1000000 | **Brownout heat**. A surge's warning: extra heat input on every unit and page in its region, a tick, at its peak. Needs `disaster.symptoms`. |
+| `disaster.noise` | number | 4 | 0 to 1000000 | **Static noise**. Surges and storms raise the signal noise to (1 + this) x the floor at their peak. Needs `disaster.symptoms`. |
+| `disaster.crash_faults` | number, log | 0.0005 | 0 to 1 | **Instability faults**. A crash's warning: spurious instruction faults per instruction on its node, at the peak. Needs `disaster.symptoms`. |
+| `disaster.crash_halts` | number | 0.1 | 0 to 1 | **Stray halts**. The share of those faults that halt their thread outright. Needs `disaster.symptoms`. |
+| `disaster.fever` | number | 2 | 0 to 1000000 | **Burnout fever**. A burnout's warning: extra heat a tick on the cores about to burn, at the peak. Needs `disaster.symptoms`. |
+| `disaster.disk_rot` | number, log | 0.0002 | 0 to 1 | **Failing disk rot**. A disk failure's warning: extra disk rot per codon per tick on its node, at the peak. Needs `disaster.symptoms`. |
+| `disaster.static` | number, log | 0.0001 | 0 to 1 | **Storm static**. A storm's warning: bit flips per memory codon per tick under it, building on the node it moves to next. Needs `disaster.symptoms`. |
+| `disaster.sounds` | switch | true | true or false | **Sounds**. Each disaster has a voice in the signal field, on its own band of channels (silent without signals). Needs `disaster.enabled`. |
+| `disaster.surge_band` | whole | 13 | 0 to 255 | **Surge band**. A surge's first channel (3 wide): its hum and its bang. Needs `disaster.sounds`. |
+| `disaster.surge_loud` | number | 256 | 0 to 1000000000 | **Surge hum**. The hum's amplitude at its peak, from every node of the region. Needs `disaster.sounds`. |
+| `disaster.bang` | number | 4096 | 0 to 1000000000 | **Surge bang**. The bang's amplitude, from the epicentre, at the surge. Needs `disaster.sounds`. |
+| `disaster.crash_band` | whole | 8 | 0 to 255 | **Crash band**. A crash's first channel (2 wide): its stuttering clicks. Needs `disaster.sounds`. |
+| `disaster.crash_loud` | number | 64 | 0 to 1000000000 | **Crash clicks**. A click's amplitude. Needs `disaster.sounds`. |
+| `disaster.burnout_band` | whole | 6 | 0 to 255 | **Burnout band**. A burnout's first channel (2 wide): its crackle. Needs `disaster.sounds`. |
+| `disaster.burnout_loud` | number | 32 | 0 to 1000000000 | **Burnout crackle**. A crackle's typical amplitude (half to one and a half times this). Needs `disaster.sounds`. |
+| `disaster.diskfail_band` | whole | 5 | 0 to 255 | **Disk band**. A failing disk's channel: its grinding, a pulse that speeds up. Needs `disaster.sounds`. |
+| `disaster.diskfail_loud` | number | 16 | 0 to 1000000000 | **Disk grinding**. A grinding pulse's amplitude. Needs `disaster.sounds`. |
+| `disaster.storm_band` | whole | 10 | 0 to 255 | **Storm band**. A storm's first channel (3 wide): its rumble and its thunder. Needs `disaster.sounds`. |
+| `disaster.rumble` | number | 48 | 0 to 1000000000 | **Storm rumble**. The rumble's largest amplitude, wherever a storm is, every tick. Needs `disaster.sounds`. |
+| `disaster.thunder` | number | 2048 | 0 to 1000000000 | **Thunder**. Thunder's amplitude at each strike: it carries further than static. Needs `disaster.sounds`. |
 
 ## Detection and lineages
 

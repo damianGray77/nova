@@ -122,6 +122,62 @@ struct StepProfile {
     double w_first_max = 0, w_pack_max = 0, w_second_max = 0; // the slowest node's, each tick (summed)
 };
 
+// --- Disasters (docs/disasters-plan.md X1-X11; disaster.cpp) -----------------
+// The kinds, in the fixed order the barrier applies them (harshest first).
+inline constexpr u32 kDisSurge = 0, kDisCrash = 1, kDisBurnout = 2, kDisDiskfail = 3, kDisStorm = 4, kDisKinds = 5;
+const char* disaster_kind_name(u32 kind); // "surge", "crash", "burnout", "diskfail", "storm"
+
+// The disaster.* keys (X8): read once at init, fixed for the run.
+struct DisasterParams {
+    bool on[kDisKinds];   // each kind's switch (and its interval above 0)
+    double every[kDisKinds]; // mean ticks between disasters of a kind, world-wide (0 = never)
+    u32 lead_min[kDisKinds], lead_max[kDisKinds]; // a symptom episode's lead time (storms: unused)
+    u32 hops_min, hops_max;                     // X2
+    u32 reboot_min, reboot_max;                 // X3
+    double crash_min, crash_max;                // X3: share of programs deleted
+    double burn_min, burn_max;                  // X4: share of cores taken
+    u32 repair_min, repair_max;                 // X4
+    double grace_chance;                        // X4
+    u32 grace;                                  // X4
+    u32 life_min, life_max, move_min, move_max; // X6
+    double turn;                                // X6: the most a heading turns a move, radians
+    u32 strike_every_min, strike_every_max, strike_min, strike_max; // X6
+    bool symptoms;                              // X10
+    double false_alarms, brownout, noise, faults, halts, fever, disk_rot, static_rot;
+    bool sounds;                                // X11
+    u32 band[kDisKinds];                        // each kind's first channel
+    double loud[kDisKinds];                     // each kind's steady voice (storm: its rumble)
+    double bang, thunder;                       // a surge's bang, a strike's thunder
+};
+static_assert(__is_trivially_copyable(DisasterParams), "DisasterParams must stay plain data");
+
+// A symptom episode (X10): a disaster's warning, ramping over its lead time on
+// the victims fixed when it starts. A real one strikes at start + lead; a
+// false alarm rises the same way to its peak and fades out by `end`. World
+// state, raw-hashable.
+struct Episode {
+    u64 start, lead, peak, end; // first tick of symptoms; lead time; peak (= the strike); last tick
+    u64 serial;                 // its draws at the strike: a world stream keyed by it
+    u32 kind, node;             // the node (surge: the epicentre)
+    u32 false_alarm, hops;      // hops: a surge's reach
+    u32 off, n;                 // its list in the world's episode list: a surge's region, a burnout's units
+    double share;               // a burnout's share of cores (drawn at the start)
+};
+static_assert(sizeof(Episode) == 5 * 8 + 6 * 4 + 8, "Episode must have no implicit padding");
+
+// A lightning storm (X6): over a node, heading somewhere on the map; its next
+// move (tick and destination) decided ahead. World state, raw-hashable; its
+// draws are its own stream (keyed by serial), continued from `draws`.
+struct Storm {
+    u64 serial, born, end;           // its lifetime ends at the barrier of `end`
+    u64 last_move, next_move, next_strike;
+    u64 draws;                       // its stream's counter
+    double heading, strike_mean;     // radians on the map; mean ticks between strikes
+    u32 node, dest;                  // where it is; where it moves next (kNone: nowhere)
+    u32 dry, moves;                  // dry: a false alarm, static and rumble with no lightning
+};
+static_assert(sizeof(Storm) == 7 * 8 + 2 * 8 + 4 * 4, "Storm must have no implicit padding");
+
 enum class KnobResult { ok, unknown_key, not_live, bad_value };
 enum class Model : u8 { demo, soup };
 const char* describe(KnobResult r);
@@ -346,6 +402,41 @@ class World {
     u32 route_hops(u32 n, u32 i) const { return route_hops_[route_begin_[n] + i]; }
     u32 route_delay(u32 n, u32 i) const { return route_delay_[route_begin_[n] + i]; }
 
+    // --- Disasters (docs/disasters-plan.md X1-X11; disaster.cpp) -----------
+    bool disasters() const { return disasters_; }
+    const DisasterParams& disaster_params() const { return dp_; }
+    // X3: node n is rebooting during the tick now running (or about to):
+    // nothing runs there, and arrivals at this barrier are refused.
+    bool rebooting(u32 n) const { return n < reboot_until_.size() && reboot_until_[n] > tick_; }
+    u64 reboot_until(u32 n) const { return n < reboot_until_.size() ? reboot_until_[n] : 0; }
+    u64 rebooting_count() const;
+    // X10: symptom episodes and X6: storms, in the order they began.
+    u32 episode_count() const { return static_cast<u32>(episodes_.size()); }
+    const Episode& episode(u32 i) const { return episodes_[i]; }
+    const u32* episode_list(u32 i) const { return ep_list_.data() + episodes_[i].off; } // its region or units
+    double episode_level(const Episode& e, u64 tick) const; // 0..1: how strong its symptoms are
+    u32 storm_count() const { return static_cast<u32>(storms_.size()); }
+    const Storm& storm(u32 i) const { return storms_[i]; }
+    u64 cores_offline() const; // every node's offline cores
+    // The last tick, per node (stats): the kinds whose symptoms it had (a
+    // bit each), and the disasters that hit it at the barrier.
+    u32 node_symptoms(u32 n) const { return n < node_symptom_.size() ? node_symptom_[n] : 0; }
+    u32 node_struck(u32 n) const { return n < node_struck_.size() ? node_struck_[n] : 0; }
+    // X11: the |amplitude| the world's sounds put on channel c at the last barrier.
+    double sound_on_channel(u32 c) const { return c < snd_channel_.size() ? snd_channel_[c] : 0.0; }
+    // X7: the disasters' events since the last clear, as the replay log reads them.
+    usize disaster_event_count() const { return dev_tick_.size(); }
+    u64 disaster_event_tick(usize i) const { return dev_tick_[i]; }
+    Str disaster_event_text(usize i) const {
+        const u32 end = i + 1 < dev_off_.size() ? dev_off_[i + 1] : static_cast<u32>(dev_text_.size());
+        return Str(dev_text_.view().p + dev_off_[i], end - dev_off_[i]);
+    }
+    void clear_disaster_events() {
+        dev_tick_.clear();
+        dev_off_.clear();
+        dev_text_.clear();
+    }
+
     // Snapshot support. Call load_state() on a world freshly init()ed from the
     // snapshot's config; it replaces tick, graph, pools and soups.
     // `version`: the snapshot format's (snapshot.h); older ones lack a part.
@@ -425,6 +516,43 @@ class World {
     // newly gathered ops from `first` on, and completing ops [lo, hi) that are
     // due (true if any were).
     void accel_barrier();
+    // --- Disasters (docs/disasters-plan.md X1-X11; disaster.cpp) -----------
+    // read_disasters: the keys (init). weather_update: each node's symptoms
+    // for the tick about to run (before it, serially). disasters_barrier:
+    // repairs, then each kind in order -- due episodes strike or fade, new
+    // ones begin (or strike at once without symptoms) --, then the storms.
+    // scatter_sounds: the disasters' sounds this tick, onto the signal paths.
+    // Then the lifecycle collapses what a surge marked.
+    void read_disasters(Config& cfg);
+    void weather_update();
+    void disasters_barrier();
+    void scatter_sounds();
+    void dis_event(const TextBuf& t);                  // logs one event at this barrier
+    u32 dis_live_node(Rng& r, bool up_only);           // a random live node (up_only: not rebooting), or kNone
+    void dis_begin(u32 kind, Rng& r);                  // one disaster of a kind: an episode, or a strike now
+    bool dis_strike(u32 kind, const Episode& e);       // the disaster itself (e.node, e's list); false: nothing hit
+    void dis_storms();                                 // storms move, strike and end; new ones form
+    u32 storm_dest(u32 node, double heading, Rng& r) const; // the neighbour it would move to, or kNone
+    void sound_add(u32 node, u32 channel, double amp); // into this barrier's sound field
+    void disasters_hash(Hasher& h) const;
+    void disasters_save(ByteWriter& w) const;
+    bool disasters_load(ByteReader& r, TextBuf* err, u32 version);
+    bool disasters_ = false;
+    DisasterParams dp_ = {};
+    Array<u64> reboot_until_;  // per node (world state)
+    Array<Episode> episodes_;  // (world state)
+    Array<u32> ep_list_;       // ... their regions and units, packed (world state)
+    Array<Storm> storms_;      // (world state)
+    u64 dis_serial_ = 0;       // episodes' and storms' serials (world state)
+    SoupTally dis_tally_ = {}; // this barrier's world-counted disaster tallies
+    Array<u32> node_symptom_, node_struck_;
+    Array<double> snd_;        // scratch: nodes x channels, this barrier's sounds
+    Array<u32> snd_touched_;   // ... the entries set
+    Array<double> snd_channel_;
+    Array<u32> snd_bang_;      // scratch: (node, kind) of this barrier's bangs and thunder
+    TextBuf dev_text_;
+    Array<u64> dev_tick_;
+    Array<u32> dev_off_;
     void accel_open(Config& cfg);
     void accel_submit(usize first);
     bool accel_complete_range(usize lo, usize hi);

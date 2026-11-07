@@ -776,11 +776,11 @@ void test_old_snapshot() {
                     "spark.rate = 0.25\naccel.gpu = cpu\naccel.npu = cpu\nwarp.device = cpu\n";
     TextBuf with;
     with.append(w);
-    with.append("world.archive = 0\nspark.activity = 0\n");
+    with.append("world.archive = 0\nspark.activity = 0\ndisaster.enabled = false\n"); // (nor the disasters)
     Run a;
     CHECK(make_run(a, with.c_str(), 2));
     a.run_until(30);
-    Config old; // the config as a v3 build wrote it: no world.archive (nor spark.activity)
+    Config old; // the config as a v3 build wrote it: no world.archive (nor spark.activity, nor disasters)
     Config::ParseError pe;
     CHECK(old.parse(w, &pe));
     ByteWriter snap;

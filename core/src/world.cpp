@@ -70,8 +70,8 @@ bool is_structural(Str key) {
     const char* const prefixes[] = {"world.",  "isa.",    "cpu.",   "heat.", "hazard.", "contact.", "tierra.",
                                     "spark.", "seed.",   "mem.",   "detect.", "gpu.",  "npu.",     "edge.",
                                     "vary.",  "disk.",   "salvage.", "signal.", "node.",
-                                    // a varied world (docs/world-plan.md W2, W4)
-                                    "substrate.", "archive."};
+                                    // a varied world (docs/world-plan.md W2, W4); the disasters (X8: fixed for the run)
+                                    "substrate.", "archive.", "disaster."};
     if (key.eq("seed"))
         return true;
     for (const char* p : prefixes)
@@ -214,6 +214,7 @@ bool World::init(Config& cfg) {
     accel_async_ = false;
     channels_ = 0;
     edge_corruption_ = edge_failure_ = 0;
+    disasters_ = false; // (the soup model's, read below)
     if (model_ == Model::soup) {
         soup_params_from_config(cfg, soup_size_, &soup_params_);
         detect_params_from_config(cfg, &detect_);
@@ -260,7 +261,10 @@ bool World::init(Config& cfg) {
             recover_every_ = key_u32(cfg, "node.recover_every");
             fallow_min_ = key_u64(cfg, "node.fallow_min");
         }
-        lifecycle_ = soup_params_.endurance > 0 || land_ < 1.0;
+        read_disasters(cfg); // docs/disasters-plan.md X8
+        // (A power surge collapses nodes through the lifecycle, so a map world
+        // with surges has one even without wear or drifting land.)
+        lifecycle_ = soup_params_.endurance > 0 || land_ < 1.0 || (spatial_ && disasters_ && dp_.on[kDisSurge]);
         if (lifecycle_ && !spatial_)
             cfg.fail("node.endurance", "the node lifecycle needs world.graph = procedural or landscape");
         budget_ = budget;
@@ -454,6 +458,22 @@ bool World::init(Config& cfg) {
             rebuild_graph(); // edges among the live sites only (calls init_ports)
         else
             init_ports();
+        // Disasters (docs/disasters-plan.md): nothing brewing, nothing down.
+        reboot_until_.clear();
+        episodes_.clear();
+        ep_list_.clear();
+        storms_.clear();
+        dis_serial_ = 0;
+        node_symptom_.clear();
+        node_struck_.clear();
+        clear_disaster_events();
+        if (disasters_) {
+            reboot_until_.resize(nodes_);
+            node_symptom_.resize(nodes_);
+            node_struck_.resize(nodes_);
+            snd_.resize(static_cast<usize>(nodes_) * channels_);
+            snd_channel_.resize(channels_);
+        }
         if (detect_.enabled) {
             lineages_ = new Lineages[nodes_];
             for (u32 n = 0; n < nodes_; ++n) {
@@ -944,7 +964,8 @@ void World::signal_field(u32 n) {
     const usize slot = static_cast<usize>(tick_ % sig_slots_);
     double* pend = pending_.data() + (slot * nodes_ + n) * channels_;
     i32* f = soups_[n].field_mut();
-    const double fl = node_params_[n].signal_floor;
+    // (Disasters X10: a surge's brownout or a storm's static raises the noise.)
+    const double fl = node_params_[n].signal_floor * (1.0 + soups_[n].weather().noise);
     Rng r(seed_ ^ 0x7369676E616C0000ull, n, tick_); // "signal"
     for (u32 c = 0; c < channels_; ++c) {
         double v = floor(pend[c] + fl * (2.0 * r.unit() - 1.0) + 0.5);
@@ -1371,7 +1392,10 @@ void World::warp_sync(u32 n) {
 void World::warp_first_task(void* ctx, u32 node) {
     World* w = static_cast<World*>(ctx);
     const double t0 = clock_seconds(); // (each node's time: the slowest go first next tick)
-    if (!w->live_.empty() && !w->live_[node]) { // fallow (Phase 4): nothing runs
+    const bool down = w->disasters_ && w->rebooting(node); // disasters X3: rebooting, nothing runs
+    if ((!w->live_.empty() && !w->live_[node]) || down) { // fallow (Phase 4): nothing runs
+        if (down && w->channels_)
+            w->signal_field(node); // (its pending slot cleared, unheard)
         w->soups_[node].idle(w->tick_);
         w->warp_active_[node] = 0;
         w->warp_node_t_[3 * node] = clock_seconds() - t0;
@@ -1652,7 +1676,7 @@ void World::warp_host_task(void* ctx, u32 node) {
 void World::warp_second_task(void* ctx, u32 node) {
     World* w = static_cast<World*>(ctx);
     const double t0 = clock_seconds();
-    if (w->live_.empty() || w->live_[node])
+    if ((w->live_.empty() || w->live_[node]) && !(w->disasters_ && w->rebooting(node))) // (disasters X3)
         w->soups_[node].tick_second();
     w->warp_node_t_[3 * node + 2] = clock_seconds() - t0;
 }
@@ -2603,9 +2627,9 @@ void World::deliver_dormant(Cargo& c) {
     d.gpus = c.gpus;
     d.npus = c.npus;
     d.form = c.form;
-    d.kind = c.kind;
+    d.kind = static_cast<u8>(c.kind); // (kKindP or kKindE; Dormant::kind is a byte, soup.h)
     d.hops = c.hops;
-    if (live_.empty() || live_[dst])
+    if ((live_.empty() || live_[dst]) && !(disasters_ && rebooting(dst))) // (a rebooting node: it passes through)
         if (soups_[dst].land_dormant(cargo_codons_.data() + c.codon_off, c.len, d, c.tag))
             return;
     const u32 e = drift_edge(dst, c.seq, c.hops);
@@ -2650,6 +2674,11 @@ void World::deliver_cargo() {
             corrupt(c);
         if (c.dormant) { // a drifting dormant program (outside the capacity)
             deliver_dormant(c);
+            continue;
+        }
+        if (disasters_ && rebooting(edge_dst_[c.edge])) { // disasters X3: no arrivals while it reboots
+            soups_[edge_dst_[c.edge]].refuse_arrival();
+            --in_flight_[c.edge];
             continue;
         }
         soups_[edge_dst_[c.edge]].arrive(cargo_codons_.data() + c.codon_off, c.len, c.millicores, c.gpus,
@@ -2784,6 +2813,12 @@ void World::update_task(void* ctx, u32 node) {
             w->soups_[node].idle(w->tick_);
             return;
         }
+        if (w->disasters_ && w->rebooting(node)) { // disasters X3: rebooting, nothing runs (state kept)
+            if (w->channels_)
+                w->signal_field(node); // (its pending slot cleared, unheard)
+            w->soups_[node].idle(w->tick_);
+            return;
+        }
         if (w->channels_) // Phase 4: what this node hears this tick
             w->signal_field(node);
         w->soups_[node].tick(w->tick_);
@@ -2886,6 +2921,8 @@ void World::step(ThreadPool& pool) {
     };
     if (warp_failed_) // Phase 8: the GPU failed holding lanes; the world can't go on exactly
         return;
+    if (disasters_) // disasters X10: each node's symptoms for the tick about to run
+        weather_update();
     if (model_ == Model::soup && warp_gpu_.is_open()) {
         // Phase 8: warps on the GPU, between every node's halves -- or, when
         // auto finds it quicker, a tick without the GPU (its lanes home first).
@@ -2959,6 +2996,15 @@ void World::step(ThreadPool& pool) {
                 lap(prof_ ? &prof_->links : nullptr);
             }
         }
+        // Disasters (docs/disasters-plan.md X1): at the barrier, in a fixed
+        // order; their sounds onto the signal paths; a surge's collapses are
+        // the lifecycle's, next.
+        dis_tally_ = {};
+        if (disasters_) {
+            disasters_barrier();
+            if (channels_)
+                scatter_sounds();
+        }
         if (lifecycle_) {
             lifecycle_update();
             lap(prof_ ? &prof_->lifecycle : nullptr);
@@ -2970,6 +3016,11 @@ void World::step(ThreadPool& pool) {
             const u64* nt = reinterpret_cast<const u64*>(&soups_[n].tally());
             for (usize i = 0; i < sizeof(SoupTally) / sizeof(u64); ++i)
                 sum[i] += nt[i];
+        }
+        if (disasters_) { // the world's own disaster counts
+            const u64* dt = reinterpret_cast<const u64*>(&dis_tally_);
+            for (usize i = 0; i < sizeof(SoupTally) / sizeof(u64); ++i)
+                sum[i] += dt[i];
         }
         soup_last_.corrupted = world_corrupted_;
         soup_last_.transit_lost = world_transit_lost_;
@@ -3054,6 +3105,8 @@ u64 World::hash() const {
             h.bytes(acc_in_.data(), acc_in_.size());
             h.bytes(acc_addr_.data(), acc_addr_.size() * sizeof(u32));
         }
+        if (disasters_) // disasters (X9): reboots, episodes, storms
+            disasters_hash(h);
         return h.finish();
     }
     Hasher h(0x6E6F76612D776F72ull); // "nova-wor"
@@ -3140,6 +3193,8 @@ void World::save_state(ByteWriter& w) const {
             w.put_u32(static_cast<u32>(acc_addr_.size()));
             w.put_bytes(acc_addr_.data(), acc_addr_.size() * sizeof(u32));
         }
+        if (disasters_) // disasters (X9, snapshot v4): reboots, episodes, storms
+            disasters_save(w);
         return;
     }
     for (u32 n = 0; n < nodes_; ++n)
@@ -3182,8 +3237,10 @@ bool World::load_state(ByteReader& r, TextBuf* err, u32 version) {
         // The lifecycle (Phase 4): which sites are nodes and their lives come
         // first. Each node in a later life gets its params from the fields at
         // the tick it appeared and a soup of that shape (load fills it), and
-        // the graph is the one among the live sites.
-        if (lifecycle_) {
+        // the graph is the one among the live sites. (Before v4 a map world
+        // had it only with wear or drifting land; one that now has it for its
+        // power surges alone, docs/disasters-plan.md X2, starts it afresh.)
+        if (lifecycle_ && (version >= 4 || soup_params_.endurance > 0 || land_ < 1.0)) {
             if (r.remaining() < static_cast<u64>(nodes_) * 22 + 16) {
                 err->append("snapshot: lifecycle section truncated");
                 return false;
@@ -3358,6 +3415,8 @@ bool World::load_state(ByteReader& r, TextBuf* err, u32 version) {
         acc_held_scalar_.fill(0);
         acc_held_flags_.resize(acc_ops_.size());
         acc_held_flags_.fill(0);
+        if (disasters_ && !disasters_load(r, err, version)) // disasters (X9): v4; none pending before
+            return false;
         init_ports(); // recounts in_flight_ from the cargo, derives the down flags
         for (u32 e = 0; e < in_flight_.size(); ++e) {
             if (in_flight_[e] > edge_capacity_ && dispersal_) {

@@ -146,7 +146,23 @@ void Run::step() {
 void Run::after_step() {
     if (world_.model() == Model::soup)
         instructions_ += world_.last_soup_tick().instructions;
-    // World events (Phase 4 lifecycle) first, then each node's detector.
+    // Disasters (docs/disasters-plan.md X7) first -- surges, crashes,
+    // burnouts, disk failures, storms and lightning, symptom episodes: they
+    // come before the lifecycle at the barrier, and a surge's collapses follow
+    // it --, then the world events (Phase 4 lifecycle), then each node's
+    // detector.
+    for (usize i = 0; i < world_.disaster_event_count(); ++i) {
+        const Str t = world_.disaster_event_text(i);
+        Event ev;
+        ev.tick = world_.disaster_event_tick(i);
+        ev.off = static_cast<u32>(event_text_.size());
+        ev.len = static_cast<u32>(t.n);
+        event_text_.append(t.p, t.n);
+        events_.push(ev);
+        if (replay_.is_open())
+            replay_.event(ev.tick, t);
+    }
+    world_.clear_disaster_events();
     for (usize i = 0; i < world_.world_events().size(); ++i) {
         const WorldEvent& we = world_.world_events()[i];
         TextBuf t;

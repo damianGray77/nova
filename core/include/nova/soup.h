@@ -20,6 +20,8 @@
 //
 // Everything a tick does is a function of (seed, node, tick) and the soup's own
 // state, so a soup can be updated on any thread (design.md 7.1 D).
+#include <cstddef> // offsetof (Dormant's layout check)
+
 #include "nova/accelop.h"
 #include "nova/array.h"
 #include "nova/config.h"
@@ -257,6 +259,9 @@ struct SoupParams {
     // out a hair under ten times and truncate one short (6 -> 59, not 60).
     double mem_fast_speed, mem_slow_speed; // the memory tiers (W3, not built yet): their costs / these
     double disk_speed, archive_speed;      // the disk tiers (W4): each tier's DISK access and per-codon costs / these
+    // Disasters (docs/disasters-plan.md; disaster.cpp): disaster.enabled. The
+    // node then keeps a list of offline cores (burnout, X4), hashed and saved.
+    bool disasters;
     // optional seeded genome (smoke tests, demos), on every node or one
     u8 seed_genome[kMaxSeedLen];
     u32 seed_len;        // 0 = no seed
@@ -412,8 +417,9 @@ struct UnitLedger {
     void hash_into(Hasher& h) const;
     void save(ByteWriter& w) const;
     bool load(ByteReader& r, u64 nbodies, TextBuf* err);
-    // Every invariant; `what` names the unit kind in the message.
-    bool check(const Array<Body>& bodies, const char* what, TextBuf* why) const;
+    // Every invariant; `what` names the unit kind in the message. `offline`:
+    // units neither held nor free (burnt out, disasters X4).
+    bool check(const Array<Body>& bodies, const char* what, TextBuf* why, u32 offline = 0) const;
 };
 
 // First p >= from with [p, p + len) all clear in a bitmap of n positions, or
@@ -580,6 +586,30 @@ struct SoupTally {
     // Disk tiers (docs/world-plan.md W4)
     u64 archive_stores;   // DISK stores that touched the archive (counted in disk_stores too)
     u64 archive_loads;    // DISK loads that touched the archive (counted in disk_loads too)
+    // --- Disasters (docs/disasters-plan.md X7, X10, X11): (world) = counted by
+    // the world at the barrier; the rest by the node they hit.
+    u64 surges;           // power surges (world)
+    u64 surge_nodes;      // nodes they collapsed (world)
+    u64 surge_deaths;     // bodies those collapses killed (world)
+    u64 crashes;          // OS crashes
+    u64 crash_deaths;     // programs a crash deleted
+    u64 crash_restarts;   // programs a crash restarted
+    u64 burnouts;         // burnouts
+    u64 cores_burnt;      // millicores and GPU units a burnout sent offline
+    u64 burnout_dormant;  // programs a burnout sent dormant
+    u64 burnout_graced;   // ... of which with a grace reserve
+    u64 burnout_deaths;   // programs a burnout killed (no reserve, no grace)
+    u64 disk_failures;    // disks lost
+    u64 disk_lost;        // disk codons held when their disk failed
+    u64 storms_formed;    // lightning storms formed (world)
+    u64 strikes;          // lightning strikes
+    u64 strike_codons;    // codons they randomised
+    u64 episodes;         // symptom episodes begun (world)
+    u64 false_alarms;     // ... of which false alarms (world)
+    u64 spurious_faults;  // instruction faults from an OS crash's instability
+    u64 static_flips;     // memory bit flips from a storm's static
+    u64 sounds;           // disaster sounds emitted, one per node and channel a tick (world)
+    u64 sound_amp;        // their total |amplitude|, rounded (world)
 };
 
 class Lineages; // lineage.h: the replicator detector, a pure observer
@@ -619,7 +649,13 @@ struct Departure {
 };
 
 // A dormant program resting on this node (docs/dormancy-plan.md): a body with
-// its code and nothing else, which doesn't run. Raw-hashable, per body slot.
+// its code and nothing else, which doesn't run. Raw-hashable, per body slot:
+// hashed and saved as its 48 bytes, so its layout is part of the snapshot
+// format. Two builds each claimed the old padding word; the disk tiers keep
+// it (archive_reserve), and the disasters' burnout flags take the byte after
+// `kind`, which was always 0 (kind is kKindP or kKindE, little-endian in what
+// was a u32). With no archive and no burnout every byte is as it was, so a
+// v3 snapshot loads as it did and the dormant hash is unchanged.
 struct Dormant {
     u32 on;           // 1 while dormant
     u32 dwell;        // ticks left before it moves on
@@ -627,11 +663,44 @@ struct Dormant {
     u32 disk_reserve; // its disk holding, spent once memory is gone (W4: its fast disk's)
     u32 millicores, emillicores, gpus, npus; // what it held at home (P, E, GPU, NPU)
     u32 form;         // kFormCpu or kFormGpu
-    u32 kind;         // its thread's preferred kind of core
+    u8 kind;          // its thread's preferred kind of core (kKindP or kKindE; was the low byte of a u32)
+    u8 flags;         // disasters (X4, X9): kDormantBurnt, kDormantGraced (0 otherwise; was always 0)
+    u16 spare;        // (0: the rest of the old u32 kind)
     u32 hops;         // hops it has drifted
     u32 archive_reserve; // disk tiers (W4): its archive holding, spent last (was padding: 0 without one)
 };
 static_assert(sizeof(Dormant) == 48, "Dormant must have no implicit padding");
+static_assert(offsetof(Dormant, kind) == 36 && offsetof(Dormant, flags) == 37 &&
+                  offsetof(Dormant, hops) == 40 && offsetof(Dormant, archive_reserve) == 44,
+              "Dormant's bytes are its snapshot format (v3 files hold kind as a u32 at 36)");
+inline constexpr u8 kDormantBurnt = 1;  // sent dormant by a burnout (resting at home first)
+inline constexpr u8 kDormantGraced = 2; // ... with a grace reserve: it had none of its own
+
+// --- Disasters (docs/disasters-plan.md; disaster.cpp) ------------------------
+// A core offline for repair after a burnout (X4): neither held nor free, back
+// in its pool, cool, at the barrier of `until`. World state (hashed, saved).
+struct OfflineCore {
+    u64 until;
+    u32 unit; // a millicore, or a GPU unit with kOfflineGpu set
+    u32 pad;
+};
+static_assert(sizeof(OfflineCore) == 16, "OfflineCore must have no implicit padding");
+inline constexpr u32 kOfflineGpu = 0x80000000u;
+// The symptoms on this node this tick (X10), set by the world before each
+// tick from its symptom episodes and storms. Derived (neither hashed nor
+// saved); all zero with nothing brewing here, so nothing changes.
+struct Weather {
+    double faults;     // spurious instruction faults per instruction (an OS crash's instability)
+    double halts;      // ... the share of them that halt their thread outright
+    double disk_rot;   // extra disk rot, per codon per tick (a failing disk)
+    double static_rot; // extra bit flips, per memory codon per tick (a storm's static)
+    float heat;        // extra heat input on every unit and page, a tick (a surge's brownout)
+    float noise;       // extra signal noise, in multiples of the node's floor (surge, storm)
+};
+// What a crash or a burnout did on a node (the world logs it).
+struct DisasterCount {
+    u32 a, b, c, d; // crash: deleted, restarted; burnout: cores, dormant, graced, died
+};
 
 // A node's view of its out-edges, set by the world (Phase 3): edge ids nearest
 // neighbour first, how many cargoes each already has in flight (world state,
@@ -742,6 +811,53 @@ class Soup {
     u64 frozen_bare() const { return frozen_bare_; }
     u64 dormant_mem_sum() const { return dormant_mem_sum_; }
     u64 dormant_disk_sum() const { return dormant_disk_sum_; }
+
+    // --- Disasters (docs/disasters-plan.md X2-X6, X10; disaster.cpp) -------
+    // The world calls these at the barrier, in its fixed order; each draws
+    // only from the Rng it is handed (a world stream keyed by the event).
+    // X2: due to collapse at this barrier (the lifecycle then collapses it).
+    void force_collapse() { collapse_ = true; }
+    // X3: a random `share` of the running programs die ordinary deaths; the
+    // rest restart (threads at the body's start, registers cleared, warps
+    // ended -- a GPU-born program's relaunched --, actions dropped), counted
+    // as running at `restart`, the reboot's first tick. a = deleted, b = restarted.
+    DisasterCount crash(double share, u64 restart, Rng& r);
+    // X3: a daughter arriving while the node reboots is lost.
+    void refuse_arrival() { ++tally_.lost; }
+    // X4: programs picked at random until they hold `share` of the node's
+    // cores (millicores and GPU units); their units (GPU ones | kOfflineGpu)
+    // are appended to *units: the cores that will burn.
+    void pick_burnout(double share, Rng& r, Array<u32>* units) const;
+    // X4: the units burn: every core their holders hold, and those still
+    // free, go offline until `until`; the holders go dormant resting here,
+    // those with no reserve graced with `grace` codons with chance
+    // grace_chance (else they die). a = cores, b = dormant, c = graced, d = died.
+    DisasterCount burnout(const u32* units, u32 n, u64 until, double grace_chance, u32 grace, Rng& r);
+    // X4: cores whose repair is done (until <= tick) back in their pools,
+    // cool. Returns how many.
+    u32 repair(u64 tick);
+    u32 offline_count() const { return static_cast<u32>(offline_.size()); }
+    const Array<OfflineCore>& offline() const { return offline_; }
+    // X5: the disk is lost: every codon INERT (codon 0), every holding
+    // released, resting dormant programs' disk reserves gone. Returns the
+    // codons that were held. (One function: the disk tiers' merge makes it
+    // pick a tier by size, docs/world-plan.md W4.)
+    u32 fail_disk();
+    // X6: lightning: `len` codons from `at` (clipped at the end) become
+    // random; ownership stays. Returns the codons struck.
+    u32 strike(u32 at, u32 len, Rng& r);
+    // X10: this tick's symptoms, set by the world before the tick; fevered
+    // units (GPU ones | kOfflineGpu) with their extra heat a tick.
+    void set_weather(const Weather& w) { weather_ = w; }
+    const Weather& weather() const { return weather_; }
+    void clear_fever() {
+        fever_unit_.clear();
+        fever_heat_.clear();
+    }
+    void add_fever(u32 unit, float heat) {
+        fever_unit_.push(unit);
+        fever_heat_.push(heat);
+    }
 
     // --- inspection ---------------------------------------------------------
     const SoupParams& params() const { return *p_; }
@@ -1180,7 +1296,10 @@ class Soup {
     // dorm_tag_, not hashed or saved (a resumed run's bodies read as unknown).
     Array<u8> origin_;
     u64 frozen_bare_ = 0, dormant_mem_sum_ = 0, dormant_disk_sum_ = 0; // diagnostics
-    bool go_dormant(u32 b);
+    // Disasters X4: offline_until > 0 is a burnout -- its cores go offline
+    // until then, not to the pools, and it rests here first; grace > 0 gives
+    // a bare one a memory reserve of that many codons.
+    bool go_dormant(u32 b, u64 offline_until = 0, u32 grace = 0);
     void rest_tick(u32 b);
     void depart_dormant(u32 b, u32 nbr);
     u32 drift_port();
@@ -1217,7 +1336,12 @@ class Soup {
     u32 cpu_etime(u32 c) const { return c < cpu_etime_.size() ? cpu_etime_[c] : 0; }
     u32 free_e_units() const { return static_cast<u32>(epool_.size()); }
     u32 e_held() const { // E millicores held by bodies
-        return e_first_ < unit_owner_.size() ? static_cast<u32>(unit_owner_.size() - e_first_ - epool_.size()) : 0;
+        if (e_first_ >= unit_owner_.size())
+            return 0;
+        u32 off = 0; // (disasters X4: burnt ones are no one's)
+        for (usize i = 0; i < offline_.size(); ++i)
+            off += !(offline_[i].unit & kOfflineGpu) && is_e(offline_[i].unit) ? 1 : 0;
+        return static_cast<u32>(unit_owner_.size() - e_first_ - epool_.size()) - off;
     }
 
   private:
@@ -1238,6 +1362,18 @@ class Soup {
     bool collapse_ = false;
     u64 arrived_dry_ = 0, arrived_all_ = 0; // arrived_dry(), arrived_all()
     void lifecycle_check();
+    // Disasters (disaster.cpp): offline cores (world state with disasters
+    // on), this tick's symptoms and fevered units (derived, set by the
+    // world), the spurious-fault countdown (drawn each tick only while
+    // faults are brewing), and the end-of-tick hazards they bring.
+    Array<OfflineCore> offline_;
+    Weather weather_ = {};
+    Array<u32> fever_unit_;
+    Array<float> fever_heat_;
+    double fault_left_ = 1e300;
+    bool faults_on_ = false;
+    void weather_hazards(); // tick_second: extra disk rot and static, before the death sweep
+    void order_compact();   // order_ without the dead (after barrier kills)
     Array<u32> scratch_;
     u64 free_epoch_ = 0;         // bumped whenever a codon becomes waste
     u64 fail_epoch_ = ~0ull;     // see known_full()
