@@ -131,9 +131,15 @@ bool run_codon_table(Config& cfg, CodonTable* t, TextBuf* err);
 // until it dies or the run ends). Either file may be missing.
 struct GatedSet {
     HashMap<u8> ids;
+    HashMap<u64> first_tick; // tick + 1 of a lineage's first replicator event in replay.log
     u64 csv_rows = 0, from_csv = 0, from_replay = 0;
     bool csv = false, replay = false;
     bool contains(u64 id) const { return ids.contains(id); }
+    // Gated by the end of `tick` by replay.log's events (the live meter's view).
+    bool gated_by(u64 id, u64 tick) const {
+        const u64* t = first_tick.find(id);
+        return t && *t <= tick + 1;
+    }
 };
 bool load_gated(const char* dir, GatedSet* out, TextBuf* err);
 
@@ -152,6 +158,11 @@ struct NoveltyOptions {
     double threshold = 3.0; // bits per codon at or above which a genotype is novel
     u32 order = 4;          // the n-gram length: 4 codons
     u32 top = 5;            // the most surprising successful genotypes listed per window
+    // The live meter's rule (novelty.h; --as-live): successful only if the
+    // lineage met the gate by the end of the genotype's window, by replay.log's
+    // event ticks, rather than at any time in the run. With the stats window as
+    // the window, the figures are the live stats columns'.
+    bool as_live = false;
 };
 
 struct NoveltyWindow {

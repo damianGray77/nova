@@ -2,7 +2,7 @@
 // docs/results/analysis.md). The work is in core (nova/analysis.h); this is
 // the command line around it.
 //
-//   nova analyse novelty <run> [--window N] [--threshold BITS] [--top K] [--out DIR]
+//   nova analyse novelty <run> [--window N] [--threshold BITS] [--top K] [--as-live] [--out DIR]
 //   nova analyse tree <run> (--lineage N.K | --sample N) [--max N] [--neighbours N]
 //                     [--pool N] [--seed S] [--threads N] [--out DIR]
 //   nova analyse scores <run> [--body-floor N] [--threshold BITS]
@@ -33,7 +33,8 @@ namespace {
 int analyse_usage() {
     fprintf(stderr,
             "usage:\n"
-            "  nova analyse novelty <run> [--window N] [--threshold BITS] [--top K] [--out DIR]\n"
+            "  nova analyse novelty <run> [--window N] [--threshold BITS] [--top K] [--as-live] [--out DIR]\n"
+            "                    (--as-live: successful = gated by the window's end, as the live columns count)\n"
             "  nova analyse tree <run> (--lineage N.K | --sample N) [--max N] [--neighbours N] [--pool N]\n"
             "                    [--seed S] [--threads N] [--out DIR]\n"
             "  nova analyse scores <run> [--body-floor N] [--threshold BITS]\n"
@@ -88,6 +89,7 @@ struct Opts {
     u64 window = 10000, top = 5, max = 2000, neighbours = 20, pool = 20000, seed = 1, threads = 1, sample = 0;
     double threshold = 3.0, body_floor = 0;
     bool lineage_given = false, top_given = false;
+    bool as_live = false; // novelty: successful = gated by the window's end, as the live columns count
     u64 lineage = 0;
     u64 kmin = 2, kmax = 8, gap = 2, block = 50, shuffles = 200; // roles, groups (A3)
     bool window_given = false;
@@ -95,6 +97,10 @@ struct Opts {
 
 bool parse_opts(int argc, char** argv, int from, Opts* o) {
     for (int i = from; i < argc; ++i) {
+        if (strcmp(argv[i], "--as-live") == 0) { // (novelty: the live columns' rule; docs/results/viewer.md)
+            o->as_live = true;
+            continue;
+        }
         if (i + 1 >= argc) {
             fprintf(stderr, "nova analyse: '%s' needs a value\n", argv[i]);
             return false;
@@ -153,6 +159,7 @@ int analyse_novelty(const char* run, const Opts& op) {
     o.window = op.window;
     o.threshold = op.threshold;
     o.top = static_cast<u32>(op.top);
+    o.as_live = op.as_live;
     TextBuf dir;
     if (!out_dir(run, op.out, &dir))
         return 1;

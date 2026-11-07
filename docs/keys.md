@@ -9,7 +9,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 - **Families:** a key with a `<placeholder>` stands for one setting per member listed.
 - **Needs:** the switch the setting depends on; it does nothing while that is off.
 
-357 settings, 83 of them from 14 families; 11 hidden (tests and demos).
+359 settings, 83 of them from 14 families; 11 hidden (tests and demos).
 
 ## Contents
 
@@ -415,6 +415,8 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `profile.per_node` | whole | 4 | 1 to 4096 | **Profiles per node**. Bodies each node picks to follow every round, from the observer's own random stream. Needs `profile.enabled`. |
 | `profile.ticks` | whole | 50 | 1 to 1000000000 | **Profile length**. Ticks each picked body is followed, or until it dies or goes dormant (at most profile.every). Needs `profile.enabled`. |
 | `profile.arrivals` | switch | true | true or false | **Arrivals log**. Log the arrivals placed during each round's ticks (output.arrivals), for the moving-together measure. Needs `profile.enabled`. |
+| `novelty.enabled` | switch | true | true or false | **Live novelty meter**. Measure each new genotype the genebank saves against a 4-codon model of every one before it, for the stats columns novelty, novel_share and novel_success (it only observes: no world changes). Needs `detect.enabled`. |
+| `novelty.threshold` | number | 3 | 0 to 64 | **Novel at**. Bits per codon of surprise at or above which a new genotype counts as novel (nova analyse novelty's --threshold). Needs `novelty.enabled`. |
 
 ## Budgets
 

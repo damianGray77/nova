@@ -141,6 +141,10 @@ bool novelty_analyse(const char* dir, const NoveltyOptions& o, NoveltyReport* ou
     GatedSet gated;
     if (!load_gated(dir, &gated, err))
         return false;
+    if (o.as_live && !gated.replay) {
+        err->append("--as-live needs the run's replay.log (when each lineage met the gate)");
+        return false;
+    }
     out->gated = gated.ids.size();
     out->csv = gated.csv;
     out->replay = gated.replay;
@@ -173,8 +177,9 @@ bool novelty_analyse(const char* dir, const NoveltyOptions& o, NoveltyReport* ou
             ++out->skipped;
             continue;
         }
-        const bool ok = gated.contains(e.lineage);
         const u64 wf = e.tick / window * window;
+        // Successful: met the gate at any time, or (as_live) by the window's end.
+        const bool ok = o.as_live ? gated.gated_by(e.lineage, wf + window - 1) : gated.contains(e.lineage);
         if (o.top && wf != top_window) {
             if (top_window != ~0ull)
                 flush_top(top, arena, top_window, out->top_csv);

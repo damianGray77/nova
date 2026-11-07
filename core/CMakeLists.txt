@@ -56,6 +56,10 @@ add_library(nova_core STATIC
     src/profile.cpp
     src/analysis/roles.cpp
     src/analysis/groups.cpp
+    # The live novelty meter (A2's live part) and the map of life (A5), for the
+    # run and the viewer (docs/results/viewer.md).
+    src/analysis/live.cpp
+    src/lifemap.cpp
 )
 add_library(nova::core ALIAS nova_core)
 

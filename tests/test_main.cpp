@@ -152,7 +152,10 @@ const char* const kLegacyDefaults ="accel.mode = instant\n"
                                     "mem.fast_share = 0\n"      // memory tiers (W3): suite memtiers tests them
                                     // behaviour profiles (docs/analysis-plan.md A3): observe-only, so off
                                     // changes no hash; suite profiles turns them on
-                                    "profile.enabled = false\n";
+                                    "profile.enabled = false\n"
+                                    // the live novelty meter (docs/analysis-plan.md A2): an observer, off here;
+                                    // suites view and viewer turn it on
+                                    "novelty.enabled = false\n";
 
 int main(int argc, char** argv) {
     nova::Config::ParseError pe;

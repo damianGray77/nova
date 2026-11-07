@@ -85,6 +85,46 @@ class Viewer {
     const ViewFrame& current() const { return cur_; }
     // Where node n was drawn in the last frame (false if off the map).
     bool node_screen(u32 n, i32* x, i32* y) const;
+
+    // --- docs/results/viewer.md --------------------------------------------
+    // W8: the substrate type the substrate colour mode shows (SubstrateType;
+    // the T key and the map's "type" popup cycle it).
+    u32 sub_type() const { return sub_type_; }
+    void set_sub_type(u32 t) { sub_type_ = t < kSubstrateTypes ? t : 0; }
+    // X7: the latest disaster strike on node n within kStrikeFade ticks of
+    // the frame's tick (its kind and its age, 0 new to 1 faded); false if none.
+    bool strike_marker(u32 n, u32* kind, double* age) const;
+    usize strike_count() const { return strikes_.size(); }
+    // A2: "new kinds of life" in the phylogeny panel's place.
+    void set_kinds(bool on) { kinds_ = on; }
+    bool kinds() const { return kinds_; }
+    usize pick_count() const { return picks_.size() + picks_open_.size(); }
+    const NoveltyPick& pick(usize i) const; // the list's rows: the open window's first, then newest first
+    void select_pick(usize i);             // into the genome browser, with its lineage
+    // A5: the map of life in the map's place; its time (follow: the frame's
+    // tick) and window (0 = auto).
+    void set_life_mode(bool on);
+    bool life_mode() const { return life_mode_; }
+    void set_life_time(u64 tick, u64 span);
+    void set_life_follow() { life_follow_ = true; }
+    const LifeMap& life() const { return life_; }
+    // Where a map-of-life point was drawn in the last frame (false if not shown).
+    bool life_point_screen(u32 i, i32* x, i32* y) const;
+    // Where the list's row i was drawn in the last frame (false if not shown).
+    bool pick_screen(usize i, i32* x, i32* y) const {
+        if (i >= pick_sy_.size() || pick_sy_[i] < 0)
+            return false;
+        *x = pick_sx_;
+        *y = pick_sy_[i];
+        return true;
+    }
+    // Opens a chart's series picker as a click on its header does (test hook).
+    void open_series_picker(u32 chart) { open_popup(3, chart, Rect{charts_r_.x + 40, charts_r_.y + 20, 0, 0}); }
+    // The life map's shown window, [t - span, t].
+    u64 life_time() const { return life_t_; }
+    u64 life_span() const { return life_span_now_; }
+    // The map panel alone below the toolbar (an animation's frames).
+    void set_solo(bool on) { solo_ = on; }
     // The genome browser's rows, in order, after its filter (test hook).
     usize browser_rows() const { return order_.size(); }
     void set_filter(const char* text);
@@ -103,6 +143,11 @@ class Viewer {
     void inspector(const UiInput& in, Canvas& c);
     void browser(const UiInput& in, Canvas& c);
     void phylogeny(const UiInput& in, Canvas& c);
+    void kinds_panel(const UiInput& in, Canvas& c, const Rect& inner); // A2
+    void life_panel(const UiInput& in, Canvas& c);                     // A5
+    void life_build();      // the live map from the genebank log, when first shown
+    void life_refit();      // ... again, fitted on the log's newest kLifeRef genotypes
+    bool map_header_toggles(const UiInput& in, Canvas& c, i32 x); // the world map / map of life switch
     void splitters(const UiInput& in, Canvas& c);
     void popup(const UiInput& in, Canvas& c, bool* consumed);
     void tooltip(Canvas& c);
@@ -182,11 +227,31 @@ class Viewer {
     u32 edit_len_ = 0;
 
     // the popup list
-    u32 popup_ = 0, popup_owner_ = 0; // 0 none, 1 colour-by, 2 strip-by, 3 chart series
+    u32 popup_ = 0, popup_owner_ = 0; // 0 none, 1 colour-by, 2 strip-by, 3 chart series, 4 substrate type
     Rect popup_r_;
     i32 popup_scroll_ = 0;
+    i32 popup_cols_ = 1, popup_per_ = 0, popup_rows_ = 0, popup_w_ = 0, popup_ih_ = 0; // its last layout
+    u32 popup_count_ = 0;
 
-    char tip_[512] = {};
+  public:
+    // Test hooks: the popup open (its kind and items), where item i was drawn,
+    // and a chart's series (kNone: an empty slot).
+    u32 popup_kind() const { return popup_; }
+    u32 popup_items() const { return popup_count_; }
+    bool popup_item_rect(u32 item, Rect* r) const {
+        if (!popup_ || item >= popup_count_ || popup_per_ <= 0)
+            return false;
+        const i32 col = static_cast<i32>(item) / popup_per_, row = static_cast<i32>(item) % popup_per_ - popup_scroll_;
+        if (row < 0 || row >= popup_rows_)
+            return false;
+        *r = Rect{popup_r_.x + col * popup_w_, popup_r_.y + 2 + row * popup_ih_, popup_w_, popup_ih_};
+        return true;
+    }
+    u32 series(u32 chart, u32 slot) const { return chart < kCharts && slot < kSeries ? series_[chart][slot] : kNone; }
+
+  private:
+
+    char tip_[1024] = {};
     i32 tip_x_ = 0, tip_y_ = 0;
     Array<ViewCommand> cmds_;
     i32 mx_ = -1, my_ = -1;
@@ -203,6 +268,38 @@ class Viewer {
     Rect minimap_;
     bool mm_drag_ = false;
     void fit_mass(u32 mass);
+
+    // W8: the substrate colour mode's type.
+    u32 sub_type_ = 0;
+    bool solo_ = false; // set_solo
+    // X7: the disasters' strikes (tick, node, kind), the newest kMaxStrikes.
+    struct Strike {
+        u64 tick;
+        u32 node, kind;
+    };
+    static constexpr usize kMaxStrikes = 65536;
+    Array<Strike> strikes_;
+    // A2: "new kinds of life"
+    bool kinds_ = false, novelty_ = false;
+    u64 novelty_window_ = 0;
+    Array<NoveltyPick> picks_, picks_open_;
+    Array<char> pick_text_, pick_open_text_;
+    Array<u32> pick_order_; // picks_ in the list's order
+    i32 kinds_scroll_ = 0;
+    i32 pick_sx_ = 0;
+    Array<i32> pick_sy_; // per list row: its centre's y as drawn, -1 not shown
+    // A5: the map of life
+    bool life_mode_ = false, life_built_ = false, life_archive_ = false;
+    LifeMap life_;
+    bool life_follow_ = true;
+    u64 life_t_ = 0, life_span_ = 0, life_span_now_ = 0;
+    bool pop_known_ = false;
+    Array<u64> pop_genotype_;
+    Array<u32> pop_count_;
+    bool drag_life_ = false;
+    Rect life_slider_, life_plot_;
+    Array<i32> life_sx_, life_sy_; // where each point was drawn (kNone-ish when not)
+    float life_scale_ = 1, life_cx_ = 0, life_cy_ = 0;
 
   public:
     // Test hooks: the map's zoom, and the overview map's place.

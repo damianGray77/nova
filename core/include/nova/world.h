@@ -264,6 +264,11 @@ class World {
     const Array<ArrivalRecord>& arrivals() const { return arrivals_; }
     const ProfileCensus& profile_census() const { return census_; }
     // --- end behaviour profiles ---------------------------------------------
+    // The live novelty meter (docs/analysis-plan.md A2; novelty.h): the run's
+    // observer, not the world's. Its settings are read with the rest here; the
+    // world never uses them, and they change nothing it does.
+    bool novelty_enabled() const { return novelty_; }
+    double novelty_threshold() const { return novelty_threshold_; }
 
     u64 seed() const { return seed_; }
     u64 tick() const { return tick_; }
@@ -632,6 +637,8 @@ class World {
     }
     void note_arrival(const Cargo& c, u32 dst);
     // --- end behaviour profiles -------------------------------------------------
+    bool novelty_ = false;           // novelty.enabled (an observer's: the run reads it)
+    double novelty_threshold_ = 3.0; // novelty.threshold
 
     StepProfile* prof_ = nullptr;
     bool check_only_ = false; // check_settings(): read and check, build nothing (config-plan C4)

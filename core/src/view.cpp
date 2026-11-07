@@ -1,10 +1,13 @@
 #include "nova/view.h"
+#include "nova/keys.h"
 
 #include <cmath>   // cos, sin, floor, sqrt
 #include <cstring> // memcpy, memset
 
+#include "nova/analysis.h" // a finished run's novelty list and map of life, streamed (A2, A5)
 #include "nova/genebank.h"
 #include "nova/hash.h"
+#include "nova/novelty.h" // the live novelty meter (A2)
 
 namespace nova {
 
@@ -87,20 +90,32 @@ double field_f64(const Str* f, usize nf, u32 idx) {
     return parse_f64(f[idx], &v) ? v : 0;
 }
 
-// The nodes.csv columns the archive reads, by name.
+// The nodes.csv columns the archive reads, by name (a file without the later
+// ones -- a varied world's, the disasters' -- reads as it always did).
 const char* const kNodeCols[] = {"tick_first", "tick_last", "node",      "x",        "y",         "degree",
                                  "soup_size",  "millicores", "gpus",     "npus",     "cool",      "spark_rate",
                                  "radiation",  "bodies",     "waste",    "free_millicores", "births", "deaths",
                                  "sent",       "arrived",    "lineages", "colonists", "live",     "health",
-                                 "life"};
+                                 "life",
+                                 // a varied world (docs/world-plan.md W8): each substrate type's multiplier, occupancy
+                                 "sub_p_cores", "sub_e_cores", "sub_gpu", "sub_npu", "sub_mem_fast", "sub_mem_slow",
+                                 "sub_disk_fast", "sub_disk_slow", "occupancy",
+                                 // the disasters' (docs/disasters-plan.md X7, X10)
+                                 "symptom_ticks", "struck", "cores_offline"};
 enum NodeCol : u32 {
     kNcFirst, kNcLast, kNcNode, kNcX, kNcY, kNcDegree, kNcSize, kNcMilli, kNcGpus, kNcNpus, kNcCool, kNcSpark,
     kNcRad, kNcBodies, kNcWaste, kNcFree, kNcBirths, kNcDeaths, kNcSent, kNcArrived, kNcLineages, kNcColonists,
-    kNcLive, kNcHealth, kNcLife, kNcCount
+    kNcLive, kNcHealth, kNcLife,
+    kNcSub, // ... kSubstrateTypes of them
+    kNcOccupancy = kNcSub + kSubstrateTypes, kNcSymptoms, kNcStruck, kNcOffline, kNcCount
 };
 static_assert(sizeof kNodeCols / sizeof kNodeCols[0] == kNcCount, "node column table");
 
 void append_text(Array<char>& dst, Str s) { dst.append(s.p, s.n); }
+
+// A live session's per-node accumulators: births, deaths, sent, arrived,
+// emits, ticks with disaster symptoms, disasters that struck.
+constexpr u32 kAcc = 7;
 
 void genome_text(const CodonTable& t, const u8* codons, u32 len, Array<char>& out) {
     TextBuf tb;
@@ -129,6 +144,7 @@ void entry_from_record(const GenebankRecord& r, const u8* codons, const CodonTab
     e->off = static_cast<u32>(text.size());
     genome_text(t, codons + r.codon_off, r.len, text);
     e->n = static_cast<u32>(text.size()) - e->off;
+    e->surprise = r.surprise; // (A2: the live meter's, kNoSurprise with it off)
 }
 
 // A lineage id written "n.k".
@@ -195,8 +211,46 @@ const char* color_by_name(u32 c) {
     static const char* const n[kColorCount] = {"bodies",   "births",     "colonists",  "health",    "lineage",
                                                "free CPU", "waste",      "memory",     "millicores", "climate",
                                                "sparks",   "radiation",  "disk",       "volatility", "signals",
-                                               "GPU lanes", "E-cores", "material"};
+                                               "GPU lanes", "E-cores", "material",
+                                               // W8, X7
+                                               "substrate", "occupancy", "symptoms", "cores offline"};
     return c < kColorCount ? n[c] : "?";
+}
+
+u32 substrate_level_color(u32 level) {
+    static const u32 k[kSubstrateLevels] = {0xA8322A, 0xE08A3C, 0x6E7E94, 0x6CC070, 0x3CE6C0};
+    return level < kSubstrateLevels ? k[level] : 0x606060;
+}
+
+u32 substrate_level_of(double mult, double floor_mult) {
+    const double m[kSubstrateLevels] = {floor_mult, 0.5, 1.0, 1.5, 2.0};
+    u32 best = 0;
+    double bd = 1e300;
+    for (u32 k = 0; k < kSubstrateLevels; ++k) {
+        const double d = mult > m[k] ? mult - m[k] : m[k] - mult;
+        if (d < bd) {
+            bd = d;
+            best = k;
+        }
+    }
+    return best;
+}
+
+u32 strike_color(u32 kind) {
+    switch (kind) {
+    case kEvSurge:
+        return 0xFF5050; // red
+    case kEvCrash:
+        return 0xC070FF; // violet
+    case kEvBurnout:
+        return 0xFF9A30; // orange
+    case kEvDiskFail:
+        return 0x40C8FF; // cyan
+    case kEvLightning:
+        return 0xFFF060; // yellow
+    default:
+        return 0xFFFFFF;
+    }
 }
 
 const char* strip_by_name(u32 s) {
@@ -207,7 +261,9 @@ const char* strip_by_name(u32 s) {
 const char* event_kind_name(u32 k) {
     static const char* const n[kEvCount] = {"replicator", "gpu_replicator", "npu_user",   "colonist",
                                             "disk_user",  "signaller",      "gpu_native", "defended",
-                                            "collapse",   "recovered",      "event"};
+                                            "collapse",   "recovered",
+                                            // the disasters' strikes, as their events begin (X7)
+                                            "surge", "crash", "burnout", "diskfail", "lightning", "event"};
     return k < kEvCount ? n[k] : "?";
 }
 
@@ -231,8 +287,16 @@ void parse_event(Str text, u32* kind, u32* node) {
 
 // --- metrics ---------------------------------------------------------------
 
-double node_metric(const NodeView& n, u32 c) {
+double node_metric(const NodeView& n, u32 c, u32 sub_type) {
     switch (c) {
+    case kColorSubstrate: // W8: the level, 0 (the floor) to 4 (2x)
+        return sub_type < kSubstrateTypes ? n.sub_level[sub_type] : 0;
+    case kColorOccupancy:
+        return n.occupancy;
+    case kColorSymptoms:
+        return n.symptoms;
+    case kColorOffline:
+        return n.cores_offline;
     case kColorBodies:
         return n.bodies;
     case kColorBirths:
@@ -284,7 +348,12 @@ bool metric_range(u32 c, double* lo, double* hi) {
     case kColorWaste:
     case kColorEcores:
     case kColorMaterial:
+    case kColorOccupancy:
+    case kColorSymptoms:
         *hi = 1;
+        return true;
+    case kColorSubstrate: // the five levels
+        *hi = kSubstrateLevels - 1;
         return true;
     default:
         *hi = 1;
@@ -301,6 +370,15 @@ void ViewFrame::clear_new() {
     event_text.clear();
     saves.clear();
     save_text.clear();
+    picks.clear();
+    picks_open.clear();
+    pick_text.clear();
+    pop_sent = false;
+    pop_genotype.clear();
+    pop_count.clear();
+    if (life_sent)
+        life.clear();
+    life_sent = false;
 }
 
 // Sums: the early tallies, the link counts, the warp tallies, Phase 9's
@@ -310,19 +388,26 @@ void ViewFrame::clear_new() {
 // the foundings by origin (W7, 93-96), then the disasters' 22 sums (97-118;
 // their four gauges, 119-122, aren't), then the memory tiers' fast ALLOCs'
 // claims and failures (W3, 124-125; fast_held, 123, is a gauge).
+// their four gauges, 119-122, aren't), then the live novelty meter's
+// novel_success (125; novelty and novel_share, 123 and 124, are the window's).
 bool stats_column_is_sum(u32 i) {
     return (i >= 3 && i < 42) || (i >= 49 && i <= 51) || (i >= 60 && i <= 64) || (i >= 67 && i <= 72) ||
            (i >= 74 && i <= 82) || (i >= 83 && i <= 87) || (i >= 91 && i <= 92) || (i >= 93 && i <= 96) ||
            (i >= kStatsDisasterFirst && i < kStatsDisasterFirst + kStatsDisasterSums) || // the disasters' sums (97-118)
-           (i > kStatsTierFirst && i < kStatsTierFirst + kStatsTierColumns);           // W3's two sums (124-125)
+           (i > kStatsTierFirst && i < kStatsTierFirst + kStatsTierColumns) ||           // W3's two sums (124-125)
+           i == kStatsNoveltyFirst + 2;                                                 // novel_success
 }
 
+// The charts show novelty and novel_share in their own units (bits per codon,
+// a share), not stats.csv's fixed point.
 void chart_row(const StatsRow& r, double* out) {
     const double ticks = static_cast<double>(r.v[2]);
     for (u32 i = 0; i < kStatsColumns; ++i) {
         const double v = r.value(i);
         out[i] = stats_column_is_sum(i) && ticks > 0 ? v / ticks : v;
     }
+    out[kStatsNoveltyFirst] /= kNoveltyFixed;
+    out[kStatsNoveltyFirst + 1] /= kNoveltyFixed;
 }
 
 void ChartLog::clear() {
@@ -510,7 +595,7 @@ void ViewSession::attach(Run* run, u32 sample_every) {
     StatsRow scratch;
     if (run->world().model() == Model::soup)
         stats_soup_row(run->world(), sum_, 0, 1, &marks_, false, &scratch);
-    acc_.resize(static_cast<usize>(run->world().node_count()) * 5);
+    acc_.resize(static_cast<usize>(run->world().node_count()) * kAcc);
     acc_.fill(0);
     acc_ticks_ = 0;
     new_tick_.clear();
@@ -520,6 +605,21 @@ void ViewSession::attach(Run* run, u32 sample_every) {
     py_.clear();
     hash_valid_ = false;
     land_sent_ = false;
+    // A2: the charts' own window of the run's novelty meter, and the list's.
+    if (run->novelty())
+        run->novelty()->open_tap(LiveNovelty::kTapView);
+    bank_seen_ = 0;
+    open_first_ = ~0ull;
+    cand_.clear();
+    cand_codons_.clear();
+    closed_.clear();
+    closed_text_.clear();
+    pop_tick_ = ~0ull;
+}
+
+void ViewSession::set_novelty_list(u64 window, u32 top) {
+    nov_window_ = window ? window : 1;
+    nov_top_ = top ? top : 1;
 }
 
 void ViewSession::after_step() {
@@ -535,21 +635,121 @@ void ViewSession::after_step() {
     ++ticks_;
     for (u32 n = 0; n < w.node_count(); ++n) {
         const SoupTally& nt = w.node_soup(n).tally();
-        float* a = acc_.data() + static_cast<usize>(n) * 5;
+        float* a = acc_.data() + static_cast<usize>(n) * kAcc;
         a[0] += static_cast<float>(nt.births);
         a[1] += static_cast<float>(nt.deaths);
         a[2] += static_cast<float>(nt.sent);
         a[3] += static_cast<float>(nt.arrived);
         a[4] += static_cast<float>(nt.emits);
+        a[5] += w.node_symptoms(n) ? 1.0f : 0.0f; // disasters (X10, X7)
+        a[6] += static_cast<float>(w.node_struck(n));
     }
     ++acc_ticks_;
+    // A2's list: this tick's saves join the open window, which closes after
+    // its last tick, its picks gated by then (the live columns' rule).
+    take_saves();
+    if (open_first_ != ~0ull && w.tick() >= open_first_ + nov_window_)
+        close_window();
     if (every_ && ticks_ >= every_)
         sample();
+}
+
+// --- "new kinds of life" (A2) ------------------------------------------------
+
+// The run's genebank saves not yet seen (the log empties at each build), each
+// new genotype a candidate of its window.
+void ViewSession::take_saves() {
+    const usize n = run_->genebank_count();
+    if (!run_->novelty()) {
+        bank_seen_ = n;
+        return;
+    }
+    for (; bank_seen_ < n; ++bank_seen_) {
+        const GenebankRecord& r = run_->genebank_record(bank_seen_);
+        if (r.surprise < 0) // a repeat (or not measured)
+            continue;
+        const u64 wf = r.tick / nov_window_ * nov_window_;
+        if (open_first_ == ~0ull)
+            open_first_ = wf;
+        while (wf > open_first_) // (a window with no closing step: closed here)
+            close_window();
+        NoveltyPick c;
+        memset(&c, 0, sizeof c);
+        c.window_first = wf;
+        c.window_last = wf + nov_window_ - 1;
+        c.tick = r.tick;
+        c.lineage = r.lineage;
+        c.genotype = r.genotype;
+        c.surprise = r.surprise;
+        c.node = r.node;
+        c.len = r.len;
+        TextBuf nm;
+        Genebank::format_name(r.len, r.name, nm);
+        copy_name(c.name, nm.view());
+        c.off = static_cast<u32>(cand_codons_.size());
+        c.n = r.len;
+        cand_codons_.append(run_->genebank_codons() + r.codon_off, r.len);
+        cand_.push(c);
+    }
+}
+
+// The window's most surprising candidates in lineages gated by now, as
+// `nova analyse novelty` picks them (the lowest replaced by a higher one; then
+// by surprise, a stable sort), with their genomes as op names.
+void ViewSession::top_picks(bool open, Array<NoveltyPick>* out, Array<char>* text) {
+    const LiveNovelty* m = run_->novelty();
+    if (!m)
+        return;
+    Array<u32> top;
+    for (usize i = 0; i < cand_.size(); ++i) {
+        const NoveltyPick& c = cand_[i];
+        if (!m->is_gated(c.lineage))
+            continue;
+        if (top.size() >= nov_top_) {
+            usize low = 0;
+            for (usize k = 1; k < top.size(); ++k)
+                if (cand_[top[k]].surprise < cand_[top[low]].surprise)
+                    low = k;
+            if (cand_[top[low]].surprise >= c.surprise)
+                continue;
+            top[low] = static_cast<u32>(i);
+        } else {
+            top.push(static_cast<u32>(i));
+        }
+    }
+    for (usize i = 1; i < top.size(); ++i) {
+        const u32 t = top[i];
+        usize j = i;
+        while (j > 0 && cand_[top[j - 1]].surprise < cand_[t].surprise) {
+            top[j] = top[j - 1];
+            --j;
+        }
+        top[j] = t;
+    }
+    const CodonTable& table = run_->world().soup_params().table;
+    for (usize k = 0; k < top.size(); ++k) {
+        NoveltyPick p = cand_[top[k]];
+        p.rank = static_cast<u32>(k + 1);
+        p.open = open ? 1 : 0;
+        const u32 off = p.off, len = p.n;
+        p.off = static_cast<u32>(text->size());
+        genome_text(table, cand_codons_.data() + off, len, *text);
+        p.n = static_cast<u32>(text->size()) - p.off;
+        out->push(p);
+    }
+}
+
+void ViewSession::close_window() {
+    top_picks(false, &closed_, &closed_text_);
+    cand_.clear();
+    cand_codons_.clear();
+    open_first_ = open_first_ == ~0ull ? ~0ull : open_first_ + nov_window_;
 }
 
 void ViewSession::sample() {
     StatsRow r;
     stats_soup_row(run_->world(), sum_, first_, ticks_, &marks_, true, &r);
+    stats_novelty_row(run_->novelty(), LiveNovelty::kTapView, &r); // (A2: the charts' window of the run's meter)
     double row[kStatsColumns];
     chart_row(r, row);
     new_tick_.push(r.v[1] + 1); // ticks completed at the window's end
@@ -653,12 +853,20 @@ void ViewSession::build(const ViewRequest& q, ViewFrame* f) {
             v.npus = p.npus;
             v.disk = p.disk;
             v.degree = w.degree(n);
-            const float* a = acc_.data() + static_cast<usize>(n) * 5;
+            const float* a = acc_.data() + static_cast<usize>(n) * kAcc;
             v.births = a[0] * inv;
             v.deaths = a[1] * inv;
             v.sent = a[2] * inv;
             v.arrived = a[3] * inv;
             v.emits = a[4] * inv;
+            v.symptoms = a[5] * inv; // disasters (X10, X7)
+            v.struck = static_cast<u32>(a[6]);
+            v.cores_offline = s.offline_count();
+            for (u32 t = 0; t < kSubstrateTypes; ++t) { // a varied world (W8)
+                v.sub[t] = static_cast<float>(w.substrate_mult(n, t));
+                v.sub_level[t] = w.substrate_level(n, t);
+            }
+            v.occupancy = static_cast<float>(s.occupancy());
             v.cool = p.cool;
             v.spark_rate = static_cast<float>(p.spark_rate);
             v.radiation = static_cast<float>(mean.copy_rate > 0 ? p.copy_rate / mean.copy_rate : 1.0);
@@ -733,6 +941,7 @@ void ViewSession::build(const ViewRequest& q, ViewFrame* f) {
     f->strip.clear();
     f->strip_owner.clear();
     f->strip_w = f->strip_h = 0;
+    f->fast_end = 0;
     f->bodies.clear();
     f->sel_body = kNone;
     f->req_body = q.body;
@@ -745,6 +954,7 @@ void ViewSession::build(const ViewRequest& q, ViewFrame* f) {
         f->sel_node = q.node;
         const Soup& s = w.node_soup(q.node);
         f->kinds = s.params().kinds; // Phase 9c
+        f->fast_end = view_fast_end(s); // W3: the fast region, when memory tiers exist
         const Lineages* L = w.node_lineages(q.node);
         const u32 size = s.size();
         f->strip_w = 256;
@@ -940,6 +1150,8 @@ void ViewSession::build(const ViewRequest& q, ViewFrame* f) {
     }
     run_->drop_events(); // handed on: the run needn't hold them for hours
     if (w.model() == Model::soup) {
+        // A2's list sees every save before the log empties.
+        take_saves();
         // The newest kMaxSaves at most; the run's log is emptied once taken.
         const usize n = run_->genebank_count();
         for (usize i = n > kMaxSaves ? n - kMaxSaves : 0; i < n; ++i) {
@@ -949,7 +1161,58 @@ void ViewSession::build(const ViewRequest& q, ViewFrame* f) {
             f->saves.push(e);
         }
         run_->clear_genebank_log();
+        bank_seen_ = 0;
     }
+    // "New kinds of life" (A2): windows closed since the last frame, then the
+    // open window's leaders so far.
+    f->novelty = run_->novelty() != nullptr;
+    f->novelty_window = nov_window_;
+    for (usize i = 0; i < closed_.size(); ++i) {
+        NoveltyPick p = closed_[i];
+        const u32 off = static_cast<u32>(f->pick_text.size());
+        f->pick_text.append(closed_text_.data() + p.off, p.n);
+        p.off = off;
+        f->picks.push(p);
+    }
+    closed_.clear();
+    closed_text_.clear();
+    if (f->novelty && !cand_.empty())
+        top_picks(true, &f->picks_open, &f->pick_text);
+    // A5: living members per genotype (the map of life's sizes), at most
+    // every 100 ticks (or when the tick moved, paused).
+    if (q.populations && w.model() == Model::soup && w.node_lineages(0) &&
+        (pop_tick_ == ~0ull || w.tick() >= pop_tick_ + 100 || (q.hash && w.tick() != pop_tick_))) {
+        pop_tick_ = w.tick();
+        HashMap<u32> count;
+        for (u32 n = 0; n < nodes; ++n) {
+            const Soup& s = w.node_soup(n);
+            const Lineages* L = w.node_lineages(n);
+            for (usize k = 0; k < s.body_count(); ++k) {
+                const u32 blk = s.body(s.body_at(k)).blocks;
+                if (blk == kNone)
+                    continue;
+                const BlockTag tag = L->tag(blk);
+                if (tag.lineage)
+                    ++count.get_or_insert(tag.genotype);
+            }
+        }
+        f->pop_sent = true;
+        for (usize i = 0; i < count.slot_count(); ++i)
+            if (count.slot_used(i))
+                f->pop_genotype.push(count.slot_key(i));
+        sort_u64(f->pop_genotype.data(), f->pop_genotype.size());
+        for (usize i = 0; i < f->pop_genotype.size(); ++i)
+            f->pop_count.push(*count.find(f->pop_genotype[i]));
+    }
+}
+
+// The memory tiers (docs/world-plan.md W3) are another build's (memtiers):
+// until they are merged there is no fast region. At the merge, give the soup's
+// boundary here -- codons [0, fast_end) are fast memory: SoupParams' boundary
+// field (e.g. s.params().fast_end), or mem.fast_share x the soup's size.
+u32 view_fast_end(const Soup& s) {
+    (void)s;
+    return 0;
 }
 
 // --- the archive -----------------------------------------------------------
@@ -987,6 +1250,14 @@ bool RunArchive::load(const char* dir, TextBuf* err) {
     event_text_.clear();
     saves_.clear();
     save_text_.clear();
+    has_sub_ = has_occ_ = has_dis_ = false;
+    sub_floor_ = 0.1;
+    novelty_ = false;
+    pick_window_ = 0;
+    picks_.clear();
+    pick_text_.clear();
+    life_.clear();
+    notes_.clear();
 
     Array<u8> stats, nodes, replay, bank;
     const bool has_stats = read_text(dir, "stats.csv", &stats);
@@ -1021,6 +1292,7 @@ bool RunArchive::load(const char* dir, TextBuf* err) {
         Config cfg;
         Config::ParseError pe;
         if (log.replay_config(&cfg, &pe)) { // (the config it ran with: legacy defaults for a log before v3)
+            sub_floor_ = key_f64(cfg, "substrate.floor"); // (W8: the floor's multiplier, for the levels)
             cfg.set("accel.mode", "instant");
             cfg.set("gpu.warps", "false"); // (no GPU wanted either)
             cfg.set("detect.enabled", "false");
@@ -1074,6 +1346,258 @@ bool RunArchive::load(const char* dir, TextBuf* err) {
     }
     if (has_bank && !load_genebank(text(bank), err))
         return false;
+    // A2 and A5, from the whole genebank.txt (streamed again: the browser
+    // keeps only its newest kMaxSaves), when asked or when it is small.
+    const bool small = bank.size() <= kArchiveAutoBytes;
+    bank = Array<u8>();
+    if (want_novelty_ != 0 && !load_novelty(dir, err))
+        return false;
+    if (has_bank && (want_life_ > 0 || (want_life_ < 0 && small))) {
+        if (!load_life(dir, err))
+            return false;
+    } else if (has_bank && want_life_ < 0) {
+        notes_.append("map of life: not built (genebank.txt is over 256 MB; nova view --run <dir> --life builds it)\n");
+    }
+    return true;
+}
+
+// "New kinds of life" (A2): `nova analyse novelty`'s novelty_top.csv from the
+// run folder, or from analysis\<run name> (the tool's default output, beside
+// the current folder); else the tool run here on the run's genebank.txt (when
+// it is small, or asked).
+bool RunArchive::load_novelty(const char* dir, TextBuf* err) {
+    Str run(dir);
+    while (run.n && (run.p[run.n - 1] == '\\' || run.p[run.n - 1] == '/'))
+        --run.n;
+    usize s = run.n;
+    while (s > 0 && run.p[s - 1] != '\\' && run.p[s - 1] != '/' && run.p[s - 1] != ':')
+        --s;
+    TextBuf where[2];
+    path_join(where[0], run, "novelty_top.csv");
+    where[1].append("analysis\\");
+    where[1].append(run.sub(s, run.n - s));
+    where[1].append("\\novelty_top.csv");
+    Array<u8> bytes;
+    TextBuf from;
+    for (u32 k = 0; k < 2 && bytes.empty(); ++k) {
+        if (read_file(where[k].c_str(), &bytes)) {
+            from.append(where[k].view());
+            break;
+        }
+        bytes.clear();
+    }
+    TextBuf computed;
+    if (bytes.empty()) {
+        TextBuf bank_path;
+        path_join(bank_path, run, "genebank.txt");
+        LineReader probe;
+        if (!probe.open(bank_path.c_str()))
+            return true; // no genebank: no list
+        const bool small = probe.size() <= kArchiveAutoBytes;
+        probe.close();
+        if (want_novelty_ < 0 && !small) {
+            notes_.append("new kinds of life: no novelty_top.csv (nova analyse novelty <dir>, or nova view --run <dir> "
+                          "--novelty)\n");
+            return true;
+        }
+        NoveltyOptions o; // the tool's defaults: windows of 10,000 ticks, the top 5, novel at 3 bits
+        NoveltyReport r;
+        TextBuf why;
+        if (!novelty_analyse(dir, o, &r, &why)) {
+            notes_.append("new kinds of life: nova analyse novelty failed: ");
+            notes_.append(why.view());
+            notes_.append_char('\n');
+            return true; // (not fatal: the rest of the run still shows)
+        }
+        computed.append(r.top_csv.view());
+        from.append("nova analyse novelty, run on genebank.txt");
+    }
+    (void)err;
+    const Str t = bytes.empty() ? computed.view() : Str(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    // window_first,rank,surprise,name,node,lineage,tick,len,genome
+    Str line;
+    usize at = next_line(t, 0, &line);
+    Str hf[16];
+    const usize nh = split_fields(line, hf, 16);
+    i32 col[9];
+    const char* names[9] = {"window_first", "rank", "surprise", "name", "node", "lineage", "tick", "len", "genome"};
+    for (u32 c = 0; c < 9; ++c) {
+        col[c] = -1;
+        for (usize i = 0; i < nh; ++i)
+            if (hf[i].eq(names[c]))
+                col[c] = static_cast<i32>(i);
+    }
+    if (col[0] < 0 || col[2] < 0 || col[3] < 0) {
+        notes_.append("new kinds of life: novelty_top.csv has no window_first, surprise or name column\n");
+        return true;
+    }
+    novelty_ = true;
+    u64 last_first = ~0ull, step = 0;
+    while (at < t.n) {
+        at = next_line(t, at, &line);
+        if (line.n == 0)
+            continue;
+        Str f[16];
+        const usize nf = split_fields(line, f, 9); // (the genome, last, has no commas)
+        NoveltyPick p;
+        memset(&p, 0, sizeof p);
+        auto num = [&](u32 c) { return col[c] >= 0 ? field_f64(f, nf, static_cast<u32>(col[c])) : 0.0; };
+        p.window_first = static_cast<u64>(num(0));
+        p.rank = static_cast<u32>(num(1));
+        p.surprise = num(2);
+        if (col[3] >= 0 && static_cast<usize>(col[3]) < nf)
+            copy_name(p.name, f[col[3]]);
+        p.node = static_cast<u32>(num(4));
+        if (col[5] >= 0 && static_cast<usize>(col[5]) < nf)
+            parse_lineage(f[col[5]], &p.lineage);
+        p.tick = static_cast<u64>(num(6));
+        p.len = static_cast<u32>(num(7));
+        p.off = static_cast<u32>(pick_text_.size());
+        if (col[8] >= 0 && static_cast<usize>(col[8]) < nf)
+            append_text(pick_text_, f[col[8]].trim());
+        p.n = static_cast<u32>(pick_text_.size()) - p.off;
+        if (last_first != ~0ull && p.window_first > last_first && (step == 0 || p.window_first - last_first < step))
+            step = p.window_first - last_first;
+        last_first = p.window_first;
+        picks_.push(p);
+    }
+    pick_window_ = step ? step : kNoveltyListWindow;
+    for (usize i = 0; i < picks_.size(); ++i)
+        picks_[i].window_last = picks_[i].window_first + pick_window_ - 1;
+    notes_.append("new kinds of life: ");
+    notes_.append_u64(picks_.size());
+    notes_.append(" picks, from ");
+    notes_.append(from.view());
+    notes_.append_char('\n');
+    return true;
+}
+
+// The map of life (A5) of the whole run: genebank.txt streamed twice -- once
+// for the reference window's genomes, once to place every save.
+bool RunArchive::load_life(const char* dir, TextBuf* err) {
+    TextBuf path;
+    path_join(path, Str(dir), "genebank.txt");
+    life_.clear();
+    Array<char> ref_text;
+    Array<u32> ref_off, ref_len;
+    u64 ref_first = ~0ull, ref_last = 0;
+    if (life_ref_ != kLifeRefFirst) {
+        // A sample spread over the run (or the window): the kLifeRef genotypes
+        // with the lowest mixed hashes -- uniform, and no random draw. Kept as a
+        // max-heap of keys while streaming.
+        struct Ref {
+            u64 key, genotype, tick;
+            u32 off, len;
+        };
+        Array<Ref> heap;
+        Array<char> text;
+        HashMap<u8> seen;
+        GenebankReader bank;
+        if (!bank.open(path.c_str())) {
+            err->append("cannot read genebank.txt for the map of life");
+            return false;
+        }
+        BankEntry e;
+        while (bank.next(&e)) {
+            if (life_ref_ == kLifeRefWindow && (e.tick < life_a_ || e.tick > life_b_))
+                continue;
+            bool fresh = false;
+            seen.get_or_insert(e.hash, &fresh);
+            if (!fresh)
+                continue;
+            const u64 key = mix64(e.hash ^ 0x6D61702D6F662D6Cull);
+            if (heap.size() >= kLifeRef && key >= heap[0].key)
+                continue;
+            Ref r = {key, e.hash, e.tick, static_cast<u32>(text.size()), static_cast<u32>(e.genome.n)};
+            text.append(e.genome.p, e.genome.n);
+            if (heap.size() < kLifeRef) {
+                heap.push(r);
+                for (usize c = heap.size() - 1; c > 0;) { // sift up
+                    const usize p = (c - 1) / 2;
+                    if (heap[p].key >= heap[c].key)
+                        break;
+                    const Ref t = heap[p];
+                    heap[p] = heap[c];
+                    heap[c] = t;
+                    c = p;
+                }
+            } else {
+                heap[0] = r;
+                for (usize p = 0;;) { // sift down
+                    usize c = 2 * p + 1;
+                    if (c >= heap.size())
+                        break;
+                    if (c + 1 < heap.size() && heap[c + 1].key > heap[c].key)
+                        ++c;
+                    if (heap[p].key >= heap[c].key)
+                        break;
+                    const Ref t = heap[p];
+                    heap[p] = heap[c];
+                    heap[c] = t;
+                    p = c;
+                }
+            }
+            if (text.size() > (64u << 20)) { // compact: keep only the heap's genomes
+                Array<char> kept;
+                for (usize i = 0; i < heap.size(); ++i) {
+                    const u32 off = static_cast<u32>(kept.size());
+                    kept.append(text.data() + heap[i].off, heap[i].len);
+                    heap[i].off = off;
+                }
+                text = move(kept);
+            }
+        }
+        if (bank.error()[0]) {
+            err->append(bank.error());
+            return false;
+        }
+        // The reference in a fixed order (by genotype), whatever order the heap left.
+        Array<u64> order;
+        for (usize i = 0; i < heap.size(); ++i)
+            order.push(heap[i].genotype);
+        sort_u64(order.data(), order.size());
+        for (usize k = 0; k < order.size(); ++k)
+            for (usize i = 0; i < heap.size(); ++i)
+                if (heap[i].genotype == order[k]) {
+                    ref_off.push(static_cast<u32>(ref_text.size()));
+                    ref_len.push(heap[i].len);
+                    ref_text.append(text.data() + heap[i].off, heap[i].len);
+                    ref_first = heap[i].tick < ref_first ? heap[i].tick : ref_first;
+                    ref_last = heap[i].tick > ref_last ? heap[i].tick : ref_last;
+                    break;
+                }
+        if (ref_off.size() >= 2)
+            life_.fit(ref_text, ref_off, ref_len, ref_first, ref_last);
+    }
+    GenebankReader bank;
+    if (!bank.open(path.c_str())) {
+        err->append("cannot read genebank.txt for the map of life");
+        return false;
+    }
+    BankEntry e;
+    char name[16];
+    while (bank.next(&e)) {
+        const usize nn = e.name.n < 15 ? e.name.n : 15;
+        memcpy(name, e.name.p, nn);
+        name[nn] = '\0';
+        u32 len = 0; // the name's leading digits
+        for (usize i = 0; i < nn && name[i] >= '0' && name[i] <= '9'; ++i)
+            len = len * 10 + static_cast<u32>(name[i] - '0');
+        life_.add(e.tick, e.hash, e.lineage, e.node, len, name, e.genome);
+    }
+    if (bank.error()[0]) {
+        err->append(bank.error());
+        return false;
+    }
+    if (!life_.final())
+        life_.finalize(); // (first-N reference with fewer genotypes than kLifeRef)
+    notes_.append("map of life: ");
+    notes_.append_u64(life_.points().size());
+    notes_.append(" genotypes; axes fitted on ");
+    notes_.append_u64(life_.reference());
+    notes_.append(life_ref_ == kLifeRefFirst ? " (the first saved)\n"
+                                             : (life_ref_ == kLifeRefWindow ? " (a sample of the window)\n"
+                                                                            : " (a sample spread over the run)\n"));
     return true;
 }
 
@@ -1129,6 +1653,12 @@ bool RunArchive::load_nodes(Str t, TextBuf* err) {
         err->append("nodes.csv: no tick_last / node columns");
         return false;
     }
+    // The later columns (W8, X7), when the file has them.
+    has_sub_ = true;
+    for (u32 k = 0; k < kSubstrateTypes; ++k)
+        has_sub_ = has_sub_ && col[kNcSub + k] != 0xFFFFFFFFu;
+    has_occ_ = col[kNcOccupancy] != 0xFFFFFFFFu;
+    has_dis_ = col[kNcSymptoms] != 0xFFFFFFFFu && col[kNcStruck] != 0xFFFFFFFFu && col[kNcOffline] != 0xFFFFFFFFu;
     // Rows come window by window, node by node. Each window keeps every node's
     // columns as doubles (windows x nodes x kNcCount); the first window sets
     // the node count.
@@ -1238,6 +1768,7 @@ bool RunArchive::load_genebank(Str t, TextBuf* err) {
         e.off = static_cast<u32>(save_text_.size());
         append_text(save_text_, genome);
         e.n = static_cast<u32>(genome.n);
+        e.surprise = kNoSurprise; // (the files don't keep it: the novelty list does, A2)
         saves_.push(e);
     }
     return true;
@@ -1282,6 +1813,10 @@ void RunArchive::build(u32 window, const ViewRequest& q, ViewFrame* f) {
         }
         v.live = 1;
         v.health = 100;
+        for (u32 t = 0; t < kSubstrateTypes; ++t) { // (1x until a window says otherwise)
+            v.sub[t] = 1.0f;
+            v.sub_level[t] = kSubstrateOne;
+        }
         if (!have)
             continue;
         const double* r = win_vals_.data() + (static_cast<usize>(window) * nodes_ + n) * kNcCount;
@@ -1313,6 +1848,23 @@ void RunArchive::build(u32 window, const ViewRequest& q, ViewFrame* f) {
         v.known = (1u << kColorBodies) | (1u << kColorBirths) | (1u << kColorColonists) | (1u << kColorHealth) |
                   (1u << kColorFreeCpu) | (1u << kColorWaste) | (1u << kColorMemory) | (1u << kColorMillicores) |
                   (1u << kColorClimate) | (1u << kColorSparks) | (1u << kColorRadiation);
+        // A varied world (W8) and the disasters (X7), by name, when the file has them.
+        for (u32 t = 0; t < kSubstrateTypes; ++t) {
+            v.sub[t] = has_sub_ ? static_cast<float>(r[kNcSub + t]) : 1.0f;
+            v.sub_level[t] = static_cast<u8>(has_sub_ ? substrate_level_of(r[kNcSub + t], sub_floor_) : kSubstrateOne);
+        }
+        if (has_sub_)
+            v.known |= 1u << kColorSubstrate;
+        if (has_occ_) {
+            v.occupancy = static_cast<float>(r[kNcOccupancy]);
+            v.known |= 1u << kColorOccupancy;
+        }
+        if (has_dis_) {
+            v.symptoms = static_cast<float>(r[kNcSymptoms] / ticks);
+            v.struck = static_cast<u32>(r[kNcStruck]);
+            v.cores_offline = static_cast<u32>(r[kNcOffline]);
+            v.known |= (1u << kColorSymptoms) | (1u << kColorOffline);
+        }
     }
     for (u32 n = 0; n < nodes_ && n < node_mass_.size(); ++n)
         f->node[n].mass = node_mass_[n];
@@ -1345,7 +1897,15 @@ void RunArchive::build(u32 window, const ViewRequest& q, ViewFrame* f) {
         f->event_text.append(event_text_.data(), event_text_.size());
         f->saves.append(saves_.data(), saves_.size());
         f->save_text.append(save_text_.data(), save_text_.size());
+        // A2's list and A5's map, once.
+        f->picks.append(picks_.data(), picks_.size());
+        f->pick_text.append(pick_text_.data(), pick_text_.size());
+        f->life = move(life_);
+        f->life_sent = true;
+        life_.clear(); // (moved: start it clean)
     }
+    f->novelty = novelty_;
+    f->novelty_window = pick_window_;
 }
 
 } // namespace nova

@@ -46,6 +46,8 @@ add_executable(nova_tests
     test_analysis.cpp
     # Behaviour profiles (docs/analysis-plan.md A3).
     test_profiles.cpp
+    # The viewer and the live novelty meter (docs/results/viewer.md), in suites view and viewer.
+    test_viewer_more.cpp
 )
 target_link_libraries(nova_tests PRIVATE nova::core nova_viewer)
 target_compile_features(nova_tests PRIVATE cxx_std_20)

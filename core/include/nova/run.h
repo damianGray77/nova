@@ -47,11 +47,18 @@ struct GenebankRecord {
     u32 parent_name; // Genebank::kNoName if the parent is unsaved (or none)
     u32 parent_len;
     u32 codon_off;   // the genome, in Run::genebank_codons()
+    // The live novelty meter's surprise (novelty.h), bits per codon: -1 for a
+    // genotype saved before (not scored again), kNoSurprise with the meter off.
+    float surprise;
 };
+inline constexpr float kNoSurprise = -2.0f;
+
+class LiveNovelty; // novelty.h: the live novelty meter (docs/analysis-plan.md A2)
 
 class Run {
   public:
     Run() = default;
+    ~Run();
     Run(const Run&) = delete;
     Run& operator=(const Run&) = delete;
 
@@ -121,6 +128,13 @@ class Run {
     usize genebank_count() const { return bank_log_.size(); }
     const GenebankRecord& genebank_record(usize i) const { return bank_log_[i]; }
     const u8* genebank_codons() const { return bank_codons_.data(); }
+    // The live novelty meter (docs/analysis-plan.md A2; novelty.h), with
+    // novelty.enabled (and detection): fed every genebank save and gate event
+    // as the detectors are drained, it fills the stats columns novelty,
+    // novel_share and novel_success. nullptr when off. An observer only: not
+    // hashed, not snapshotted (a resumed run starts a fresh model).
+    LiveNovelty* novelty() { return novelty_; }
+    const LiveNovelty* novelty() const { return novelty_; }
     // Writes the final partial stats row, the living lineages and the replay
     // 'end' record; closes every output.
     void finish();
@@ -178,6 +192,7 @@ class Run {
     };
 
     void apply_due_knobs();
+    void start_novelty(); // the live novelty meter, when the world's config asks for it
     void after_step(); // events, detection, stats, checkpoints, numbered snapshots
     void drain_detection();
     void drain_profiles(); // behaviour profiles (A3)
@@ -201,6 +216,8 @@ class Run {
     bool keep_bank_ = false;
     Array<GenebankRecord> bank_log_;
     Array<u8> bank_codons_;
+    LiveNovelty* novelty_ = nullptr; // owned; see novelty()
+    Array<float> save_surprise_;     // the meter's answer for each of a node's saves (drain_detection)
 
     u64 instructions_ = 0;
     Detection detection_;

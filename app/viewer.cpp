@@ -147,6 +147,7 @@ void Viewer::take(ViewFrame& f) {
     cur_.sel_node = f.sel_node;
     cur_.strip_w = f.strip_w;
     cur_.strip_h = f.strip_h;
+    cur_.fast_end = f.fast_end; // (W3)
     cur_.sel_body = f.sel_body;
     cur_.req_body = f.req_body;
     cur_.req_serial = f.req_serial;
@@ -172,6 +173,14 @@ void Viewer::take(ViewFrame& f) {
             flash_tick_[e.node] = e.tick + 1;
             flash_kind_[e.node] = static_cast<u8>(e.kind);
         }
+        if (event_is_strike(e.kind) && e.node != kNone) { // X7: a strike's map marker
+            if (strikes_.size() >= kMaxStrikes) {
+                const usize drop = kMaxStrikes / 4;
+                memmove(strikes_.data(), strikes_.data() + drop, (strikes_.size() - drop) * sizeof(Strike));
+                strikes_.resize(strikes_.size() - drop);
+            }
+            strikes_.push(Strike{e.tick, e.node, e.kind});
+        }
     }
     for (usize i = 0; i < f.saves.size(); ++i) {
         GenomeEntry e = f.saves[i];
@@ -180,8 +189,53 @@ void Viewer::take(ViewFrame& f) {
         e.off = off;
         saves_.push(e);
         order_dirty_ = true;
+        if (life_built_ && !life_archive_) // A5: the live map keeps up with the saves
+            life_.add(e.tick, e.genotype, e.lineage, e.node, e.len, e.name, Str(save_text_.data() + off, e.n));
     }
     saves_seen_ += f.saves.size();
+    // A2: "new kinds of life": closed windows join the list, the open one's
+    // leaders replace the last frame's.
+    novelty_ = f.novelty;
+    novelty_window_ = f.novelty_window;
+    for (usize i = 0; i < f.picks.size(); ++i) {
+        NoveltyPick p = f.picks[i];
+        const u32 off = static_cast<u32>(pick_text_.size());
+        pick_text_.append(f.pick_text.data() + p.off, p.n);
+        p.off = off;
+        picks_.push(p);
+    }
+    if (f.picks.size()) { // the list's order: windows newest first, each in rank order
+        pick_order_.clear();
+        for (usize end = picks_.size(); end > 0;) {
+            usize start = end - 1;
+            while (start > 0 && picks_[start - 1].window_first == picks_[end - 1].window_first)
+                --start;
+            for (usize k = start; k < end; ++k)
+                pick_order_.push(static_cast<u32>(k));
+            end = start;
+        }
+    }
+    if (!cur_.archive) {
+        picks_open_.clear();
+        pick_open_text_.clear();
+        for (usize i = 0; i < f.picks_open.size(); ++i) {
+            NoveltyPick p = f.picks_open[i];
+            const u32 off = static_cast<u32>(pick_open_text_.size());
+            pick_open_text_.append(f.pick_text.data() + p.off, p.n);
+            p.off = off;
+            picks_open_.push(p);
+        }
+    }
+    // A5: living members per genotype; a finished run's whole map.
+    if (f.pop_sent) {
+        swap_arr(pop_genotype_, f.pop_genotype);
+        swap_arr(pop_count_, f.pop_count);
+        pop_known_ = true;
+    }
+    if (f.life_sent && f.life.points().size()) {
+        life_ = move(f.life);
+        life_archive_ = life_built_ = true;
+    }
     f.clear_new();
     trim_logs();
 
@@ -238,7 +292,134 @@ ViewRequest Viewer::request() const {
     q.serial = sel_serial_;
     q.strip = strip_by_;
     q.genotype = sel_save_ < saves_.size() ? saves_[sel_save_].genotype : 0;
+    q.populations = life_mode_; // A5: the map sizes points by their living members
     return q;
+}
+
+// --- docs/results/viewer.md: strikes, new kinds of life, the map of life ------------
+
+bool Viewer::strike_marker(u32 n, u32* kind, double* age) const {
+    // The latest strike on the node at or before the frame's tick, within kStrikeFade.
+    const u64 now = cur_.tick;
+    for (usize i = strikes_.size(); i-- > 0;) {
+        const Strike& s = strikes_[i];
+        if (s.tick > now)
+            continue;
+        if (now - s.tick >= kStrikeFade)
+            return false; // (oldest further back: none newer is left on any node from here)
+        if (s.node == n) {
+            *kind = s.kind;
+            *age = static_cast<double>(now - s.tick) / static_cast<double>(kStrikeFade);
+            return true;
+        }
+    }
+    return false;
+}
+
+const NoveltyPick& Viewer::pick(usize i) const {
+    if (i < picks_open_.size())
+        return picks_open_[i];
+    return picks_[pick_order_[i - picks_open_.size()]]; // closed windows, newest first, each in rank order
+}
+
+void Viewer::select_pick(usize i) {
+    if (i >= pick_count())
+        return;
+    const bool open = i < picks_open_.size();
+    const NoveltyPick p = pick(i);
+    const char* text = (open ? pick_open_text_.data() : pick_text_.data()) + p.off;
+    usize found = ~static_cast<usize>(0);
+    for (usize k = 0; k < saves_.size() && found == ~static_cast<usize>(0); ++k) { // (its first save: the one scored)
+        const GenomeEntry& e = saves_[k];
+        if (p.genotype ? e.genotype == p.genotype
+                       : (e.node == p.node && e.lineage == p.lineage && strcmp(e.name, p.name) == 0))
+            found = k;
+    }
+    if (found == ~static_cast<usize>(0)) {
+        // Older than the browser keeps (or a finished run's newest saves lack
+        // it): it joins the browser, from the list's own copy of its genome.
+        GenomeEntry e;
+        memset(&e, 0, sizeof e);
+        e.tick = p.tick;
+        e.genotype = p.genotype;
+        e.lineage = p.lineage;
+        e.node = p.node;
+        e.len = p.len;
+        memcpy(e.name, p.name, sizeof e.name);
+        snprintf(e.parent_name, sizeof e.parent_name, "?");
+        e.off = static_cast<u32>(save_text_.size());
+        save_text_.append(text, p.n);
+        e.n = p.n;
+        e.surprise = static_cast<float>(p.surprise);
+        saves_.push(e);
+        found = saves_.size() - 1;
+        order_dirty_ = true;
+    }
+    select_save(found);
+    sel_lineage_ = p.lineage;
+    auto_ = false;
+}
+
+void Viewer::set_life_mode(bool on) {
+    life_mode_ = on;
+    if (on && !life_built_)
+        life_build();
+}
+
+void Viewer::set_life_time(u64 tick, u64 span) {
+    life_follow_ = false;
+    life_t_ = tick;
+    life_span_ = span;
+}
+
+bool Viewer::life_point_screen(u32 i, i32* x, i32* y) const {
+    if (i >= life_sx_.size() || life_sx_[i] == 0x7FFFFFFF)
+        return false;
+    *x = life_sx_[i];
+    *y = life_sy_[i];
+    return true;
+}
+
+// The live map from the genebank log (its first kLifeRef genotypes the
+// reference window), and from then on every save as it comes.
+void Viewer::life_build() {
+    life_.clear();
+    for (usize i = 0; i < saves_.size(); ++i) {
+        const GenomeEntry& e = saves_[i];
+        life_.add(e.tick, e.genotype, e.lineage, e.node, e.len, e.name, Str(save_text_.data() + e.off, e.n));
+    }
+    life_built_ = true;
+    life_archive_ = false;
+}
+
+// Fitted afresh on the log's newest kLifeRef genotypes (a user's choice:
+// positions then mean the new axes).
+void Viewer::life_refit() {
+    Array<char> text;
+    Array<u32> off, len;
+    HashMap<u8> seen;
+    u64 first = ~0ull, last = 0;
+    for (usize i = saves_.size(); i-- > 0 && off.size() < kLifeRef;) {
+        const GenomeEntry& e = saves_[i];
+        bool fresh = false;
+        seen.get_or_insert(e.genotype, &fresh);
+        if (!fresh)
+            continue;
+        off.push(static_cast<u32>(text.size()));
+        len.push(e.n);
+        text.append(save_text_.data() + e.off, e.n);
+        first = e.tick < first ? e.tick : first;
+        last = e.tick > last ? e.tick : last;
+    }
+    life_.clear();
+    if (off.size() >= 2)
+        life_.fit(text, off, len, first, last);
+    for (usize i = 0; i < saves_.size(); ++i) {
+        const GenomeEntry& e = saves_[i];
+        life_.add(e.tick, e.genotype, e.lineage, e.node, e.len, e.name, Str(save_text_.data() + e.off, e.n));
+    }
+    life_built_ = true;
+    life_archive_ = false;
 }
 
 void Viewer::select_node(u32 n) {
@@ -380,6 +561,10 @@ void Viewer::layout(Canvas& c, const RunStatus& st) {
     phylo_r_ = Rect{charts_r_.right() + gap, by, left_w - charts_r_.right() - gap, bh};
     insp_ = Rect{left_w + gap, barh + gap, W - left_w - 2 * gap, static_cast<i32>(body_h * fr_) - gap};
     browse_ = Rect{insp_.x, insp_.bottom() + gap, insp_.w, H - gap - (insp_.bottom() + gap)};
+    if (solo_) { // the map alone (frames for an animation)
+        map_ = Rect{gap, barh + gap, W - 2 * gap, body_h - 2 * gap};
+        charts_r_ = phylo_r_ = insp_ = browse_ = Rect{};
+    }
 }
 
 bool Viewer::button(const UiInput& in, Canvas& c, const Rect& r, const char* label, bool on) {
@@ -438,6 +623,11 @@ void Viewer::frame(const UiInput& input, Canvas& c, const RunStatus& st) {
                 edit_ = kNone;
             }
         }
+    } else {
+        // W8: T cycles the substrate type the map shows.
+        for (u32 i = 0; i < in.nkeys; ++i)
+            if (in.keys[i] == 0x54 && color_by_ == kColorSubstrate) // 'T'
+                sub_type_ = (sub_type_ + 1) % kSubstrateTypes;
     }
 
     bool consumed = false;
@@ -449,17 +639,20 @@ void Viewer::frame(const UiInput& input, Canvas& c, const RunStatus& st) {
     if (in.pressed && edit_ != kNone)
         edit_ = kNone; // a click elsewhere cancels the edit (the field re-opens it)
 
-    splitters(in, c);
+    if (!solo_)
+        splitters(in, c);
     if (drag_split_) {
         in.pressed = in.released = in.dbl = false;
         in.wheel = 0;
     }
     toolbar(in, c, st);
     map_panel(in, c);
-    charts_panel(in, c);
-    phylogeny(in, c);
-    inspector(in, c);
-    browser(in, c);
+    if (!solo_) {
+        charts_panel(in, c);
+        phylogeny(in, c);
+        inspector(in, c);
+        browser(in, c);
+    }
     c.unclip();
     if (popup_)
         popup(in, c, nullptr); // drawn last, over everything
@@ -647,12 +840,30 @@ void Viewer::to_world(i32 sx, i32 sy, double* x, double* y) const {
     *y = (sy - cy) / s + 0.5 + pan_y_;
 }
 
+// The header's world map / map of life switch (A5), at its right end.
+bool Viewer::map_header_toggles(const UiInput& in, Canvas& c, i32 x) {
+    (void)x;
+    const i32 hh = c.line_h(kFontBold) + c.px(6);
+    const char* label = "map of life";
+    const i32 w = c.text_w(label, kFontUi) + c.px(16);
+    const Rect r{map_.right() - w - c.px(6), map_.y + c.px(2), w, hh - c.px(4)};
+    if (button(in, c, r, label, life_mode_)) {
+        set_life_mode(!life_mode_);
+        return true;
+    }
+    return false;
+}
+
 void Viewer::map_panel(const UiInput& in_raw, Canvas& c) {
+    if (life_mode_) { // A5: the map of life in the map's place
+        life_panel(in_raw, c);
+        return;
+    }
     const UiInput& in_hdr = in_raw;
     Rect inner;
     panel_box(c, map_, "Map", &inner);
     map_inner_ = inner;
-    char buf[512], num[32];
+    char buf[1024], num[32];
     // Header controls.
     const i32 hh = c.line_h(kFontBold) + c.px(6);
     i32 x = map_.x + c.px(56);
@@ -661,6 +872,13 @@ void Viewer::map_panel(const UiInput& in_raw, Canvas& c) {
     if (button(in_hdr, c, cb, buf, popup_ == 1))
         open_popup(1, 0, cb);
     x = cb.right() + c.px(6);
+    if (color_by_ == kColorSubstrate) { // W8: which type (the T key cycles them too)
+        snprintf(buf, sizeof buf, "type: %s  v", substrate_label(sub_type_));
+        const Rect tb{x, map_.y + c.px(2), c.text_w(buf, kFontUi) + c.px(16), hh - c.px(4)};
+        if (button(in_hdr, c, tb, buf, popup_ == 4))
+            open_popup(4, 0, tb);
+        x = tb.right() + c.px(6);
+    }
     const char* toggles[3] = {"size by bodies", "cargo", "links"};
     bool* flags[3] = {&size_by_bodies_, &show_cargo_, &show_edges_};
     for (u32 i = 0; i < 3; ++i) {
@@ -669,6 +887,8 @@ void Viewer::map_panel(const UiInput& in_raw, Canvas& c) {
             *flags[i] = !*flags[i];
         x = r.right() + c.px(4);
     }
+    if (map_header_toggles(in_hdr, c, x))
+        return; // (switched: the map of life draws from the next frame)
 
     const u32 n = static_cast<u32>(cur_.node.size());
     node_sx_.resize(n);
@@ -874,6 +1094,8 @@ void Viewer::map_panel(const UiInput& in_raw, Canvas& c) {
             col = 0x606060;
         else if (color_by_ == kColorLineage)
             col = lineage_color(v.top_lineage);
+        else if (color_by_ == kColorSubstrate) // W8: the type's level, five fixed colours
+            col = substrate_level_color(v.sub_level[sub_type_]);
         else
             col = ramp_color((node_metric(v, color_by_) - lo) / (hi - lo));
         if (simple) { // a dot, sized a little by bodies
@@ -891,6 +1113,44 @@ void Viewer::map_panel(const UiInput& in_raw, Canvas& c) {
         if (i == sel_node_) {
             c.circle(sx, sy, r + c.px(2), 0, 0xFFFFFF, false);
             c.circle(sx, sy, r + c.px(3), 0, 0xFFFFFF, false);
+        }
+    }
+    // X7: nodes a disaster struck in the last kStrikeFade ticks: a diamond
+    // around the node, coloured by kind, fading with age (the latest strike
+    // on a node shows).
+    u32 kinds_seen = 0, struck_shown = 0;
+    {
+        Array<u32> sk;
+        Array<float> sa;
+        sk.resize(n);
+        sk.fill(kNone);
+        sa.resize(n);
+        const u64 now = cur_.tick;
+        for (usize i = strikes_.size(); i-- > 0;) {
+            const Strike& s = strikes_[i];
+            if (s.tick > now)
+                continue;
+            if (now - s.tick >= kStrikeFade)
+                break;
+            if (s.node < n && sk[s.node] == kNone) {
+                sk[s.node] = s.kind;
+                sa[s.node] = static_cast<float>(static_cast<double>(now - s.tick) / static_cast<double>(kStrikeFade));
+            }
+        }
+        double rmax = 0.45 * spacing_px;
+        rmax = rmax > c.px(11) ? c.px(11) : (rmax < c.px(2.5f) ? c.px(2.5f) : rmax);
+        const i32 d = static_cast<i32>(rmax + 0.5) + c.px(5);
+        for (u32 i = 0; i < n; ++i) {
+            if (sk[i] == kNone)
+                continue;
+            const i32 sx = node_sx_[i], sy = node_sy_[i];
+            if (sx < inner.x - 20 || sy < inner.y - 20 || sx > inner.right() + 20 || sy > inner.bottom() + 20)
+                continue;
+            const u32 col = mix_color(strike_color(sk[i]), kPanel, sa[i] * 0.85);
+            const i32 pts[10] = {sx, sy - d, sx + d, sy, sx, sy + d, sx - d, sy, sx, sy - d};
+            c.polyline(pts, 5, col, c.px(2));
+            kinds_seen |= 1u << (sk[i] - kEvSurge);
+            ++struck_shown;
         }
     }
     if (panning_ && in.released) {
@@ -965,8 +1225,41 @@ void Viewer::map_panel(const UiInput& in_raw, Canvas& c) {
 
     // The legend and a summary line.
     const i32 ly = inner.bottom() - c.px(18);
+    if (struck_shown) { // X7's key: the kinds marked now
+        i32 kx = inner.x + c.px(4);
+        const i32 ky = ly - c.line_h(kFontSmall) - c.px(2);
+        snprintf(buf, sizeof buf, "struck in the last %llu ticks:", static_cast<unsigned long long>(kStrikeFade));
+        c.text(kx, ky, buf, kFontSmall, kDim);
+        kx += c.text_w(buf, kFontSmall) + c.px(6);
+        static const char* const kStrikeName[5] = {"surge", "crash", "burnout", "disk failure", "lightning"};
+        for (u32 k = 0; k < 5; ++k) {
+            if (!(kinds_seen >> k & 1))
+                continue;
+            c.text(kx, ky, kStrikeName[k], kFontSmall, strike_color(kEvSurge + k));
+            kx += c.text_w(kStrikeName[k], kFontSmall) + c.px(8);
+        }
+    }
     if (color_by_ == kColorLineage) {
         c.text(inner.x + c.px(4), ly, "each node coloured by its largest lineage", kFontSmall, kDim);
+    } else if (color_by_ == kColorSubstrate) { // W8's key: the five levels
+        i32 kx = inner.x + c.px(4);
+        double floor_seen = 0.1;
+        for (u32 i = 0; i < n; ++i)
+            if (cur_.node[i].sub_level[sub_type_] == 0 && cur_.node[i].sub[sub_type_] > 0) {
+                floor_seen = cur_.node[i].sub[sub_type_];
+                break;
+            }
+        snprintf(buf, sizeof buf, "%s:", substrate_label(sub_type_));
+        c.text(kx, ly - c.px(1), buf, kFontSmall, kDim);
+        kx += c.text_w(buf, kFontSmall) + c.px(6);
+        for (u32 k = 0; k < kSubstrateLevels; ++k) {
+            const double m[kSubstrateLevels] = {floor_seen, 0.5, 1.0, 1.5, 2.0};
+            c.fill(Rect{kx, ly + c.px(1), c.px(12), c.px(9)}, substrate_level_color(k));
+            snprintf(buf, sizeof buf, "%gx", m[k]);
+            c.text(kx + c.px(15), ly - c.px(1), buf, kFontSmall, kDim);
+            kx += c.px(15) + c.text_w(buf, kFontSmall) + c.px(8);
+        }
+        c.text(kx, ly - c.px(1), "(T: next type)", kFontSmall, kFaint);
     } else {
         const i32 lw = c.px(120);
         for (i32 k = 0; k < lw; ++k)
@@ -1019,6 +1312,40 @@ void Viewer::map_panel(const UiInput& in_raw, Canvas& c) {
         if (landscape_) {
             const usize at = strlen(buf);
             snprintf(buf + at, sizeof buf - at, "\nlandmass %u", v.mass);
+        }
+        if (v.live) { // W8 and X7: its substrate, occupancy and disasters, where known
+            char more[400];
+            usize at = 0;
+            more[0] = '\0';
+            auto left = [&]() { return at < sizeof more ? sizeof more - at : 0; };
+            auto clamp = [&]() { at = at < sizeof more ? at : sizeof more - 1; };
+            if (v.known >> kColorSubstrate & 1) {
+                at += snprintf(more + at, left(), "\nsubstrate: P %gx E %gx GPU %gx NPU %gx", v.sub[0], v.sub[1],
+                               v.sub[2], v.sub[3]);
+                clamp();
+                at += snprintf(more + at, left(), "\n  memory %gx/%gx, disk %gx/%gx (fast/slow)", v.sub[4], v.sub[5],
+                               v.sub[6], v.sub[7]);
+                clamp();
+            }
+            if (v.known >> kColorOccupancy & 1) {
+                at += snprintf(more + at, left(), "\noccupancy %.0f%%", 100.0 * v.occupancy);
+                clamp();
+            }
+            if ((v.known >> kColorSymptoms & 1) && (v.symptoms > 0 || v.struck || v.cores_offline)) {
+                at += snprintf(more + at, left(), "\ndisasters: symptoms %.0f%% of ticks, struck %u, %u cores offline",
+                               100.0 * v.symptoms, v.struck, v.cores_offline);
+                clamp();
+            }
+            u32 sk = 0;
+            double sa = 0;
+            if (strike_marker(hover_node_, &sk, &sa)) {
+                static const char* const kStrikeWord[5] = {"a power surge", "an OS crash", "a burnout", "a disk failure",
+                                                           "lightning"};
+                snprintf(more + at, left(), "\nstruck by %s %.0f ticks ago", kStrikeWord[sk - kEvSurge],
+                         sa * static_cast<double>(kStrikeFade));
+            }
+            const usize bl = strlen(buf);
+            snprintf(buf + bl, sizeof buf - bl, "%s", more);
         }
         set_tooltip(buf);
     }
@@ -1191,13 +1518,33 @@ void Viewer::phylogeny(const UiInput& in, Canvas& c) {
         phylo_lineage_ = sel_lineage_;
         phylo_saves_ = saves_.size();
     }
-    if (sel_lineage_)
+    if (kinds_) {
+        char a[32];
+        commas(novelty_window_ ? novelty_window_ : kNoveltyListWindow, a);
+        snprintf(title, sizeof title, "New kinds of life: windows of %s ticks", a);
+    } else if (sel_lineage_) {
         snprintf(title, sizeof title, "Phylogeny: lineage %s, %u genotypes", lin,
                  static_cast<unsigned>(phylo_.size()));
-    else
+    } else {
         snprintf(title, sizeof title, "Phylogeny");
+    }
     Rect inner;
     panel_box(c, phylo_r_, title, &inner);
+    { // A2: the panel shows the phylogeny or the new kinds of life
+        const i32 hh = c.line_h(kFontBold) + c.px(6);
+        const char* label = "new kinds";
+        const i32 w = c.text_w(label, kFontUi) + c.px(16);
+        const Rect r{phylo_r_.right() - w - c.px(6), phylo_r_.y + c.px(2), w, hh - c.px(4)};
+        if (button(in, c, r, label, kinds_)) {
+            kinds_ = !kinds_;
+            kinds_scroll_ = 0;
+            return;
+        }
+    }
+    if (kinds_) {
+        kinds_panel(in, c, inner);
+        return;
+    }
     if (phylo_.empty()) {
         c.text(inner.x, inner.y, sel_lineage_ ? "no saved genotypes in this lineage yet"
                                               : "select a lineage: a node, a body or a genome",
@@ -1259,6 +1606,296 @@ void Viewer::phylogeny(const UiInput& in, Canvas& c) {
         c.text(x + c.px(7), y - c.line_h(kFontSmall) / 2, e.name, kFontSmall, sel ? 0xFFFFFF : kText);
     }
     c.unclip();
+}
+
+// --- new kinds of life (A2) ----------------------------------------------------------
+
+// Each window's most surprising new genotypes in lineages that met the gate
+// by its end, newest window first (live, the open window's leaders so far on
+// top). A click selects one in the genome browser (its lineage's phylogeny
+// with it); a click on its lineage also filters the browser to that lineage.
+void Viewer::kinds_panel(const UiInput& in, Canvas& c, const Rect& inner) {
+    char buf[256], a[32], b[32];
+    const usize n = pick_count();
+    if (!novelty_ || n == 0) {
+        const char* why =
+            !novelty_ ? (cur_.archive ? "no list for this run: nova analyse novelty <run> writes novelty_top.csv "
+                                        "(its default folder, analysis\\<run>, is looked in too)"
+                                      : "the live novelty meter is off (novelty.enabled, which needs detection)")
+                      : "no successful new genotype yet: each window lists its most surprising new genotypes in "
+                        "lineages that have met the gate";
+        c.text(inner.x, inner.y, why, kFontSmall, kDim, kAlignLeft, inner.w);
+        return;
+    }
+    const i32 sh = c.line_h(kFontSmall) + c.px(3);
+    const i32 cols[7] = {0, c.px(22), c.px(82), c.px(146), c.px(214), c.px(290), c.px(332)};
+    const char* heads[7] = {"#", "bits/codon", "name", "lineage", "tick", "node", "len"};
+    for (u32 k = 0; k < 7; ++k)
+        c.text(inner.x + cols[k], inner.y, heads[k], kFontSmall, kDim);
+    const Rect rows{inner.x, inner.y + sh, inner.w, inner.h - sh};
+    // Rows: a header for each window, then its picks.
+    u32 lines = 0;
+    for (usize i = 0; i < n; ++i)
+        lines += 1 + (i == 0 || pick(i).window_first != pick(i - 1).window_first || pick(i).open != pick(i - 1).open);
+    if (in.wheel && rows.contains(in.mx, in.my))
+        kinds_scroll_ -= in.wheel * 3;
+    const i32 visible = rows.h / sh;
+    kinds_scroll_ = kinds_scroll_ > static_cast<i32>(lines) - visible ? static_cast<i32>(lines) - visible : kinds_scroll_;
+    kinds_scroll_ = kinds_scroll_ < 0 ? 0 : kinds_scroll_;
+    const GenomeEntry* sel = sel_save_ < saves_.size() ? &saves_[sel_save_] : nullptr;
+    c.clip(rows);
+    i32 line = 0;
+    usize clicked = ~static_cast<usize>(0);
+    bool lineage_cell = false;
+    pick_sy_.resize(n);
+    pick_sy_.fill(-1);
+    pick_sx_ = rows.x + cols[2] + c.px(4);
+    for (usize i = 0; i < n; ++i) {
+        const NoveltyPick& p = pick(i);
+        if (i == 0 || p.window_first != pick(i - 1).window_first || p.open != pick(i - 1).open) {
+            const i32 y = rows.y + (line - kinds_scroll_) * sh;
+            if (y >= rows.y - sh && y < rows.bottom()) {
+                commas(p.window_first, a);
+                commas(p.window_last, b);
+                snprintf(buf, sizeof buf, "ticks %s - %s%s", a, b, p.open ? "   (open: the leaders so far)" : "");
+                c.fill(Rect{rows.x, y + c.px(1), rows.w, sh - c.px(2)}, kHead);
+                c.text(rows.x + c.px(4), y + c.px(1), buf, kFontSmall, p.open ? kWarn : kText);
+            }
+            ++line;
+        }
+        const i32 y = rows.y + (line - kinds_scroll_) * sh;
+        ++line;
+        if (y < rows.y - sh || y >= rows.bottom())
+            continue;
+        if (y >= rows.y && y + sh <= rows.bottom())
+            pick_sy_[i] = y + sh / 2;
+        const Rect rr{rows.x, y, rows.w, sh};
+        const bool is_sel = sel && (p.genotype ? sel->genotype == p.genotype
+                                               : sel->node == p.node && strcmp(sel->name, p.name) == 0);
+        if (is_sel)
+            c.fill(rr, kRowSel);
+        else if (rr.contains(in.mx, in.my))
+            c.fill(rr, kRowHot);
+        if (rr.contains(in.mx, in.my)) {
+            cursor_ = 3;
+            if (in.pressed) {
+                clicked = i;
+                lineage_cell = in.mx >= rows.x + cols[3] && in.mx < rows.x + cols[4];
+            }
+        }
+        char cells[7][32];
+        snprintf(cells[0], 32, "%u", p.rank);
+        snprintf(cells[1], 32, "%.3f", p.surprise);
+        snprintf(cells[2], 32, "%s", p.name);
+        lineage_text(p.lineage, cells[3], 32);
+        commas(p.tick, cells[4]);
+        snprintf(cells[5], 32, "%u", p.node);
+        snprintf(cells[6], 32, "%u", p.len);
+        for (u32 k = 0; k < 7; ++k)
+            c.text(rr.x + cols[k], rr.y + c.px(1), cells[k], kFontSmall,
+                   k == 3 ? lineage_color(p.lineage) : (k == 1 && p.surprise >= 3.0 ? kWarn : kText), kAlignLeft,
+                   k + 1 < 7 ? cols[k + 1] - cols[k] - c.px(2) : 0);
+    }
+    c.unclip();
+    if (clicked != ~static_cast<usize>(0)) {
+        const u64 lin = pick(clicked).lineage;
+        select_pick(clicked);
+        if (lineage_cell && lin) {
+            char f[32];
+            snprintf(f, sizeof f, "%u.%u", static_cast<unsigned>(lin >> 32), static_cast<unsigned>(lin & 0xFFFFFFFFu));
+            set_filter(f);
+        }
+    }
+}
+
+// --- the map of life (A5) -------------------------------------------------------------
+
+void Viewer::life_panel(const UiInput& in_raw, Canvas& c) {
+    UiInput in = in_raw;
+    char title[256], buf[512], a[32], b[32];
+    if (!life_built_ && (have_ || !saves_.empty()))
+        life_build();
+    const usize np = life_.points().size();
+    commas(np, a);
+    if (life_.fitted())
+        snprintf(title, sizeof title, "Map of life: %s genotypes", a);
+    else
+        snprintf(title, sizeof title, "Map of life");
+    Rect inner;
+    panel_box(c, map_, title, &inner);
+    map_inner_ = inner;
+    const i32 hh = c.line_h(kFontBold) + c.px(6);
+    if (map_header_toggles(in, c, 0))
+        return;
+    // Header: refit (live), and the window's width.
+    i32 x = map_.x + c.text_w(title, kFontBold) + c.px(24);
+    if (!life_archive_) {
+        const Rect rf{x, map_.y + c.px(2), c.text_w("refit on the newest", kFontUi) + c.px(16), hh - c.px(4)};
+        if (button(in, c, rf, "refit on the newest"))
+            life_refit();
+        x = rf.right() + c.px(6);
+    }
+    const Rect wm{x, map_.y + c.px(2), c.px(24), hh - c.px(4)};
+    const Rect wp{x + c.px(26) + c.px(110), map_.y + c.px(2), c.px(24), hh - c.px(4)};
+    const u64 t_lo = life_.first_tick();
+    const u64 t_hi = life_.last_tick() > cur_.tick ? life_.last_tick() : cur_.tick;
+    const u64 range = t_hi > t_lo ? t_hi - t_lo : 1;
+    u64 span = life_span_ ? life_span_ : (range / 12 > 500 ? range / 12 : 500);
+    if (button(in, c, wm, "-"))
+        life_span_ = span = span / 2 > 10 ? span / 2 : 10;
+    if (button(in, c, wp, "+"))
+        life_span_ = span = span * 2;
+    commas(span, a);
+    snprintf(buf, sizeof buf, "window %s ticks", a);
+    c.text(x + c.px(26) + c.px(55), map_.y + c.px(4), buf, kFontSmall, kText, kAlignCenter);
+    life_span_now_ = span;
+
+    life_sx_.resize(np);
+    life_sy_.resize(np);
+    for (usize i = 0; i < np; ++i)
+        life_sx_[i] = life_sy_[i] = 0x7FFFFFFF;
+    if (np == 0 || !life_.fitted()) {
+        c.text(inner.x, inner.y,
+               np == 0 ? "no genotype saved yet (each genebank save becomes a point)"
+                       : "waiting for 8 genotypes to fit the first axes on",
+               kFontUi, kDim);
+        return;
+    }
+    // The time: the frame's tick when following, else the slider's.
+    const i32 bar_h = c.px(26);
+    life_slider_ = Rect{inner.x + c.px(64), inner.bottom() - bar_h + c.px(9), inner.w - c.px(64) - c.px(200), c.px(8)};
+    const Rect hit{life_slider_.x, inner.bottom() - bar_h, life_slider_.w, bar_h};
+    if (in.pressed && hit.contains(in.mx, in.my))
+        drag_life_ = true;
+    if (!in.down)
+        drag_life_ = false;
+    if (drag_life_) {
+        double f = static_cast<double>(in.mx - life_slider_.x) / (life_slider_.w > 0 ? life_slider_.w : 1);
+        f = f < 0 ? 0 : (f > 1 ? 1 : f);
+        life_t_ = t_lo + static_cast<u64>(f * static_cast<double>(range) + 0.5);
+        life_follow_ = f >= 0.999 && !cur_.archive;
+        in.pressed = false;
+    }
+    if (life_follow_)
+        life_t_ = cur_.archive ? cur_.tick : t_hi;
+    const u64 T = life_t_ < t_lo ? t_lo : life_t_;
+    const Rect follow{inner.x, inner.bottom() - bar_h + c.px(2), c.px(58), bar_h - c.px(6)};
+    if (button(in, c, follow, cur_.archive ? "window" : "now", life_follow_))
+        life_follow_ = !life_follow_;
+    c.fill(life_slider_, kButton);
+    {
+        const i32 hx = life_slider_.x + static_cast<i32>(static_cast<double>(T - t_lo) / range * life_slider_.w);
+        const i32 wx = life_slider_.x + static_cast<i32>(static_cast<double>(span) / range * life_slider_.w);
+        c.fill(Rect{hx - (wx - life_slider_.x), life_slider_.y + c.px(2), wx - life_slider_.x, c.px(4)}, kFaint);
+        c.fill(Rect{hx - c.px(3), life_slider_.y - c.px(5), c.px(6), c.px(18)}, kAccent);
+    }
+    commas(T > span ? T - span : 0, a);
+    commas(T, b);
+    snprintf(buf, sizeof buf, "ticks %s - %s", a, b);
+    c.text(life_slider_.right() + c.px(10), life_slider_.y - c.px(4), buf, kFontSmall, kText);
+
+    // The plot: the fitted box, equal scales on both axes.
+    const i32 info_h = c.line_h(kFontSmall) + c.px(4);
+    life_plot_ = Rect{inner.x, inner.y + info_h, inner.w, inner.h - info_h - bar_h - c.px(4)};
+    const float* bx = life_.box();
+    const double bw = bx[2] - bx[0] > 1e-9 ? bx[2] - bx[0] : 1, bh = bx[3] - bx[1] > 1e-9 ? bx[3] - bx[1] : 1;
+    const double s = 0.96 * (life_plot_.w / bw < life_plot_.h / bh ? life_plot_.w / bw : life_plot_.h / bh);
+    life_scale_ = static_cast<float>(s);
+    life_cx_ = static_cast<float>((bx[0] + bx[2]) * 0.5);
+    life_cy_ = static_cast<float>((bx[1] + bx[3]) * 0.5);
+    const double pcx = life_plot_.x + life_plot_.w * 0.5, pcy = life_plot_.y + life_plot_.h * 0.5;
+    auto sx_of = [&](double v) { return static_cast<i32>(floor(pcx + (v - life_cx_) * s + 0.5)); };
+    auto sy_of = [&](double v) { return static_cast<i32>(floor(pcy - (v - life_cy_) * s + 0.5)); }; // up is +PC2
+    c.fill(life_plot_, 0x15181E);
+    c.clip(life_plot_);
+    // The axes through the reference's centre (0, 0).
+    c.dashed(sx_of(0), life_plot_.y, sx_of(0), life_plot_.bottom(), kFaint, c.px(4));
+    c.dashed(life_plot_.x, sy_of(0), life_plot_.right(), sy_of(0), kFaint, c.px(4));
+    // The points shown: saved within the window. Older fade; living members
+    // size them when known (live, at now), else saves.
+    const bool pops = pop_known_ && !cur_.archive && life_follow_;
+    const u64 sel_geno = sel_save_ < saves_.size() ? saves_[sel_save_].genotype : 0;
+    u32 shown = 0, hover = kNone;
+    i32 best = c.px(7) * c.px(7);
+    const LifePoint* P = life_.points().data();
+    for (usize i = 0; i < np; ++i) {
+        const LifePoint& p = P[i];
+        if (p.first > T || p.last + span < T)
+            continue;
+        double age = static_cast<double>(T - (p.last < T ? p.last : T)) / static_cast<double>(span);
+        age = age > 1 ? 1 : age;
+        double size = p.saves;
+        if (pops) {
+            usize lo = 0, hi = pop_genotype_.size();
+            while (lo < hi) {
+                const usize mid = (lo + hi) / 2;
+                if (pop_genotype_[mid] < p.genotype)
+                    lo = mid + 1;
+                else
+                    hi = mid;
+            }
+            size = lo < pop_genotype_.size() && pop_genotype_[lo] == p.genotype ? pop_count_[lo] : 0;
+        }
+        double r = c.px(1.5f) + c.px(1.2f) * sqrt(size);
+        r = r > c.px(9) ? c.px(9) : r;
+        i32 sx = sx_of(p.x), sy = sy_of(p.y);
+        const bool outside = sx < life_plot_.x || sy < life_plot_.y || sx >= life_plot_.right() || sy >= life_plot_.bottom();
+        if (outside) { // pinned to the border, hollow
+            sx = sx < life_plot_.x + 2 ? life_plot_.x + 2 : (sx >= life_plot_.right() - 2 ? life_plot_.right() - 3 : sx);
+            sy = sy < life_plot_.y + 2 ? life_plot_.y + 2 : (sy >= life_plot_.bottom() - 2 ? life_plot_.bottom() - 3 : sy);
+        }
+        life_sx_[i] = sx;
+        life_sy_[i] = sy;
+        const u32 col = mix_color(lineage_color(p.lineage), 0x15181E, 0.75 * age);
+        const i32 ri = static_cast<i32>(r + 0.5);
+        if (ri <= 1)
+            c.fill(Rect{sx - 1, sy - 1, 2, 2}, col);
+        else
+            c.circle(sx, sy, ri, col, outside ? col : mix_color(col, 0, 0.35), !outside);
+        if (p.lineage == sel_lineage_ && sel_lineage_)
+            c.circle(sx, sy, ri + c.px(1), 0, mix_color(0xFFFFFF, 0x15181E, 0.5 + 0.4 * age), false);
+        if (p.genotype == sel_geno && sel_geno)
+            c.circle(sx, sy, ri + c.px(4), 0, 0xFFFFFF, false);
+        const i32 dx = in.mx - sx, dy = in.my - sy;
+        if (life_plot_.contains(in.mx, in.my) && dx * dx + dy * dy < best) {
+            best = dx * dx + dy * dy;
+            hover = static_cast<u32>(i);
+        }
+        ++shown;
+    }
+    c.unclip();
+    // Info: the axes and what's shown.
+    commas(life_.ref_first(), a);
+    commas(life_.ref_last(), b);
+    snprintf(buf, sizeof buf,
+             "%u shown of %u   axes %s on %u genotypes (ticks %s - %s): PC1 %.0f%%, PC2 %.0f%% of their variance   "
+             "colour: lineage   size: %s",
+             shown, static_cast<unsigned>(np), life_.final() ? "fitted" : "provisional, fitted", life_.reference(), a, b,
+             100.0 * life_.variance_share(0), 100.0 * life_.variance_share(1),
+             pops ? "living members" : "genebank saves");
+    c.text(inner.x, inner.y, buf, kFontSmall, kDim, kAlignLeft, inner.w);
+    if (hover != kNone) {
+        const LifePoint& p = P[hover];
+        char lin[32], t0[32], t1[32];
+        lineage_text(p.lineage, lin, sizeof lin);
+        commas(p.first, t0);
+        commas(p.last, t1);
+        snprintf(buf, sizeof buf,
+                 "%s  (lineage %s, %u codons)\nfirst saved at tick %s on node %u, last at %s\n%u genebank saves\n"
+                 "PC1 %.3f, PC2 %.3f\nclick: select it in the genome browser",
+                 p.name, lin, p.len, t0, p.node, t1, p.saves, p.x, p.y);
+        set_tooltip(buf);
+        cursor_ = 3;
+        if (in.pressed) {
+            sel_lineage_ = p.lineage;
+            for (usize k = saves_.size(); k-- > 0;)
+                if (saves_[k].genotype == p.genotype) {
+                    select_save(k);
+                    break;
+                }
+            auto_ = false;
+        }
+    }
 }
 
 // --- the inspector ---------------------------------------------------------------
@@ -1348,19 +1985,43 @@ void Viewer::inspector(const UiInput& in, Canvas& c) {
     if (button(in, c, sb, buf, popup_ == 2))
         open_popup(2, 0, sb);
     c.text(sb.right() + c.px(8), y + c.px(2), "one pixel per codon; click a body to inspect it", kFontSmall, kDim);
+    const u32 fast = cur_.fast_end < cur_.strip_owner.size() ? cur_.fast_end : static_cast<u32>(cur_.strip_owner.size());
+    if (fast) { // W3: the fast-memory region, outlined
+        commas(fast - 1, a);
+        snprintf(buf, sizeof buf, "fast memory: codons 0 - %s (outlined)", a);
+        c.text(inner.right(), y + c.px(2), buf, kFontSmall, kFastMem, kAlignRight);
+    }
     y = sb.bottom() + c.px(4);
     i32 sh = static_cast<i32>(static_cast<double>(cur_.strip_h) * inner.w / cur_.strip_w);
     const i32 cap = inner.h / 3;
     sh = sh > cap ? cap : sh;
     const Rect strip{inner.x, y, inner.w, sh};
     c.image(strip, cur_.strip.data(), static_cast<i32>(cur_.strip_w), static_cast<i32>(cur_.strip_h));
+    if (fast) {
+        // The boundary as a staircase: under the last fast row's part, up its
+        // edge, then along the top of the slow rows.
+        const double rh = static_cast<double>(strip.h) / cur_.strip_h, cw = static_cast<double>(strip.w) / cur_.strip_w;
+        const u32 full = fast / cur_.strip_w, part = fast % cur_.strip_w;
+        const i32 y0 = strip.y + static_cast<i32>(full * rh + 0.5), y1 = strip.y + static_cast<i32>((full + 1) * rh + 0.5);
+        const i32 xp = strip.x + static_cast<i32>(part * cw + 0.5);
+        const i32 w2 = c.px(2);
+        if (part) {
+            c.fill(Rect{strip.x, y1 - w2 / 2, xp - strip.x, w2}, kFastMem);
+            c.fill(Rect{xp - w2 / 2, y0, w2, y1 - y0}, kFastMem);
+            c.fill(Rect{xp, y0 - w2 / 2, strip.right() - xp, w2}, kFastMem);
+        } else {
+            c.fill(Rect{strip.x, y0 - w2 / 2, strip.w, w2}, kFastMem);
+        }
+        c.fill(Rect{strip.x, strip.y, w2, (part ? y1 : y0) - strip.y}, kFastMem); // and its left edge
+    }
     if (strip.contains(in.mx, in.my)) {
         const u32 sx = static_cast<u32>(static_cast<double>(in.mx - strip.x) / strip.w * cur_.strip_w);
         const u32 sy = static_cast<u32>(static_cast<double>(in.my - strip.y) / strip.h * cur_.strip_h);
         const usize at = static_cast<usize>(sy) * cur_.strip_w + sx;
         if (at < cur_.strip_owner.size()) {
             const u32 slot = cur_.strip_owner[at];
-            snprintf(buf, sizeof buf, "codon %u: %s", static_cast<unsigned>(at),
+            snprintf(buf, sizeof buf, "codon %u%s: %s", static_cast<unsigned>(at),
+                     fast ? (at < fast ? " (fast memory)" : " (slow memory)") : "",
                      slot == kNone ? "waste" : "owned (click to inspect its body)");
             set_tooltip(buf);
             if (in.pressed && slot != kNone) {
@@ -1748,14 +2409,31 @@ void Viewer::browser(const UiInput& in, Canvas& c) {
 void Viewer::popup(const UiInput& in, Canvas& c, bool* consumed) {
     if (!popup_)
         return;
-    const u32 count = popup_ == 1 ? kColorCount : (popup_ == 2 ? kStripCount : kStatsColumns);
+    // 1 colour-by, 2 strip-by, 3 a chart's series (every stats.csv column,
+    // from the shared column list), 4 the substrate type (W8).
+    const u32 count = popup_ == 1 ? kColorCount
+                                  : (popup_ == 2 ? kStripCount : (popup_ == 4 ? kSubstrateTypes : kStatsColumns));
     const i32 ih = c.line_h(kFontUi) + c.px(4);
-    i32 w = c.px(180);
-    const i32 max_rows = (c.height() - popup_r_.y - c.px(8)) / ih;
-    const i32 rows = static_cast<i32>(count) < max_rows ? static_cast<i32>(count) : (max_rows > 4 ? max_rows : 4);
-    Rect r{popup_r_.x, popup_r_.y, w, rows * ih + c.px(4)};
+    const i32 w = c.px(180);
+    i32 max_rows = (c.height() - popup_r_.y - c.px(8)) / ih;
+    // A long list (the series: well over a hundred columns) takes the window's
+    // whole height (moved up) and as many columns side by side as it needs to
+    // show every item at once.
+    if (static_cast<i32>(count) > max_rows)
+        max_rows = (c.height() - c.px(16)) / ih;
+    i32 ncols = 1;
+    if (max_rows > 4 && static_cast<i32>(count) > max_rows) {
+        ncols = (static_cast<i32>(count) + max_rows - 1) / max_rows;
+        const i32 fit = (c.width() - c.px(16)) / w;
+        ncols = ncols > fit ? (fit > 1 ? fit : 1) : ncols;
+    }
+    const i32 per = (static_cast<i32>(count) + ncols - 1) / ncols; // items per column
+    const i32 rows = per < max_rows ? per : (max_rows > 4 ? max_rows : 4);
+    Rect r{popup_r_.x, popup_r_.y, w * ncols, rows * ih + c.px(4)};
     if (r.right() > c.width())
         r.x = c.width() - r.w;
+    if (r.x < 0)
+        r.x = 0;
     if (r.bottom() > c.height())
         r.y = c.height() - r.h;
     popup_r_ = r;
@@ -1763,21 +2441,31 @@ void Viewer::popup(const UiInput& in, Canvas& c, bool* consumed) {
         popup_scroll_ -= in.wheel * 3;
         *consumed = true;
     }
-    popup_scroll_ = popup_scroll_ > static_cast<i32>(count) - rows ? static_cast<i32>(count) - rows : popup_scroll_;
+    popup_scroll_ = popup_scroll_ > per - rows ? per - rows : popup_scroll_;
     popup_scroll_ = popup_scroll_ < 0 ? 0 : popup_scroll_;
+    popup_cols_ = ncols;
+    popup_per_ = per;
+    popup_rows_ = rows;
+    popup_w_ = w;
+    popup_ih_ = ih;
+    popup_count_ = count;
     if (consumed && in.pressed) {
         *consumed = true;
         if (!r.contains(in.mx, in.my)) {
             popup_ = 0;
             return;
         }
-        const u32 item = static_cast<u32>((in.my - r.y - c.px(2)) / ih + popup_scroll_);
+        const i32 col = (in.mx - r.x) / w;
+        const u32 item = static_cast<u32>(col * per + (in.my - r.y - c.px(2)) / ih + popup_scroll_);
         if (item < count) {
             if (popup_ == 1) {
                 color_by_ = item;
                 popup_ = 0;
             } else if (popup_ == 2) {
                 strip_by_ = item;
+                popup_ = 0;
+            } else if (popup_ == 4) {
+                sub_type_ = item;
                 popup_ = 0;
             } else {
                 u32* s = series_[popup_owner_ < kCharts ? popup_owner_ : 0];
@@ -1807,29 +2495,34 @@ void Viewer::popup(const UiInput& in, Canvas& c, bool* consumed) {
     // Draw.
     c.fill(r, 0x2A2E37);
     c.frame(r, kFaint);
-    for (i32 i = 0; i < rows; ++i) {
-        const u32 item = static_cast<u32>(i + popup_scroll_);
-        if (item >= count)
-            break;
-        const Rect ir{r.x + c.px(2), r.y + c.px(2) + i * ih, r.w - c.px(4), ih};
-        bool on = false;
-        const char* label = "";
-        if (popup_ == 1) {
-            on = item == color_by_;
-            label = color_by_name(item);
-        } else if (popup_ == 2) {
-            on = item == strip_by_;
-            label = strip_by_name(item);
-        } else {
-            for (u32 k = 0; k < kSeries; ++k)
-                on = on || series_[popup_owner_ < kCharts ? popup_owner_ : 0][k] == item;
-            label = stats_column(item);
+    for (i32 col = 0; col < ncols; ++col) {
+        for (i32 i = 0; i < rows; ++i) {
+            const u32 item = static_cast<u32>(col * per + i + popup_scroll_);
+            if (item >= count || i + popup_scroll_ >= per)
+                break;
+            const Rect ir{r.x + col * w + c.px(2), r.y + c.px(2) + i * ih, w - c.px(4), ih};
+            bool on = false;
+            const char* label = "";
+            if (popup_ == 1) {
+                on = item == color_by_;
+                label = color_by_name(item);
+            } else if (popup_ == 2) {
+                on = item == strip_by_;
+                label = strip_by_name(item);
+            } else if (popup_ == 4) {
+                on = item == sub_type_;
+                label = substrate_label(item);
+            } else {
+                for (u32 k = 0; k < kSeries; ++k)
+                    on = on || series_[popup_owner_ < kCharts ? popup_owner_ : 0][k] == item;
+                label = stats_column(item);
+            }
+            if (ir.contains(in.mx, in.my))
+                c.fill(ir, kButtonHot);
+            if (on)
+                c.fill(Rect{ir.x, ir.y + c.px(3), c.px(3), ih - c.px(6)}, kAccent);
+            c.text(ir.x + c.px(8), ir.y + c.px(2), label, kFontUi, on ? 0xFFFFFF : kText, kAlignLeft, w - c.px(12));
         }
-        if (ir.contains(in.mx, in.my))
-            c.fill(ir, kButtonHot);
-        if (on)
-            c.fill(Rect{ir.x, ir.y + c.px(3), c.px(3), ih - c.px(6)}, kAccent);
-        c.text(ir.x + c.px(8), ir.y + c.px(2), label, kFontUi, on ? 0xFFFFFF : kText);
     }
 }
 

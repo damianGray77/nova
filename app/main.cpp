@@ -1210,6 +1210,8 @@ int cmd_resume(const Args& a) {
     printf("nova: resumed at tick %llu (hash %016llx) on %u threads, to tick %llu\n",
            static_cast<unsigned long long>(w.tick()), static_cast<unsigned long long>(w.hash()), run.threads(),
            static_cast<unsigned long long>(ticks));
+    if (run.novelty()) // (docs/analysis-plan.md A2: an observer, not in snapshots)
+        printf("nova: the live novelty meter starts a fresh model here (its model isn't in snapshots)\n");
     usize notes_shown = print_notes(w.accel_notes(), 0), warp_notes_shown = print_notes(w.warp_notes(), 0);
     StepProfile prof;
     if (a.profile)

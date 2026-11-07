@@ -215,7 +215,7 @@ void test_stats_header() {
                          "fast_held,fast_allocs,fast_alloc_fails,"
                          // behaviour profiles (docs/analysis-plan.md A3), the last integer columns
                          "prof_samples,role_predator,role_parasite,role_repairer,role_signaller,role_wanderer,"
-                         "role_copier,role_idle,work_len,action_kinds_x100,compress,ambient\n";
+                         "role_copier,role_idle,work_len,action_kinds_x100,novelty,novel_share,novel_success,compress,ambient\n";
     CHECK(bytes.size() > strlen(header) && memcmp(bytes.data(), header, strlen(header)) == 0);
     remove(path);
 }
@@ -879,6 +879,9 @@ void test_viewer_landscape() {
 
 } // namespace
 
+void viewer_more_view_tests();   // test_viewer_more.cpp (docs/results/viewer.md)
+void viewer_more_viewer_tests();
+
 void suite_view() {
     test_png();
     test_colours();
@@ -891,6 +894,7 @@ void suite_view() {
     test_numbered_snapshots();
     test_genebank_log();
     test_archive();
+    viewer_more_view_tests(); // test_viewer_more.cpp: the live novelty meter, the map of life, W8, X7
 }
 
 void setup_page_tests(); // test_setup.cpp: the setup page (docs/config-plan.md C2-C5)
@@ -901,4 +905,5 @@ void suite_viewer() {
     test_viewer_log_cap();
     test_viewer_landscape();
     setup_page_tests();
+    viewer_more_viewer_tests(); // test_viewer_more.cpp: the new panels and modes
 }

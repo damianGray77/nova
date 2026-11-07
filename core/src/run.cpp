@@ -3,10 +3,28 @@
 #include <cstdio> // snprintf
 
 #include "nova/budget.h"
-#include "nova/legacy.h" // older snapshots' and replay logs' defaults
+#include "nova/legacy.h"  // older snapshots' and replay logs' defaults
+#include "nova/novelty.h" // the live novelty meter (docs/analysis-plan.md A2)
 #include "nova/snapshot.h"
 
 namespace nova {
+
+Run::~Run() { delete novelty_; }
+
+// The live novelty meter (A2): an observer of the run's genebank saves, made
+// when the world's config asks for it (novelty.enabled, read by World::init).
+// A resumed run gets a fresh one too: its model isn't in snapshots.
+void Run::start_novelty() {
+    delete novelty_;
+    novelty_ = nullptr;
+    if (world_.model() != Model::soup || !world_.novelty_enabled())
+        return;
+    novelty_ = new LiveNovelty;
+    if (!novelty_->init(world_.soup_params().table, world_.novelty_threshold())) {
+        delete novelty_; // (a table the model can't hold: 2 to 64 ops)
+        novelty_ = nullptr;
+    }
+}
 
 static_assert(kSnapshotLegacyBefore <= kSnapshotVersion,
               "snapshots before kSnapshotLegacyBefore take the legacy defaults (legacy.h)");
@@ -34,6 +52,7 @@ bool Run::init(u32 threads, TextBuf* err) {
         err->append(config_.value_error());
         return false;
     }
+    start_novelty();
     pool_.start(threads);
     return true;
 }
@@ -79,6 +98,7 @@ bool Run::init_from_snapshot(const u8* data, usize n, u32 threads, TextBuf* err,
         err->append("snapshot: header does not match the world section");
         return false;
     }
+    start_novelty(); // a fresh model: the meter isn't in snapshots (the front ends say so)
     pool_.start(threads);
     return true;
 }
@@ -251,6 +271,8 @@ void Run::drain_detection() {
             events_.push(ev);
             if (replay_.is_open())
                 replay_.event(g.tick, t.view());
+            if (novelty_ && g.kind == kEventReplicator) // (A2: successful novelty counts gated lineages)
+                novelty_->gated(g.lineage);
             if (g.kind != kEventReplicator) {
                 Detection& d = g.kind == kEventGpuReplicator
                                    ? gpu_detection_
@@ -293,6 +315,14 @@ void Run::drain_detection() {
             }
         }
 
+        // The live novelty meter (A2): every save, in genebank.txt's order.
+        save_surprise_.resize(L->saves().size());
+        for (usize i = 0; i < L->saves().size(); ++i) {
+            const GenebankSave& s = L->saves()[i];
+            save_surprise_[i] = novelty_ ? static_cast<float>(novelty_->save(s.tick, s.genotype, s.lineage,
+                                                                             codons + s.codon_off, s.len))
+                                         : kNoSurprise;
+        }
         if (keep_bank_) {
             for (usize i = 0; i < L->saves().size(); ++i) {
                 const GenebankSave& s = L->saves()[i];
@@ -305,6 +335,7 @@ void Run::drain_detection() {
                 r.len = s.len;
                 r.name = s.name;
                 r.parent_name = s.parent_name;
+                r.surprise = save_surprise_[i];
                 if (s.parent_name != Genebank::kNoName) {
                     const GenotypeMeta* pm = L->genebank().meta(s.parent);
                     r.parent_len = pm ? pm->len : 0;
@@ -477,6 +508,7 @@ bool Run::open_stats(const char* path, u32 window, TextBuf* err) {
         err->append("' (or stats window is 0)");
         return false;
     }
+    stats_.set_novelty(novelty_); // (A2: the novelty columns' windows follow the rows)
     return true;
 }
 

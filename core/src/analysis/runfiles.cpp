@@ -331,6 +331,7 @@ bool run_codon_table(Config& cfg, CodonTable* t, TextBuf* err) {
 
 bool load_gated(const char* dir, GatedSet* out, TextBuf* err) {
     out->ids.clear();
+    out->first_tick.clear();
     out->csv_rows = out->from_csv = out->from_replay = 0;
     out->csv = out->replay = false;
     TextBuf path;
@@ -383,6 +384,14 @@ bool load_gated(const char* dir, GatedSet* out, TextBuf* err) {
             bool added = false;
             out->ids.get_or_insert(id, &added);
             out->from_replay += added;
+            // When it first met the gate (NoveltyOptions::as_live: the live meter's rule).
+            u64 tick = 0;
+            if (parse_u64(line.sub(6, sp - 6), &tick)) {
+                bool fresh = false;
+                u64& first = out->first_tick.get_or_insert(id, &fresh);
+                if (fresh || tick + 1 < first)
+                    first = tick + 1;
+            }
         }
     }
     return true;

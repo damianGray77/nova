@@ -63,6 +63,14 @@ struct ViewArgs {
     u32 color = kColorBodies; // --color: what the map colours nodes by
     const char* sets[256] = {};
     int set_count = 0;
+    // docs/results/viewer.md
+    const char* life_prefix = nullptr; // --map-of-life PREFIX: frames of the map of life, PREFIX_0000.png ...
+    u32 frames = 24;                   // --frames N
+    int life = -1, novelty = -1;       // --life, --novelty: a finished run's map and list even when big
+    u32 life_ref = RunArchive::kLifeRefAll; // --map-ref all | first | A-B
+    u64 ref_a = 0, ref_b = 0;
+    bool show_life = false, show_kinds = false; // --show life | kinds
+    u32 sub_type = 0;                           // --substrate TYPE (with --color substrate)
 };
 
 bool parse_view_args(int argc, char** argv, ViewArgs* a) {
@@ -143,6 +151,51 @@ bool parse_view_args(int argc, char** argv, ViewArgs* a) {
             if (!next(&v) || a->set_count == 256)
                 return false;
             a->sets[a->set_count++] = v;
+        } else if (strcmp(s, "--map-of-life") == 0) { // A5: frames for an animation
+            if (!next(&a->life_prefix))
+                return false;
+        } else if (strcmp(s, "--frames") == 0) {
+            u64 n = 0;
+            if (!next(&v) || !parse_u64(v, &n) || n == 0 || n > 100000)
+                return false;
+            a->frames = static_cast<u32>(n);
+        } else if (strcmp(s, "--life") == 0) {
+            a->life = 1;
+        } else if (strcmp(s, "--novelty") == 0) {
+            a->novelty = 1;
+        } else if (strcmp(s, "--map-ref") == 0) {
+            if (!next(&v))
+                return false;
+            const Str r = v;
+            const usize dash = r.find('-');
+            if (r.eq("all")) {
+                a->life_ref = RunArchive::kLifeRefAll;
+            } else if (r.eq("first")) {
+                a->life_ref = RunArchive::kLifeRefFirst;
+            } else if (dash < r.n && parse_u64(r.sub(0, dash), &a->ref_a) &&
+                       parse_u64(r.sub(dash + 1, r.n - dash - 1), &a->ref_b) && a->ref_a <= a->ref_b) {
+                a->life_ref = RunArchive::kLifeRefWindow;
+            } else {
+                return false;
+            }
+        } else if (strcmp(s, "--show") == 0) {
+            if (!next(&v))
+                return false;
+            if (strcmp(v, "life") == 0)
+                a->show_life = true;
+            else if (strcmp(v, "kinds") == 0)
+                a->show_kinds = true;
+            else
+                return false;
+        } else if (strcmp(s, "--substrate") == 0) {
+            if (!next(&v))
+                return false;
+            a->sub_type = kSubstrateTypes;
+            for (u32 t = 0; t < kSubstrateTypes; ++t)
+                if (strcmp(v, substrate_column(t)) == 0)
+                    a->sub_type = t;
+            if (a->sub_type == kSubstrateTypes)
+                return false;
         } else if (s[0] == '-' || a->source) {
             return false;
         } else {
@@ -999,6 +1052,43 @@ bool render_png(Viewer& viewer, const RunStatus& st, const char* out, u32 w, u32
     return write_png(canvas, out, w, h);
 }
 
+// A5: the map of life alone, at `frames` evenly spaced times from its first
+// save to its last, PREFIX_0000.png on (for an animation). The axes are fitted
+// once, so a genotype keeps its place from frame to frame.
+bool render_life_frames(Viewer& viewer, RunStatus st, const char* prefix, u32 frames, u32 w, u32 h) {
+    viewer.set_life_mode(true);
+    viewer.set_solo(true);
+    const LifeMap& L = viewer.life();
+    if (L.points().empty() || !L.fitted()) {
+        fprintf(stderr, "nova: no map of life to render (no genebank saves, or too few genotypes)\n");
+        return false;
+    }
+    const u64 t0 = L.first_tick();
+    const u64 t1 = L.last_tick() > viewer.current().tick ? L.last_tick() : viewer.current().tick;
+    for (u32 k = 0; k < frames; ++k) {
+        const u64 t = t0 + static_cast<u64>(static_cast<double>(t1 - t0) * (k + 1) / frames + 0.5);
+        viewer.set_life_time(t, 0);
+        char path[MAX_PATH];
+        snprintf(path, sizeof path, "%s_%04u.png", prefix, k);
+        if (!render_png(viewer, st, path, w, h))
+            return false;
+    }
+    printf("nova: rendered %u frames of the map of life, %s_0000.png to %s_%04u.png (%ux%u): %u genotypes, ticks "
+           "%llu to %llu\n",
+           frames, prefix, prefix, frames - 1, w, h, static_cast<unsigned>(L.points().size()),
+           static_cast<unsigned long long>(t0), static_cast<unsigned long long>(t1));
+    return true;
+}
+
+// --show, --substrate: what a render (or the window) opens on.
+void apply_show(Viewer& v, const ViewArgs& a) {
+    v.set_sub_type(a.sub_type);
+    if (a.show_kinds)
+        v.set_kinds(true);
+    if (a.show_life)
+        v.set_life_mode(true);
+}
+
 bool render_page(SetupPage& page, const char* out, u32 w, u32 h) {
     Canvas canvas;
     if (!canvas.resize(static_cast<i32>(w), static_cast<i32>(h), 1.0f)) {
@@ -1022,7 +1112,11 @@ int cmd_view(int argc, char** argv) {
                         "  nova view <config | snapshot> [--threads N] [--set key=value]... [--no-output]\n"
                         "            [--ticks N] [--sample N] [--color NAME] [--render out.png [--size WxH]]\n"
                         "  nova view --run <run directory> [--render out.png [--window K] [--size WxH]]\n"
-                        "  (--group NAME: open on the settings page, at that group)\n");
+                        "            [--life] [--novelty] [--map-ref all|first|A-B]\n"
+                        "  (--group NAME: open on the settings page, at that group)\n"
+                        "  (--show life | kinds: the map of life, the new kinds of life; --substrate TYPE with\n"
+                        "   --color substrate: p_cores e_cores gpu npu mem_fast mem_slow disk_fast disk_slow)\n"
+                        "  (--map-of-life PREFIX [--frames N]: frames of the map of life, PREFIX_0000.png ...)\n");
         return 2;
     }
     App* app = new App;
@@ -1095,10 +1189,15 @@ int cmd_view(int argc, char** argv) {
     if (a.run_dir) {
         RunArchive* ar = new RunArchive;
         TextBuf err;
+        // A5 and A2 (docs/results/viewer.md): built for small runs, or when asked.
+        ar->set_life(a.life_prefix || a.show_life ? 1 : a.life, a.life_ref, a.ref_a, a.ref_b);
+        ar->set_novelty(a.show_kinds ? 1 : a.novelty);
         if (!ar->load(a.run_dir, &err)) {
             fprintf(stderr, "nova: %s\n", err.c_str());
             return 1;
         }
+        if (ar->notes().n)
+            printf("%.*s", static_cast<int>(ar->notes().n), ar->notes().p);
         app->archive = ar;
         snprintf(app->source, sizeof app->source, "%s", a.run_dir);
         snprintf(app->status.title, sizeof app->status.title, "%s", a.run_dir);
@@ -1111,6 +1210,7 @@ int cmd_view(int argc, char** argv) {
             app->viewer->take(app->archive_frame);
             app->viewer->auto_select();
         }
+        apply_show(*app->viewer, a);
         // Its settings, from its replay log's config lines, read-only.
         TextBuf perr;
         app->page.load_text(ar->config_text(), a.run_dir, &perr);
@@ -1143,6 +1243,8 @@ int cmd_view(int argc, char** argv) {
             printf("nova: rendered %s's settings %s (%ux%u)\n", a.run_dir, a.render, a.width, a.height);
             return 0;
         }
+        if (a.life_prefix)
+            return render_life_frames(*app->viewer, app->status, a.life_prefix, a.frames, a.width, a.height) ? 0 : 1;
         if (a.render) {
             if (!render_png(*app->viewer, app->status, a.render, a.width, a.height))
                 return 1;
@@ -1180,6 +1282,8 @@ int cmd_view(int argc, char** argv) {
         app->session->attach(run, a.sample);
         page_from_run(*app, kSetupSnapshot, a.source);
         app->page.set_info("the snapshot's settings: a continued snapshot keeps them");
+        if (run->novelty()) // (A2: an observer, not in snapshots)
+            set_note(app->sh, "the live novelty meter starts a fresh model from the snapshot (its model isn't in snapshots)");
     } else {
         if (!start_live(*app, a.source, a.sets, a.set_count, !a.no_output, a.has_ticks, a.ticks, &err)) {
             fprintf(stderr, "nova: %s\n", err.c_str());
@@ -1199,7 +1303,7 @@ int cmd_view(int argc, char** argv) {
         app->on_page = true;
     }
 
-    if (a.render) {
+    if (a.render || a.life_prefix) {
         const u64 ticks = app->tick_limit;
         const double t0 = now_ms();
         for (u64 i = 0; i < ticks; ++i) {
@@ -1209,6 +1313,7 @@ int cmd_view(int argc, char** argv) {
         const double secs = (now_ms() - t0) / 1000.0;
         app->session->flush_sample();
         ViewFrame f;
+        apply_show(*app->viewer, a);
         for (int pass = 0; pass < 3; ++pass) {
             ViewRequest q = app->viewer->request();
             q.hash = true;
@@ -1219,6 +1324,11 @@ int cmd_view(int argc, char** argv) {
         app->status.paused = true;
         app->status.tps = secs > 0 ? ticks / secs : 0;
         app->status.ips = secs > 0 ? run->instructions() / secs : 0;
+        if (a.life_prefix) {
+            const bool lok = render_life_frames(*app->viewer, app->status, a.life_prefix, a.frames, a.width, a.height);
+            finish_run(*app, "view_render", secs);
+            return lok ? 0 : 1;
+        }
         const bool ok = app->on_page ? render_page(app->page, a.render, a.width, a.height)
                                      : render_png(*app->viewer, app->status, a.render, a.width, a.height);
         finish_run(*app, "view_render", secs);
@@ -1229,6 +1339,7 @@ int cmd_view(int argc, char** argv) {
                static_cast<unsigned long long>(run->world().hash()));
         return 0;
     }
+    apply_show(*app->viewer, a);
     return open_window(*app);
 }
 

@@ -221,10 +221,18 @@ bool World::init(Config& cfg) {
     channels_ = 0;
     edge_corruption_ = edge_failure_ = 0;
     disasters_ = false; // (the soup model's, read below)
+    novelty_ = false;
+    novelty_threshold_ = 3.0;
     if (model_ == Model::soup) {
         soup_params_from_config(cfg, soup_size_, &soup_params_);
         detect_params_from_config(cfg, &detect_);
         profile_params_from_config(cfg, &profile_); // behaviour profiles (A3), checked by the setup page too
+        // The live novelty meter (docs/analysis-plan.md A2): it feeds on the
+        // genebank's saves, so it needs detection. Read here with every other
+        // setting; only the run uses it, and it never touches the world.
+        novelty_ = detect_.enabled && key_flag(cfg, "novelty.enabled");
+        if (novelty_)
+            novelty_threshold_ = key_f64(cfg, "novelty.threshold");
         dispersal_ = soup_params_.dispersal;
         accel_async_ = soup_params_.accel_async;
         accel_open(cfg);

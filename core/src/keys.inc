@@ -722,6 +722,13 @@ NOVA_WHOLE("profile.ticks", 50, 1, 1000000000, 0, "Detection and lineages", "Pro
            "Ticks each picked body is followed, or until it dies or goes dormant (at most profile.every).")
 NOVA_FLAG("profile.arrivals", true, 0, "Detection and lineages", "Arrivals log", "profile.enabled",
           "Log the arrivals placed during each round's ticks (output.arrivals), for the moving-together measure.")
+// The live novelty meter (docs/analysis-plan.md A2): an observer, read by World::init, used by the run.
+NOVA_FLAG("novelty.enabled", true, 0, "Detection and lineages", "Live novelty meter", "detect.enabled",
+          "Measure each new genotype the genebank saves against a 4-codon model of every one before it, for the "
+          "stats columns novelty, novel_share and novel_success (it only observes: no world changes).")
+NOVA_NUMBER("novelty.threshold", 3.0, 0, 64, 0, "Detection and lineages", "Novel at", "novelty.enabled",
+            "Bits per codon of surprise at or above which a new genotype counts as novel (nova analyse novelty's "
+            "--threshold).")
 
 // ---------------------------------------------------------------------------
 // Budgets: settings from the machine (budget.h)

@@ -1,6 +1,7 @@
 #include "nova/stats.h"
 
 #include "nova/compress.h"
+#include "nova/novelty.h" // the live novelty meter's columns (docs/analysis-plan.md A2)
 
 namespace nova {
 
@@ -54,6 +55,8 @@ const char* const kColumns[kStatsColumns] = {
     // behaviour profiles (docs/analysis-plan.md A3): the last whole round's census (gauges)
     "prof_samples", "role_predator", "role_parasite", "role_repairer", "role_signaller", "role_wanderer",
     "role_copier", "role_idle", "work_len", "action_kinds_x100",
+    // the live novelty meter (docs/analysis-plan.md A2): two in fixed point (x kNoveltyFixed), then a sum
+    "novelty", "novel_share", "novel_success",
     // the two floating-point columns, last as always
     "compress",     "ambient"};
 // The first 39 tally fields fill columns 3-41; Phase 8's five go after
@@ -153,7 +156,7 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
     const usize nt = sizeof tail / sizeof tail[0];
     static_assert(3 + kTallyEarly + sizeof tail / sizeof tail[0] + kTallyWarp + 2 + kTallyAction + kTallyThread + 1 +
                           kTallyLife + kTallyDormant + 2 + 1 + kTallyArchive + kFoundedColumns + kStatsDisasterColumns +
-                          kStatsTierColumns + kStatsProfileColumns ==
+                          kStatsTierColumns + kStatsProfileColumns + kStatsNoveltyColumns ==
                       kStatsIntColumns,
                   "stats row shape");
     for (usize i = 0; i < nt; ++i)
@@ -217,11 +220,33 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
         pv[1 + kRoleCount] = pc.samples ? (pc.work_len + pc.samples / 2) / pc.samples : 0;
         pv[2 + kRoleCount] = pc.samples ? (pc.kinds * 100 + pc.samples / 2) / pc.samples : 0;
     }
+    // The live novelty meter's (A2): the run's, not the world's; stats_novelty_row fills them.
+    static_assert(3 + 39 + 18 + 5 + 2 + 4 + 2 + 1 + 9 + 5 + 2 + 1 + 2 + 4 + 26 + kStatsTierColumns + kStatsProfileColumns == kStatsNoveltyFirst, "novelty's first");
+    for (u32 i = 0; i < kStatsNoveltyColumns; ++i)
+        v[kStatsNoveltyFirst + i] = 0;
     marks->links = links;
     marks->inject = inject;
     marks->gpu = gpu;
     out->compress = comp / w.node_count();
     out->ambient = ambient / w.node_count();
+}
+
+// The live novelty meter's columns (A2): novelty and novel_share in fixed
+// point (x kNoveltyFixed, rounded), novel_success a count.
+void stats_novelty_row(LiveNovelty* meter, u32 tap, StatsRow* out) {
+    if (!meter)
+        return;
+    const NoveltyTake t = meter->take(tap);
+    auto fixed = [](double x) { return static_cast<u64>(x * kNoveltyFixed + 0.5); };
+    out->v[kStatsNoveltyFirst] = fixed(t.innovation());
+    out->v[kStatsNoveltyFirst + 1] = fixed(t.novel_share());
+    out->v[kStatsNoveltyFirst + 2] = t.novel_success;
+}
+
+void StatsCsv::set_novelty(LiveNovelty* meter) {
+    novelty_ = meter;
+    if (meter)
+        meter->open_tap(LiveNovelty::kTapStats);
 }
 
 void csv_field(TextBuf& out, Str s) {
@@ -433,6 +458,7 @@ void StatsCsv::write_row(const World& w, bool final) {
     if (model_ == Model::soup) {
         StatsRow r;
         stats_soup_row(w, soup_sum_, first_tick_, ticks_, &marks_, true, &r);
+        stats_novelty_row(novelty_, LiveNovelty::kTapStats, &r); // (A2: the run's meter, this row's window)
         TextBuf row;
         for (u32 i = 0; i < kStatsIntColumns; ++i) {
             if (i)

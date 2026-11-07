@@ -113,6 +113,17 @@
 //   work_len                          their mean working length: genome codons
 //                                     that ran (rounded)
 //   action_kinds_x100                 their mean kinds of action used, x 100
+// then the live novelty meter's (docs/analysis-plan.md A2; novelty.h; zeros with
+// novelty.enabled or detection off), the last integer columns:
+//   novelty                           innovation: the mean surprise of the window's
+//                                     new genotypes, bits per codon, in fixed point
+//                                     (x kNoveltyFixed, 10^6, rounded: 2753118 is
+//                                     2.753118)
+//   novel_share                       the share of them at or above
+//                                     novelty.threshold, likewise x 10^6
+//   novel_success                     how many of those novel ones belong to a
+//                                     lineage that has met the gate by the window's
+//                                     end (a sum)
 // and last, as always, the two floating-point columns:
 //   compress                          soup compressibility (compress.h), mean
 //                                     over nodes: ~1 random, lower = repetitive
@@ -135,7 +146,10 @@ inline constexpr u32 kStatsProfileColumns = 10;
 inline constexpr u32 kStatsDisasterFirst = 97;
 inline constexpr u32 kStatsTierFirst = kStatsDisasterFirst + kStatsDisasterColumns;
 inline constexpr u32 kStatsProfileFirst = kStatsTierFirst + kStatsTierColumns;
-inline constexpr u32 kStatsIntColumns = kStatsProfileFirst + kStatsProfileColumns;
+inline constexpr u32 kStatsNoveltyColumns = 3;
+inline constexpr double kNoveltyFixed = 1e6;
+inline constexpr u32 kStatsNoveltyFirst = kStatsProfileFirst + kStatsProfileColumns;
+inline constexpr u32 kStatsIntColumns = kStatsNoveltyFirst + kStatsNoveltyColumns;
 inline constexpr u32 kStatsColumns = kStatsIntColumns + 2; // compress, ambient
 const char* stats_column(u32 i);
 // Index of a column by name, or kStatsColumns if there is none.
@@ -159,6 +173,10 @@ struct StatsMarks {
 // compressibility estimate (it reads every codon) and leaves it 0.
 void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ticks, StatsMarks* marks, bool compress,
                     StatsRow* out);
+// The live novelty meter's columns (novelty.h), which stats_soup_row leaves 0:
+// takes `tap`'s window from the run's meter (nullptr: none, zeros stay).
+class LiveNovelty;
+void stats_novelty_row(LiveNovelty* meter, u32 tap, StatsRow* out);
 
 // The per-node file (Phase 3, output.nodes; soup model): one row per node per
 // window, at the window's end:
@@ -198,6 +216,9 @@ class StatsCsv {
 
     void record(const World& w); // call once after every tick
     void finish(const World& w); // writes a final partial row, then closes
+    // The run's live novelty meter (novelty.h), for the novelty columns: after
+    // open(); its stats tap's windows follow the rows from then on.
+    void set_novelty(LiveNovelty* meter);
 
   private:
     void write_row(const World& w, bool final);
@@ -221,6 +242,7 @@ class StatsCsv {
     Model model_ = Model::demo;
     SoupTally soup_sum_ = {};
     StatsMarks marks_; // detector links counted at the last row
+    LiveNovelty* novelty_ = nullptr; // the run's (not owned)
 };
 
 } // namespace nova
