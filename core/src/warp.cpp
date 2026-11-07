@@ -18,7 +18,8 @@
 #include <cstring>
 
 #include "nova/lineage.h"
-#include "nova/pool.h" // clock_seconds (profiling)
+#include "nova/pool.h"    // clock_seconds (profiling)
+#include "nova/profile.h" // behaviour profiles (A3): lane instructions of a followed body
 #include "nova/soup.h"
 
 #include "warp_layout.inc"
@@ -877,6 +878,8 @@ void Soup::warp_unpack(bool all_on_gpu) {
             }
             tally_.warp_steps += steps;
             tally_.lane_instr += lins;
+            if (prof_) // behaviour profiles (A3): observe-only
+                prof_->on_lanes(b, lins);
             wleft_[w] = quota > used ? quota - used : 0;
             if (used > quota) // the last step's overshoot is a debt, as a CPU's
                 warp_carry_[b] -= static_cast<float>(used - quota);

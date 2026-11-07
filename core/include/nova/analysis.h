@@ -16,6 +16,7 @@
 #include "nova/isa.h"
 #include "nova/keys.h"
 #include "nova/learn.h"
+#include "nova/profile.h" // A3: the sample's actions and the live rules
 #include "nova/str.h"
 #include "nova/types.h"
 
@@ -345,5 +346,129 @@ void search_value(const SearchRange& r, double u, TextBuf& text, double* snapped
 // A trial run's full config (see search.cpp): the base, set.*, the trial's
 // values, its seed and its outputs.
 void search_trial_config(const SearchSpec& s, const double* u, u64 world_seed, TextBuf& out);
+
+// --- A3: behaviour roles and group behaviour (docs/results/profiles.md) ---------------
+//
+//   nova analyse roles <run>    clusters of profiles.csv's samples, named by
+//                               their leading actions; role shares and the
+//                               honest complexity measures per window
+//   nova analyse groups <run>   moving together (arrivals.csv), kin clustering
+//                               and listening then acting (profiles.csv), each
+//                               against chance
+
+// One profiles.csv row as the tools read it (columns found by name).
+struct ProfileRow {
+    u64 tick = 0, end_tick = 0, ticks = 0;
+    u64 lineage = 0, genotype = 0;
+    u64 instr = 0, lane_instr = 0, copies = 0; // copies: COPY, WRITE and movii run
+    u32 node = 0, genome_len = 0;
+    u32 work_len = 0, distinct_ops = 0, action_kinds = 0;
+    u32 role = kRoleIdle; // the live rules'
+    u32 act[kPaCount] = {};
+    u32 lta[6] = {};
+    u32 node_bodies = 0, lin_alive = 0, geno_alive = 0, nb_left = 0, nb_right = 0;
+};
+
+class ProfileReader {
+  public:
+    bool open(const char* path, TextBuf* err); // reads the header; the columns it needs must be there
+    // The next row; false at the end or at a malformed row (then error() is set).
+    bool next(ProfileRow* r);
+    const char* error() const { return err_; }
+    u64 rows() const { return rows_; }
+
+  private:
+    LineReader r_;
+    CsvHeader h_;
+    i32 col_tick_ = -1, col_end_ = -1, col_ticks_ = -1, col_node_ = -1, col_lineage_ = -1, col_genotype_ = -1;
+    i32 col_glen_ = -1, col_role_ = -1, col_instr_ = -1, col_lane_ = -1, col_work_ = -1, col_ops_ = -1;
+    i32 col_kinds_ = -1, col_act_[kPaCount] = {}, col_lta_[6] = {};
+    i32 col_nb_[5] = {}; // node_bodies, lin_alive, geno_alive, nb_left, nb_right
+    i32 col_copy_[3] = {-1, -1, -1}; // op_COPY, op_WRITE, op_movii (whichever the table has)
+    u32 fields_ = 0;
+    u64 rows_ = 0;
+    char err_[160] = {};
+};
+// Every row of a run folder's profiles.csv.
+bool load_profiles(const char* dir, Array<ProfileRow>* out, TextBuf* err);
+// Every row of arrivals.csv (a missing file gives none and false).
+bool load_arrivals(const char* dir, Array<ArrivalRecord>* out, TextBuf* err);
+
+// The clustering's features, per sample: each action (counts scaled to a full
+// profile, log(1 + x)), the instructions run (likewise) and the share of them
+// that copy. Scaled to zero mean and unit spread before k-means.
+enum : u32 {
+    kRfEngulfTry, kRfEngulf, kRfBiteWaste, kRfInjectTry, kRfInject, kRfDivide, kRfDisperse, kRfDormant,
+    kRfDiskCompare, kRfDiskStore, kRfDiskLoad, kRfSelfLoad, kRfEmit, kRfListen, kRfGpu, kRfNpu, kRfSpawn,
+    kRfInstr, kRfCopyShare,
+    kRoleFeatures
+};
+const char* role_feature_name(u32 f);
+
+struct RolesOptions {
+    u64 window = 10000;     // ticks a census window
+    u32 kmin = 2, kmax = 8; // the range k is chosen in (by the mean silhouette)
+    u64 seed = 1;           // the analysis's own stream (seeding, subsamples)
+    u32 restarts = 3;       // k-means runs per k (the lowest inertia kept)
+    u32 silhouette_sample = 1500; // points the silhouette is measured on
+    u32 max_samples = 200000;     // samples clustered at most (a uniform reservoir beyond)
+};
+
+struct RoleCluster {
+    char name[32] = {};
+    u32 size = 0;                   // samples
+    double mean[kRoleFeatures] = {}; // raw means per sample (actions per full profile; copy share)
+    double z[kRoleFeatures] = {};    // the centroid, scaled
+    u32 lead[3] = {};               // its leading features (largest scaled centroid first)
+    u32 nlead = 0;
+    u32 live[kRoleCount] = {};      // its samples by the live rules' role
+};
+
+struct RolesReport {
+    u64 samples = 0, clustered = 0; // rows read; clustered (all, or the reservoir)
+    u32 k = 0;
+    double silhouette[16] = {};     // by k (0 where not tried)
+    Array<RoleCluster> clusters;    // by size, largest first
+    Array<u32> labels;              // per row read: its cluster (into clusters)
+    u32 live[kRoleCount] = {};      // every row by the live rules
+    TextBuf census_csv, complexity_csv, clusters_csv;
+};
+// Clusters the rows, names the clusters, and fills the windows' census and
+// complexity (the CSVs). Deterministic for a given seed.
+bool roles_build(const Array<ProfileRow>& rows, const RolesOptions& o, RolesReport* out, TextBuf* err);
+bool roles_analyse(const char* dir, const RolesOptions& o, RolesReport* out, TextBuf* err);
+void roles_summary(const RolesReport& r, TextBuf& out);
+
+struct GroupOptions {
+    u32 gap = 2;        // moving together: arrivals this close in ticks are a pair
+    u32 block = 50;     // ... compared within blocks of this many ticks per node (labels shuffled there)
+    u32 shuffles = 200; // shuffles for the baselines
+    u64 seed = 1;       // the analysis's own stream
+    double found = 3.0; // a measure is found at z >= this
+};
+
+struct GroupMeasure {
+    double observed = 0, expected = 0, sd = 0; // the statistic, and chance's mean and spread
+    double z = 0;
+    u64 n = 0;          // what it was measured on (pairs, sides, samples)
+    u64 extra = 0;      // listening: samples individually significant (p < 0.05)
+    bool found = false;
+};
+
+struct GroupsReport {
+    GroupMeasure together, apart; // same-lineage arrival pairs: all; from different neighbours
+    GroupMeasure kin_lineage, kin_genotype; // memory neighbours of the same lineage; the same genome
+    GroupMeasure listening;       // heard value against the next branch (mutual information, pooled)
+    u64 arrivals = 0, samples = 0;
+    bool have_arrivals = false;
+};
+// The three measures, each against chance (see groups.cpp).
+void moving_together(const Array<ArrivalRecord>& a, const GroupOptions& o, GroupMeasure* all, GroupMeasure* apart);
+void kin_clustering(const Array<ProfileRow>& rows, const GroupOptions& o, GroupMeasure* lineage,
+                    GroupMeasure* genotype);
+void listening_acting(const Array<ProfileRow>& rows, const GroupOptions& o, GroupMeasure* out);
+bool groups_analyse(const char* dir, const GroupOptions& o, GroupsReport* out, TextBuf* err);
+void groups_summary(const GroupsReport& r, const GroupOptions& o, TextBuf& out);
+void groups_csv(const GroupsReport& r, TextBuf& out);
 
 } // namespace nova

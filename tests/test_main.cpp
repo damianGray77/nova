@@ -49,6 +49,7 @@ void suite_tiers();      // disk tiers (docs/world-plan.md W4)
 void suite_disasters();  // docs/disasters-plan.md
 void suite_memtiers();   // memory tiers (docs/world-plan.md W3)
 void suite_analysis(); // learning from the runs (docs/analysis-plan.md)
+void suite_profiles(); // behaviour profiles (docs/analysis-plan.md A3)
 
 namespace {
 
@@ -102,6 +103,7 @@ const Suite kSuites[] = {
     {"disasters", suite_disasters},
     {"memtiers", suite_memtiers},
     {"analysis", suite_analysis},
+    {"profiles", suite_profiles},
 };
 
 } // namespace
@@ -147,7 +149,10 @@ const char* const kLegacyDefaults ="accel.mode = instant\n"
                                     "spark.activity = 0\n"
                                     "world.archive = 0\n"
                                     "disaster.enabled = false\n" // docs/disasters-plan.md: suite disasters tests them
-                                    "mem.fast_share = 0\n";      // memory tiers (W3): suite memtiers tests them
+                                    "mem.fast_share = 0\n"      // memory tiers (W3): suite memtiers tests them
+                                    // behaviour profiles (docs/analysis-plan.md A3): observe-only, so off
+                                    // changes no hash; suite profiles turns them on
+                                    "profile.enabled = false\n";
 
 int main(int argc, char** argv) {
     nova::Config::ParseError pe;

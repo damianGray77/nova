@@ -299,7 +299,8 @@ void read_run_keys_here(Config& cfg) {
     (void)key_u64(cfg, "stats.nodes_every");
     (void)key_str(cfg, "budget.threads");
     (void)key_choice(cfg, "budget.priority");
-    const char* const outputs[] = {"csv", "nodes", "signals", "replay", "snapshot", "genebank", "lineages", "result"};
+    const char* const outputs[] = {"csv",      "nodes",  "signals",  "replay",  "snapshot",
+                                   "genebank", "lineages", "result", "profiles", "arrivals"}; // (A3: the last two)
     for (const char* o : outputs) {
         char name[32];
         snprintf(name, sizeof name, "output.%s", o);

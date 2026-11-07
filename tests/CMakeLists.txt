@@ -44,6 +44,8 @@ add_executable(nova_tests
     test_memtiers.cpp # memory tiers (docs/world-plan.md W3)
     # Learning from the runs (docs/analysis-plan.md).
     test_analysis.cpp
+    # Behaviour profiles (docs/analysis-plan.md A3).
+    test_profiles.cpp
 )
 target_link_libraries(nova_tests PRIVATE nova::core nova_viewer)
 target_compile_features(nova_tests PRIVATE cxx_std_20)
@@ -61,8 +63,9 @@ endif()
 set(NOVA_SUITES containers str rng config pool world gate snapshot stats replay genebank
     isa interp tierra soup heat contact rules tables detect gpu npu dispersal leak edges disk salvage signals lifecycle async devices
     view viewer landscape budget warp costs ecology keys substrates tiers disasters
-    memtiers # memory tiers (docs/world-plan.md W3)
-    analysis) # learning from the runs (docs/analysis-plan.md)
+    memtiers # memory tiers (W3)
+    analysis
+    profiles) # behaviour profiles (A3)
 foreach(suite IN LISTS NOVA_SUITES)
     add_test(NAME ${suite} COMMAND nova_tests ${suite})
     set_tests_properties(${suite} PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})

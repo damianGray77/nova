@@ -187,6 +187,7 @@ void Run::after_step() {
     }
     world_.clear_world_events();
     drain_detection();
+    drain_profiles(); // behaviour profiles (A3)
     stats_.record(world_);
     if (replay_.is_open() && checkpoint_every_ && world_.tick() % checkpoint_every_ == 0)
         replay_.checkpoint(world_.tick(), world_.hash());
@@ -379,6 +380,64 @@ void Run::write_lineage_row(const LineageEnd& e, u32 node, bool alive) {
     lineages_.write(t.view());
 }
 
+// --- behaviour profiles (docs/analysis-plan.md A3) ------------------------------
+// The world's finished samples (node order) and logged arrivals, this step's.
+void Run::drain_profiles() {
+    if (world_.model() != Model::soup || (!profiles_.is_open() && !arrivals_.is_open()))
+        return;
+    TextBuf t;
+    if (profiles_.is_open()) {
+        const CodonTable& table = world_.soup_params().table;
+        for (u32 n = 0; n < world_.node_count(); ++n) {
+            const Profiles* P = world_.node_profiles(n);
+            if (!P)
+                break; // profiles are off on every node
+            for (usize i = 0; i < P->finished().size(); ++i)
+                profile_csv_row(table, P->finished()[i], t);
+        }
+        if (t.size()) {
+            profiles_.write(t.view());
+            profiles_.flush();
+        }
+    }
+    if (arrivals_.is_open() && !world_.arrivals().empty()) {
+        t.clear();
+        for (usize i = 0; i < world_.arrivals().size(); ++i)
+            arrivals_csv_row(world_.arrivals()[i], t);
+        arrivals_.write(t.view());
+        arrivals_.flush();
+    }
+}
+
+bool Run::open_profiles(const char* path, TextBuf* err) {
+    if (!profiles_.open(path)) {
+        err->append("cannot open profiles file '");
+        err->append(path);
+        err->append_char('\'');
+        return false;
+    }
+    TextBuf h;
+    profile_csv_header(world_.soup_params().table, h);
+    profiles_.write(h.view());
+    profiles_.flush();
+    return true;
+}
+
+bool Run::open_arrivals(const char* path, TextBuf* err) {
+    if (!arrivals_.open(path)) {
+        err->append("cannot open arrivals file '");
+        err->append(path);
+        err->append_char('\'');
+        return false;
+    }
+    TextBuf h;
+    arrivals_csv_header(h);
+    arrivals_.write(h.view());
+    arrivals_.flush();
+    return true;
+}
+// --- end behaviour profiles ------------------------------------------------------
+
 bool Run::open_genebank(const char* path, TextBuf* err) {
     if (!genebank_.open(path)) {
         err->append("cannot open genebank file '");
@@ -472,6 +531,8 @@ void Run::finish() {
         lineages_.close();
     }
     genebank_.close();
+    profiles_.close(); // behaviour profiles (A3): samples still under way are left out
+    arrivals_.close();
     if (replay_.is_open()) {
         replay_.end(world_.tick(), world_.hash());
         replay_.close();

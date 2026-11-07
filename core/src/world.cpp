@@ -224,6 +224,7 @@ bool World::init(Config& cfg) {
     if (model_ == Model::soup) {
         soup_params_from_config(cfg, soup_size_, &soup_params_);
         detect_params_from_config(cfg, &detect_);
+        profile_params_from_config(cfg, &profile_); // behaviour profiles (A3), checked by the setup page too
         dispersal_ = soup_params_.dispersal;
         accel_async_ = soup_params_.accel_async;
         accel_open(cfg);
@@ -436,6 +437,8 @@ bool World::init(Config& cfg) {
         delete[] soups_;
         delete[] lineages_;
         lineages_ = nullptr;
+        delete[] profiles_; // behaviour profiles (A3)
+        profiles_ = nullptr;
         init_nodes(vary, one_origin, seed_node);
         soups_ = new Soup[nodes_];
         if (disk_folder_.size())
@@ -488,6 +491,17 @@ bool World::init(Config& cfg) {
             for (u32 n = 0; n < nodes_; ++n) {
                 lineages_[n].init(&detect_, n);
                 soups_[n].set_observer(&lineages_[n]);
+            }
+        }
+        // Behaviour profiles (docs/analysis-plan.md A3): a sampler per node,
+        // watching like the detector, never touching the world.
+        arrivals_.clear();
+        census_ = census_build_ = ProfileCensus{};
+        if (profile_.enabled) {
+            profiles_ = new Profiles[nodes_];
+            for (u32 n = 0; n < nodes_; ++n) {
+                profiles_[n].init(&profile_, seed_, n);
+                soups_[n].set_profiles(&profiles_[n]);
             }
         }
         return true;
@@ -1107,6 +1121,10 @@ void World::lifecycle_update() {
                 if (lineages_) {
                     lineages_[n].new_life();
                     soups_[n].set_observer(&lineages_[n]);
+                }
+                if (profiles_) { // behaviour profiles (A3): a new node, nothing followed
+                    profiles_[n].reset();
+                    soups_[n].set_profiles(&profiles_[n]);
                 }
                 live_[n] = 1;
                 lived_[n] = 1;
@@ -2652,8 +2670,11 @@ void World::deliver_dormant(Cargo& c) {
     d.kind = static_cast<u8>(c.kind); // (kKindP or kKindE; Dormant::kind is a byte, soup.h)
     d.hops = c.hops;
     if ((live_.empty() || live_[dst]) && !(disasters_ && rebooting(dst))) // (a rebooting node: it passes through)
-        if (soups_[dst].land_dormant(cargo_codons_.data() + c.codon_off, c.len, d, c.tag))
+        if (soups_[dst].land_dormant(cargo_codons_.data() + c.codon_off, c.len, d, c.tag)) {
+            if (log_arrivals()) // behaviour profiles (A3): the arrivals log, observe-only
+                note_arrival(c, dst);
             return;
+        }
     const u32 e = drift_edge(dst, c.seq, c.hops);
     if (e == kNone) {
         ++world_dormant_expired_;
@@ -2703,9 +2724,12 @@ void World::deliver_cargo() {
             --in_flight_[c.edge];
             continue;
         }
-        soups_[edge_dst_[c.edge]].arrive(cargo_codons_.data() + c.codon_off, c.len, c.millicores, c.gpus,
-                                         c.npus, c.disk, c.tag, c.form, c.emillicores, static_cast<u8>(c.kind),
-                                         c.archive);
+        const bool placed =
+            soups_[edge_dst_[c.edge]].arrive(cargo_codons_.data() + c.codon_off, c.len, c.millicores, c.gpus,
+                                             c.npus, c.disk, c.tag, c.form, c.emillicores, static_cast<u8>(c.kind),
+                                             c.archive);
+        if (placed && log_arrivals()) // behaviour profiles (A3): the arrivals log, observe-only
+            note_arrival(c, edge_dst_[c.edge]);
         --in_flight_[c.edge];
     }
     // Keep the rest, in order, with their codons packed; then the dormant
@@ -2943,6 +2967,11 @@ void World::step(ThreadPool& pool) {
     };
     if (warp_failed_) // Phase 8: the GPU failed holding lanes; the world can't go on exactly
         return;
+    if (profiles_) { // behaviour profiles (A3): the last step's samples and arrivals were collected
+        for (u32 n = 0; n < nodes_; ++n)
+            profiles_[n].clear_finished();
+        arrivals_.clear();
+    }
     if (disasters_) // disasters X10: each node's symptoms for the tick about to run
         weather_update();
     if (model_ == Model::soup && warp_gpu_.is_open()) {
@@ -3051,6 +3080,8 @@ void World::step(ThreadPool& pool) {
         soup_last_.collapses = lifecycle_ ? world_collapses_ : 0;
         soup_last_.recoveries = lifecycle_ ? world_recoveries_ : 0;
         lap(prof_ ? &prof_->tally : nullptr);
+        if (profiles_) // behaviour profiles (A3), after everything else at the barrier (observe-only)
+            profile_barrier();
     } else {
         deliver();
     }
@@ -3060,6 +3091,44 @@ void World::step(ThreadPool& pool) {
         lap(prof_ ? &prof_->ports : nullptr);
     }
 }
+
+// --- behaviour profiles (docs/analysis-plan.md A3; profile.h) -----------------
+// Observe-only: these read the soups and write only the samplers, the census
+// and the arrivals log, none of which is hashed or snapshotted.
+
+// The end of a step, in node order: followed bodies' holdings; samples that
+// died or have run their ticks end; the finished ones join their round's
+// census, which is published once the round's last tick is done.
+void World::profile_barrier() {
+    for (u32 n = 0; n < nodes_; ++n) {
+        profiles_[n].on_tick_end(soups_[n], tick_);
+        const Array<ProfileSample>& done = profiles_[n].finished();
+        for (usize i = 0; i < done.size(); ++i)
+            census_build_.add(done[i]);
+    }
+    if (tick_ + 1 >= profile_.ticks && (tick_ + 1 - profile_.ticks) % profile_.every == 0) {
+        const u64 round = tick_ + 1 - profile_.ticks;
+        if (census_build_.round != round) // (a round with no sample: nothing living, or a resume after its start)
+            census_build_ = ProfileCensus{};
+        census_build_.round = round;
+        census_ = census_build_;
+        census_build_ = ProfileCensus{};
+    }
+}
+
+// An arrival placed at this barrier, during a round (log_arrivals()).
+void World::note_arrival(const Cargo& c, u32 dst) {
+    ArrivalRecord a = {};
+    a.tick = tick_;
+    a.lineage = c.tag.lineage;
+    a.genotype = genotype_hash(cargo_codons_.data() + c.codon_off, c.len);
+    a.node = dst;
+    a.src = edge_src_[c.edge];
+    a.len = c.len;
+    a.dormant = c.dormant;
+    arrivals_.push(a);
+}
+// --- end behaviour profiles ------------------------------------------------------
 
 u64 World::total_units() const {
     u64 sum = 0;
@@ -3449,6 +3518,14 @@ bool World::load_state(ByteReader& r, TextBuf* err, u32 version) {
         if (lineages_) // detector state is not in snapshots: start afresh
             for (u32 n = 0; n < nodes_; ++n)
                 soups_[n].set_observer(&lineages_[n]);
+        if (profiles_) { // behaviour profiles (A3): not in snapshots either; sampling restarts at the next round
+            for (u32 n = 0; n < nodes_; ++n) {
+                profiles_[n].reset();
+                profiles_[n].clear_finished();
+                soups_[n].set_profiles(&profiles_[n]);
+            }
+            census_ = census_build_ = ProfileCensus{};
+        }
         tick_ = tick;
         soup_last_ = {};
         if (landscape_) // the bridges as they stand at the snapshot's tick

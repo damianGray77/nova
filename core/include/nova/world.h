@@ -68,6 +68,7 @@
 #include "nova/landscape.h"
 #include "nova/lineage.h"
 #include "nova/pool.h"
+#include "nova/profile.h" // behaviour profiles (docs/analysis-plan.md A3)
 #include "nova/soup.h"
 #include "nova/types.h"
 
@@ -187,6 +188,7 @@ class World {
     World() = default;
     ~World() {
         delete[] lineages_;
+        delete[] profiles_; // behaviour profiles (A3)
         delete[] soups_; // closes (and deletes) any disk files
         if (disk_folder_.size())
             remove_folder(disk_folder_.c_str());
@@ -250,6 +252,18 @@ class World {
     const Lineages* node_lineages(u32 node) const { return lineages_ ? &lineages_[node] : nullptr; }
     Lineages* node_lineages(u32 node) { return lineages_ ? &lineages_[node] : nullptr; }
     const DetectParams& detect_params() const { return detect_; }
+    // --- behaviour profiles (docs/analysis-plan.md A3; profile.h) -----------
+    // Observe-only: neither hashed nor snapshotted. Node n's sampler (nullptr
+    // with profile.enabled off); its finished() samples are this tick's,
+    // collected at the barrier (the next step clears them). The arrivals
+    // placed at this tick's barrier during a sampling round (profile.arrivals).
+    // The last whole round's census (the live stats columns).
+    const ProfileParams& profile_params() const { return profile_; }
+    const Profiles* node_profiles(u32 node) const { return profiles_ ? &profiles_[node] : nullptr; }
+    Profiles* node_profiles(u32 node) { return profiles_ ? &profiles_[node] : nullptr; }
+    const Array<ArrivalRecord>& arrivals() const { return arrivals_; }
+    const ProfileCensus& profile_census() const { return census_; }
+    // --- end behaviour profiles ---------------------------------------------
 
     u64 seed() const { return seed_; }
     u64 tick() const { return tick_; }
@@ -607,6 +621,17 @@ class World {
     SoupTally soup_last_ = {};
     DetectParams detect_;
     Lineages* lineages_ = nullptr; // nodes_ detectors, or nullptr
+    // --- behaviour profiles (A3): observers, not world state ----------------
+    ProfileParams profile_;
+    Profiles* profiles_ = nullptr;        // nodes_ samplers, or nullptr
+    Array<ArrivalRecord> arrivals_;       // this barrier's arrivals, in a round (profile.arrivals)
+    ProfileCensus census_, census_build_; // the last whole round's; the one being gathered
+    void profile_barrier();               // the end of a step: samples end, the census
+    bool log_arrivals() const {
+        return profiles_ && profile_.arrivals && tick_ % profile_.every < profile_.ticks;
+    }
+    void note_arrival(const Cargo& c, u32 dst);
+    // --- end behaviour profiles -------------------------------------------------
 
     StepProfile* prof_ = nullptr;
     bool check_only_ = false; // check_settings(): read and check, build nothing (config-plan C4)

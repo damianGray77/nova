@@ -100,6 +100,12 @@ class Run {
     // genebank.txt (one block per saved genotype) and the lineage CSV.
     bool open_genebank(const char* path, TextBuf* err);
     bool open_lineages(const char* path, TextBuf* err);
+    // Behaviour profiles (docs/analysis-plan.md A3): profiles.csv, a row per
+    // finished sample, and arrivals.csv, the arrivals logged during sampling
+    // rounds; each drained after every step in node order. With
+    // profile.enabled (profile.arrivals) off they hold only their header.
+    bool open_profiles(const char* path, TextBuf* err);
+    bool open_arrivals(const char* path, TextBuf* err);
     // Numbered snapshots every `every` ticks (output.snapshot_every, Phase 6):
     // `<path>.<tick>` at each multiple of it.
     void open_snapshots(const char* path, u64 every);
@@ -174,6 +180,7 @@ class Run {
     void apply_due_knobs();
     void after_step(); // events, detection, stats, checkpoints, numbered snapshots
     void drain_detection();
+    void drain_profiles(); // behaviour profiles (A3)
     void write_lineage_row(const LineageEnd& e, u32 node, bool alive);
 
     Config config_;
@@ -188,6 +195,7 @@ class Run {
     u64 checkpoint_every_ = 0;
     TextFile genebank_;
     TextFile lineages_;
+    TextFile profiles_, arrivals_; // behaviour profiles (A3)
     TextBuf snap_path_, snap_error_, budget_notes_;
     u64 snap_every_ = 0;
     bool keep_bank_ = false;

@@ -11,7 +11,8 @@
 //                               is detected (-1 = keep going)
 //         run.threads, stats.window, replay.checkpoint_every
 //         output.csv / .nodes / .signals / .replay / .snapshot / .genebank /
-//                               .lineages / .result   paths, empty = off
+//                               .lineages / .result / .profiles / .arrivals
+//                               paths, empty = off
 //                               (.nodes and .signals need .csv)
 //         output.snapshot_every also write <output.snapshot>.<tick> every N
 //                               ticks (0 = off; Phase 6)
@@ -44,10 +45,11 @@
 //       default, range, group and help, as a table; --md writes the Markdown
 //       reference (docs/keys.md).
 //
-//   nova analyse novelty | tree | scores <run> ...,  nova search <file>
+//   nova analyse novelty | tree | scores | roles | groups <run> ...,  nova search <file>
 //       Learning from the runs (docs/analysis-plan.md, analyse_cmd.cpp):
 //       the novelty meter, family trees and a run's scores from its files,
-//       and the settings search.
+//       behaviour roles and group behaviour from its profiles, and the
+//       settings search.
 //
 // Any config key with no registry entry is an error (typo protection); one the
 // registry knows that nothing read (its feature off) is accepted, so a setup
@@ -513,6 +515,8 @@ void read_run_keys(Config& cfg, RunKeys* k) {
     k->bank.append(key_str(cfg, "output.genebank"));
     k->lin.append(key_str(cfg, "output.lineages"));
     k->result.append(key_str(cfg, "output.result"));
+    k->prof.append(key_str(cfg, "output.profiles")); // behaviour profiles (A3)
+    k->arr.append(key_str(cfg, "output.arrivals"));
     if (k->snapshot_every && k->snap.size() == 0)
         cfg.fail("output.snapshot_every", "needs output.snapshot (the numbered snapshots' path)");
 }
@@ -594,6 +598,21 @@ bool open_outputs(Run& run, RunKeys& k) {
     if (k.lin.size()) {
         ensure_parent_dir(m.lin.c_str());
         if (!run.open_lineages(m.lin.c_str(), &err)) {
+            fprintf(stderr, "nova: %s\n", err.c_str());
+            return false;
+        }
+    }
+    // Behaviour profiles (docs/analysis-plan.md A3): profiles.csv and arrivals.csv.
+    if (k.prof.size()) {
+        ensure_parent_dir(m.prof.c_str());
+        if (!run.open_profiles(m.prof.c_str(), &err)) {
+            fprintf(stderr, "nova: %s\n", err.c_str());
+            return false;
+        }
+    }
+    if (k.arr.size()) {
+        ensure_parent_dir(m.arr.c_str());
+        if (!run.open_arrivals(m.arr.c_str(), &err)) {
             fprintf(stderr, "nova: %s\n", err.c_str());
             return false;
         }

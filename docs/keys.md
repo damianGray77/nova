@@ -9,7 +9,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 - **Families:** a key with a `<placeholder>` stands for one setting per member listed.
 - **Needs:** the switch the setting depends on; it does nothing while that is off.
 
-350 settings, 83 of them from 14 families; 11 hidden (tests and demos).
+357 settings, 83 of them from 14 families; 11 hidden (tests and demos).
 
 ## Contents
 
@@ -56,6 +56,8 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `output.genebank` | text | (empty) | text | **Genebank**. Path of the genebank: every genotype that reached detect.genebank_threshold living copies (empty = off). |
 | `output.lineages` | text | (empty) | text | **Lineages**. Path of the lineages CSV (empty = off). |
 | `output.result` | text | (empty) | text | **Result**. Path of result.txt, what a harness needs to know about the finished run (empty = off). |
+| `output.profiles` | text | (empty) | text | **Profiles**. Path of profiles.csv, one row per behaviour sample: what a followed body did (empty = off). Needs `profile.enabled`. |
+| `output.arrivals` | text | (empty) | text | **Arrivals**. Path of arrivals.csv, the arrivals placed during each sampling round (empty = off). Needs `profile.arrivals`. |
 
 ## World and land
 
@@ -408,6 +410,11 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `detect.gate_depth` | whole | 2 | 1 to 1000000 | **Gate depth**. The replicator gate: a lineage with a member this many generations deep ... Needs `detect.enabled`. |
 | `detect.gate_alive` | whole | 2 | 1 to 1000000 | **Gate alive**. ... and this many members alive at once. Needs `detect.enabled`. |
 | `detect.defended` | whole | 3 | 1 to 1000000000 | **Defended**. The defended milestone: a gated lineage whose members made this many attacks fail by changing in time. Needs `detect.enabled`. |
+| `profile.enabled` | switch | true | true or false | **Behaviour profiles**. Follow a few bodies per node now and then and record what they do: profiles.csv and the role columns. Observe-only. |
+| `profile.every` | whole | 1000 | 1 to 1000000000 | **Profile every**. Ticks between sampling rounds. Needs `profile.enabled`. |
+| `profile.per_node` | whole | 4 | 1 to 4096 | **Profiles per node**. Bodies each node picks to follow every round, from the observer's own random stream. Needs `profile.enabled`. |
+| `profile.ticks` | whole | 50 | 1 to 1000000000 | **Profile length**. Ticks each picked body is followed, or until it dies or goes dormant (at most profile.every). Needs `profile.enabled`. |
+| `profile.arrivals` | switch | true | true or false | **Arrivals log**. Log the arrivals placed during each round's ticks (output.arrivals), for the moving-together measure. Needs `profile.enabled`. |
 
 ## Budgets
 

@@ -7,7 +7,8 @@
 
 #include "nova/keys.h" // the settings registry
 #include "nova/lineage.h"
-#include "nova/pool.h" // clock_seconds (profiling)
+#include "nova/pool.h"    // clock_seconds (profiling)
+#include "nova/profile.h" // behaviour profiles (A3): the sampler's hooks
 
 namespace nova {
 
@@ -496,6 +497,8 @@ void Soup::init(const SoupParams* p, u64 seed, u32 node, u32 life, const Ruins* 
     // A detector sized for an earlier shape must not watch the new one: the
     // caller attaches it again afterwards (set_observer sizes it).
     obs_ = nullptr;
+    prof_ = nullptr; // behaviour profiles (A3): likewise
+
     rng_ = Rng(seed, node, Rng::kInitTick - life); // life 0: exactly as before Phase 4
     const u32 n = p->size;
 
@@ -1185,6 +1188,8 @@ bool Soup::go_dormant(u32 b, u64 offline_until, u32 grace) {
             ++frozen_bare_;
         return false;
     }
+    if (prof_) // behaviour profiles (A3): a followed body's sample ends here, holdings read first
+        prof_->on_dormant(*this, b);
     Dormant d = {};
     d.on = 1;
     d.dwell = p_->dormant_dwell;
@@ -2476,6 +2481,8 @@ void Soup::tick_first(u64 tick) {
 
     prepare_heat();
     prepare_gpu();
+    if (prof_) // behaviour profiles (A3): a round's picks, from the observer's own stream (observe-only)
+        prof_->on_tick_start(*this, tick);
 
     // Fixed cyclic order (creation order) with a start rotated by the node RNG,
     // so no body has a permanent first-mover edge (7.1 D). Bodies born during

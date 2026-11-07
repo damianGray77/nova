@@ -102,6 +102,17 @@
 //   fast_held                         fast memory codons held, now
 //   fast_allocs, fast_alloc_fails     ALLOCs of fast memory (resource 7) that
 //                                     claimed a block; that found no room
+// then the behaviour profiles' live census (docs/analysis-plan.md A3,
+// profile.h; gauges: the last whole sampling round's, zeros before the first
+// and with profile.enabled off):
+//   prof_samples                      samples in the round
+//   role_predator, role_parasite,     ... by the fixed rules (profile.h
+//   role_repairer, role_signaller,    role_by_rules), one role each
+//   role_wanderer, role_copier,
+//   role_idle
+//   work_len                          their mean working length: genome codons
+//                                     that ran (rounded)
+//   action_kinds_x100                 their mean kinds of action used, x 100
 // and last, as always, the two floating-point columns:
 //   compress                          soup compressibility (compress.h), mean
 //                                     over nodes: ~1 random, lower = repetitive
@@ -119,16 +130,13 @@ void csv_field(TextBuf& out, Str s);
 // viewer's charts (Phase 6) so both show exactly the same numbers.
 // The disasters' columns (docs/disasters-plan.md X7): 22 sums, then 4 gauges.
 inline constexpr u32 kStatsDisasterSums = 22, kStatsDisasterColumns = kStatsDisasterSums + 4;
-// The memory tiers' (docs/world-plan.md W3), after them: a gauge, then 2 sums,
-// the last integer columns.
 inline constexpr u32 kStatsTierColumns = 3;
-inline constexpr u32 kStatsIntColumns = 126; // tick_first .. live_nodes, Phase 8's warp, Phase 9's action,
-                                             // Phase 9c's thread, Phase 10's, dormancy's, the disk tiers',
-                                             // founders by origin's, the disasters' and the memory tiers' columns
-inline constexpr u32 kStatsColumns = kStatsIntColumns + 2; // then compress, ambient
-inline constexpr u32 kStatsDisasterFirst =
-    kStatsIntColumns - kStatsTierColumns - kStatsDisasterColumns; // (97: surges)
-inline constexpr u32 kStatsTierFirst = kStatsIntColumns - kStatsTierColumns; // (123: fast_held)
+inline constexpr u32 kStatsProfileColumns = 10;
+inline constexpr u32 kStatsDisasterFirst = 97;
+inline constexpr u32 kStatsTierFirst = kStatsDisasterFirst + kStatsDisasterColumns;
+inline constexpr u32 kStatsProfileFirst = kStatsTierFirst + kStatsTierColumns;
+inline constexpr u32 kStatsIntColumns = kStatsProfileFirst + kStatsProfileColumns;
+inline constexpr u32 kStatsColumns = kStatsIntColumns + 2; // compress, ambient
 const char* stats_column(u32 i);
 // Index of a column by name, or kStatsColumns if there is none.
 u32 stats_column_index(Str name);

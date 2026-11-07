@@ -636,6 +636,7 @@ struct SoupTally {
 };
 
 class Lineages; // lineage.h: the replicator detector, a pure observer
+class Profiles; // profile.h: behaviour profiles (docs/analysis-plan.md A3), a pure observer too
 
 // What a dispersing daughter's lineage tag carries (Phase 3): the detector
 // adopts her on arrival, so lineages span nodes.
@@ -992,6 +993,13 @@ class Soup {
     // with or without it. Not part of the world state.
     void set_observer(Lineages* obs);
     Lineages* observer() const { return obs_; }
+    // --- behaviour profiles (docs/analysis-plan.md A3; profile.h) -----------
+    // The node's sampler, or nullptr. Like the detector it only watches: it
+    // picks bodies from its own stream and reads what they do, and nothing it
+    // does feeds back into the soup. Not part of the world state.
+    void set_profiles(Profiles* p) { prof_ = p; }
+    Profiles* profiles() const { return prof_; }
+    // --- end behaviour profiles ---------------------------------------------
     u64 current_tick() const { return tick_; }
     usize block_slots() const { return blocks_.size(); }
 
@@ -1381,6 +1389,7 @@ class Soup {
 
     // per-tick working state (not part of the world state)
     Lineages* obs_ = nullptr;
+    Profiles* prof_ = nullptr; // behaviour profiles (A3): an observer, like obs_
     u64 tick_ = 0;
     SoupTally tally_ = {};
     double flaw_left_ = 0, copy_left_ = 0; // hazard countdowns, redrawn every tick

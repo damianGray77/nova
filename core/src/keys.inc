@@ -49,6 +49,11 @@ NOVA_TEXT("output.lineages", "", 0, "Run and output", "Lineages", "",
           "Path of the lineages CSV (empty = off).")
 NOVA_TEXT("output.result", "", 0, "Run and output", "Result", "",
           "Path of result.txt, what a harness needs to know about the finished run (empty = off).")
+// Behaviour profiles (docs/analysis-plan.md A3): their two files.
+NOVA_TEXT("output.profiles", "", 0, "Run and output", "Profiles", "profile.enabled",
+          "Path of profiles.csv, one row per behaviour sample: what a followed body did (empty = off).")
+NOVA_TEXT("output.arrivals", "", 0, "Run and output", "Arrivals", "profile.arrivals",
+          "Path of arrivals.csv, the arrivals placed during each sampling round (empty = off).")
 
 // ---------------------------------------------------------------------------
 // World and land
@@ -704,6 +709,19 @@ NOVA_WHOLE("detect.gate_alive", 2, 1, 1000000, 0, "Detection and lineages", "Gat
            "... and this many members alive at once.")
 NOVA_WHOLE("detect.defended", 3, 1, 1000000000, 0, "Detection and lineages", "Defended", "detect.enabled",
            "The defended milestone: a gated lineage whose members made this many attacks fail by changing in time.")
+// Behaviour profiles (docs/analysis-plan.md A3; profile.h): an observer like the
+// detector, so it never changes a world (World::init reads these).
+NOVA_FLAG("profile.enabled", true, 0, "Detection and lineages", "Behaviour profiles", "",
+          "Follow a few bodies per node now and then and record what they do: profiles.csv and the role columns. "
+          "Observe-only.")
+NOVA_WHOLE("profile.every", 1000, 1, 1000000000, 0, "Detection and lineages", "Profile every", "profile.enabled",
+           "Ticks between sampling rounds.")
+NOVA_WHOLE("profile.per_node", 4, 1, 4096, 0, "Detection and lineages", "Profiles per node", "profile.enabled",
+           "Bodies each node picks to follow every round, from the observer's own random stream.")
+NOVA_WHOLE("profile.ticks", 50, 1, 1000000000, 0, "Detection and lineages", "Profile length", "profile.enabled",
+           "Ticks each picked body is followed, or until it dies or goes dormant (at most profile.every).")
+NOVA_FLAG("profile.arrivals", true, 0, "Detection and lineages", "Arrivals log", "profile.enabled",
+          "Log the arrivals placed during each round's ticks (output.arrivals), for the moving-together measure.")
 
 // ---------------------------------------------------------------------------
 // Budgets: settings from the machine (budget.h)

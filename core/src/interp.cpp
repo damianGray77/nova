@@ -18,6 +18,7 @@
 #include <cstring> // memcpy
 
 #include "nova/lineage.h"
+#include "nova/profile.h" // behaviour profiles (A3): a followed thread's instructions, observe-only
 #include "nova/soup.h"
 
 namespace nova {
@@ -37,6 +38,14 @@ struct Exec {
     u32 wslot = kNone; // Phase 9b: the warp, for its host instruction
     // Phase 9c: the costs of the kind of core it runs on (nullptr: a P-core's, the table itself).
     const CostTable* ct = nullptr;
+    // --- behaviour profiles (docs/analysis-plan.md A3; profile.h) ------------
+    // The sample following this thread's body, or nullptr; step<true> records
+    // each instruction into it. self_load: the last DISK load wrote into the
+    // block the thread runs in. Read only by the sample: nothing in the world
+    // depends on either.
+    ProfileSample* prof = nullptr;
+    bool self_load = false;
+    // --- end behaviour profiles ------------------------------------------------
     const CostTable& costs() const { return ct ? *ct : p.cost; }
     // Whether an instruction starts an action rather than happening at once.
     bool acts() const { return p.cost.timed && !resolving && (warp ? wslot != kNone : ci != kNone); }
@@ -677,6 +686,7 @@ struct Exec {
             }
             ++s.tally_.disk_loads;
             s.tally_.archive_loads += na ? 1 : 0; // W4
+            self_load = into_self; // behaviour profiles (A3): a repair, for a followed thread's sample
             if (s.obs_ && into_self)
                 s.obs_->on_disk_load(s, c.block, s.tick_);
             return true;
@@ -2203,7 +2213,9 @@ struct Exec {
         return false;
     }
 
-    u32 step() {
+    // kProf (behaviour profiles, A3): the same step, also recording what the
+    // instruction did into `prof`. The world sees exactly the same step.
+    template <bool kProf = false> u32 step() {
         const u32 ip = c.ip;
         if (!resolving) { // (an action's end is the same instruction, counted once)
             ++c.executed;
@@ -2213,6 +2225,9 @@ struct Exec {
         }
         if (!p.open_membrane) {
             if (!own(ip)) { // not my code: private code can't be executed
+                if constexpr (kProf) // (A3)
+                    if (!resolving)
+                        profile_foreign(*prof);
                 fault();
                 c.ip = next_ip(ip);
                 return p.cost.timed ? costs().alu : 1;
@@ -2228,7 +2243,14 @@ struct Exec {
         t_ps = 0;
         t_mem = 0;                                         // memory tiers (W3)
         const u64 own = p.cost.timed ? own_part(op) : 0;   // (W3: with its heads as they are before it runs)
+        [[maybe_unused]] ProfileProbe probe; // (A3: filled only by step<true>)
+        if constexpr (kProf) {
+            probe.before(s.tally_, c.bx, next, s.owner_[ip]);
+            self_load = false;
+        }
         bool ok = exec_op(op, ip, &next, &cost);
+        if constexpr (kProf) // (A3) what it did, before anything below can change ok
+            profile_step(*prof, probe, s.tally_, op, ip, ok, next, c.cx, resolving != nullptr, self_load);
         if (deferred) // Phase 9: it started an action; the CPU waits here, at it, until its end
             return 0;
         if (p.cost.timed) { // Phase 9: world time (the GPU verb adds its devices' own, 9b)
@@ -2720,6 +2742,8 @@ i64 Soup::run_cpu(u32 ci, i64 quota, u8 kind) {
     if (kind == kKindE) // Phase 9c: on an E-core, at its costs
         e.ct = &p_->ecost;
     e.tiers_setup(); // memory tiers (W3): this core's prices per tier
+    // Behaviour profiles (A3): a followed body's thread runs through step<true>.
+    e.prof = prof_ ? prof_->watching(*this, e.c.body) : nullptr;
     i64 used = 0;
     const u64 ran_before = e.c.executed; // Phase 10: a body that runs isn't frozen
     // Phase 9: an action under way. Before its end the CPU waits out the tick
@@ -2739,7 +2763,10 @@ i64 Soup::run_cpu(u32 ci, i64 quota, u8 kind) {
                 actions_[j] = actions_[j + 1];
             actions_.resize(actions_.size() - 1);
             e.resolving = &act;
-            e.step();
+            if (e.prof) // (A3)
+                e.step<true>();
+            else
+                e.step();
             e.resolving = nullptr;
             if (e.c.err)
                 ++tally_.actions_failed;
@@ -2747,8 +2774,12 @@ i64 Soup::run_cpu(u32 ci, i64 quota, u8 kind) {
                 ++tally_.actions_landed;
         }
     }
-    while (used < quota && !e.c.halted && !e.c.yielded && !e.deferred)
-        used += e.step();
+    if (e.prof) // behaviour profiles (A3): the same loop, recording
+        while (used < quota && !e.c.halted && !e.c.yielded && !e.deferred)
+            used += e.step<true>();
+    else
+        while (used < quota && !e.c.halted && !e.c.yielded && !e.deferred)
+            used += e.step();
     if (e.deferred && used < quota && contact_action(actions_.back()))
         used = quota; // the rest of the tick goes on the contact; a wait is idle (9c)
     if (e.c.executed != ran_before && e.c.body < last_ran_.size())
@@ -2956,7 +2987,15 @@ bool Soup::host_step(u32 w, const Action* resolving) {
     u32 next = e.next_ip(minip);
     u32 cost = 1;
     const Op op = resolving ? static_cast<Op>(resolving->op) : p_->table.op[mem_[minip]];
+    // Behaviour profiles (A3): a followed body's warp host instruction is
+    // recorded as a thread's is (observe-only).
+    ProfileSample* const prof = prof_ ? prof_->watching(*this, body) : nullptr;
+    ProfileProbe probe = {};
+    if (prof)
+        probe.before(tally_, e.c.bx, next, block);
     const bool ok = e.exec_op(op, minip, &next, &cost);
+    if (prof)
+        profile_step(*prof, probe, tally_, op, minip, ok, next, e.c.cx, resolving != nullptr, e.self_load);
     if (e.deferred) { // Phase 9b: an action began; the warp waits at the instruction until its end
         wuntil_[w] = actions_.back().end;
         warps_[w].wait = 0;

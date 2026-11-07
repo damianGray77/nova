@@ -51,6 +51,11 @@ add_library(nova_core STATIC
     src/analysis/tree.cpp
     src/analysis/scores.cpp
     src/analysis/search.cpp
+    # Behaviour profiles (A3): the in-run sampler, and the roles and group
+    # behaviour read from its files.
+    src/profile.cpp
+    src/analysis/roles.cpp
+    src/analysis/groups.cpp
 )
 add_library(nova::core ALIAS nova_core)
 

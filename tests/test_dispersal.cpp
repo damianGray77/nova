@@ -572,9 +572,10 @@ void outputs() {
                        "burnout_dormant,burnout_graced,burnout_deaths,disk_failures,disk_lost,storms_formed,strikes,"
                        "strike_codons,episodes,false_alarms,spurious_faults,static_flips,sounds,sound_amp,"
                        "cores_offline,rebooting,storms,episodes_active,"
-                       // the memory tiers' (docs/world-plan.md W3), the last integer columns
-                       "fast_held,fast_allocs,fast_alloc_fails,compress,ambient\n") !=
-          nullptr);
+                         "fast_held,fast_allocs,fast_alloc_fails,"
+                       // behaviour profiles (docs/analysis-plan.md A3), the last integer columns
+                       "prof_samples,role_predator,role_parasite,role_repairer,role_signaller,role_wanderer,"
+                       "role_copier,role_idle,work_len,action_kinds_x100,compress,ambient\n") != nullptr);
     CHECK(read_file(nodes, &bytes));
     bytes.push(0);
     text = reinterpret_cast<const char*>(bytes.data());

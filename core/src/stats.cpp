@@ -51,6 +51,9 @@ const char* const kColumns[kStatsColumns] = {
     "cores_offline", "rebooting", "storms", "episodes_active",
     // memory tiers (docs/world-plan.md W3): a gauge, then two sums
     "fast_held", "fast_allocs", "fast_alloc_fails",
+    // behaviour profiles (docs/analysis-plan.md A3): the last whole round's census (gauges)
+    "prof_samples", "role_predator", "role_parasite", "role_repairer", "role_signaller", "role_wanderer",
+    "role_copier", "role_idle", "work_len", "action_kinds_x100",
     // the two floating-point columns, last as always
     "compress",     "ambient"};
 // The first 39 tally fields fill columns 3-41; Phase 8's five go after
@@ -150,7 +153,7 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
     const usize nt = sizeof tail / sizeof tail[0];
     static_assert(3 + kTallyEarly + sizeof tail / sizeof tail[0] + kTallyWarp + 2 + kTallyAction + kTallyThread + 1 +
                           kTallyLife + kTallyDormant + 2 + 1 + kTallyArchive + kFoundedColumns + kStatsDisasterColumns +
-                          kStatsTierColumns ==
+                          kStatsTierColumns + kStatsProfileColumns ==
                       kStatsIntColumns,
                   "stats row shape");
     for (usize i = 0; i < nt; ++i)
@@ -203,6 +206,17 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
     for (usize i = 0; i < kTallyTier; ++i)
         v[mz + 1 + i] = t[kTallyEarly + kTallyWarp + kTallyAction + kTallyThread + kTallyLife + kTallyDormant +
                           kTallyArchive + kTallyDisaster + i];
+    // Behaviour profiles (A3): the last whole round's census, by the fixed rules.
+    {
+        static_assert(kRoleCount == 7 && kStatsProfileColumns == 3 + kRoleCount, "the profiles' columns");
+        const ProfileCensus& pc = w.profile_census();
+        u64* pv = v + kStatsProfileFirst;
+        pv[0] = pc.samples;
+        for (u32 r = 0; r < kRoleCount; ++r) // (kRole... order: the columns' order)
+            pv[1 + r] = pc.role[r];
+        pv[1 + kRoleCount] = pc.samples ? (pc.work_len + pc.samples / 2) / pc.samples : 0;
+        pv[2 + kRoleCount] = pc.samples ? (pc.kinds * 100 + pc.samples / 2) / pc.samples : 0;
+    }
     marks->links = links;
     marks->inject = inject;
     marks->gpu = gpu;

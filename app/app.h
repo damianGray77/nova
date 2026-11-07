@@ -24,6 +24,7 @@ struct RunKeys {
     TextBuf budget_threads; // budget.threads: all | all_but_one (default) | N | P% (Phase 7b)
     TextBuf priority;       // budget.priority: below_normal (default) | normal | idle
     TextBuf csv, nodes, signals, replay, snap, bank, lin, result;
+    TextBuf prof, arr; // output.profiles, output.arrivals (behaviour profiles, A3)
 };
 
 // Reads the keys (marking them used); range problems go to cfg.fail.

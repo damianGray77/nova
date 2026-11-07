@@ -7,6 +7,8 @@
 //                     [--pool N] [--seed S] [--threads N] [--out DIR]
 //   nova analyse scores <run> [--body-floor N] [--threshold BITS]
 //   nova analyse lineages <run> [--top K]
+//   nova analyse roles <run> [--window N] [--kmin K] [--kmax K] [--seed S] [--out DIR]
+//   nova analyse groups <run> [--gap N] [--block N] [--shuffles N] [--seed S] [--out DIR]
 //   nova search <search file> [--dry-run]
 //
 // The tools only read a run's files, with shared access, so a live run can be
@@ -36,6 +38,8 @@ int analyse_usage() {
             "                    [--seed S] [--threads N] [--out DIR]\n"
             "  nova analyse scores <run> [--body-floor N] [--threshold BITS]\n"
             "  nova analyse lineages <run> [--top K]   (the lineages with the most saved genotypes)\n"
+            "  nova analyse roles <run> [--window N] [--kmin K] [--kmax K] [--seed S] [--out DIR]\n"
+            "  nova analyse groups <run> [--gap N] [--block N] [--shuffles N] [--seed S] [--out DIR]\n"
             "  nova search <search file> [--dry-run]\n"
             "  (output goes to --out, by default analysis\\<run folder's name>; never into the run)\n");
     return 2;
@@ -85,6 +89,8 @@ struct Opts {
     double threshold = 3.0, body_floor = 0;
     bool lineage_given = false, top_given = false;
     u64 lineage = 0;
+    u64 kmin = 2, kmax = 8, gap = 2, block = 50, shuffles = 200; // roles, groups (A3)
+    bool window_given = false;
 };
 
 bool parse_opts(int argc, char** argv, int from, Opts* o) {
@@ -99,7 +105,17 @@ bool parse_opts(int argc, char** argv, int from, Opts* o) {
         if (strcmp(a, "--out") == 0)
             o->out = v.p;
         else if (strcmp(a, "--window") == 0)
-            ok = parse_u64(v, &o->window) && o->window > 0;
+            ok = o->window_given = parse_u64(v, &o->window) && o->window > 0;
+        else if (strcmp(a, "--kmin") == 0) // roles (A3)
+            ok = parse_u64(v, &o->kmin) && o->kmin >= 1 && o->kmin <= 15;
+        else if (strcmp(a, "--kmax") == 0)
+            ok = parse_u64(v, &o->kmax) && o->kmax >= 1 && o->kmax <= 15;
+        else if (strcmp(a, "--gap") == 0) // groups (A3)
+            ok = parse_u64(v, &o->gap) && o->gap <= 1000000;
+        else if (strcmp(a, "--block") == 0)
+            ok = parse_u64(v, &o->block) && o->block >= 1 && o->block <= 1000000000;
+        else if (strcmp(a, "--shuffles") == 0)
+            ok = parse_u64(v, &o->shuffles) && o->shuffles >= 10 && o->shuffles <= 100000;
         else if (strcmp(a, "--top") == 0)
             ok = o->top_given = parse_u64(v, &o->top) && o->top <= 1000;
         else if (strcmp(a, "--threshold") == 0)
@@ -241,6 +257,68 @@ int analyse_scores(const char* run, const Opts& op) {
     return 0;
 }
 
+// --- behaviour profiles (docs/analysis-plan.md A3) ----------------------------------
+
+int analyse_roles(const char* run, const Opts& op) {
+    RolesOptions o;
+    o.window = op.window_given ? op.window : 10000;
+    o.kmin = static_cast<u32>(op.kmin);
+    o.kmax = static_cast<u32>(op.kmax);
+    o.seed = op.seed;
+    if (o.kmax < o.kmin) {
+        fprintf(stderr, "nova analyse roles: --kmax must be at least --kmin\n");
+        return 2;
+    }
+    TextBuf dir;
+    if (!out_dir(run, op.out, &dir))
+        return 1;
+    printf("nova analyse: roles of %s (k-means, k in %u..%u by the silhouette; windows of %llu ticks)\n", run, o.kmin,
+           o.kmax, static_cast<unsigned long long>(o.window));
+    fflush(stdout);
+    const double t0 = now_ms();
+    RolesReport r;
+    TextBuf err;
+    if (!roles_analyse(run, o, &r, &err)) {
+        fprintf(stderr, "nova analyse: %s\n", err.c_str());
+        return 1;
+    }
+    TextBuf text;
+    roles_summary(r, text);
+    fwrite(text.view().p, 1, text.size(), stdout);
+    printf("nova analyse: %.1f s\n", (now_ms() - t0) / 1000.0);
+    const bool ok = write_out(dir, "roles.txt", text.view()) && write_out(dir, "roles_clusters.csv", r.clusters_csv.view()) &&
+                    write_out(dir, "roles_census.csv", r.census_csv.view()) &&
+                    write_out(dir, "roles_complexity.csv", r.complexity_csv.view());
+    return ok ? 0 : 1;
+}
+
+int analyse_groups(const char* run, const Opts& op) {
+    GroupOptions o;
+    o.gap = static_cast<u32>(op.gap);
+    o.block = static_cast<u32>(op.block);
+    o.shuffles = static_cast<u32>(op.shuffles);
+    o.seed = op.seed;
+    TextBuf dir;
+    if (!out_dir(run, op.out, &dir))
+        return 1;
+    printf("nova analyse: group behaviour in %s\n", run);
+    fflush(stdout);
+    const double t0 = now_ms();
+    GroupsReport r;
+    TextBuf err;
+    if (!groups_analyse(run, o, &r, &err)) {
+        fprintf(stderr, "nova analyse: %s\n", err.c_str());
+        return 1;
+    }
+    TextBuf text, csv;
+    groups_summary(r, o, text);
+    groups_csv(r, csv);
+    fwrite(text.view().p, 1, text.size(), stdout);
+    printf("nova analyse: %.1f s\n", (now_ms() - t0) / 1000.0);
+    const bool ok = write_out(dir, "groups.txt", text.view()) && write_out(dir, "groups.csv", csv.view());
+    return ok ? 0 : 1;
+}
+
 } // namespace
 
 // nova analyse <task> <run folder> [options]
@@ -261,6 +339,10 @@ int cmd_analyse(int argc, char** argv) {
         return analyse_tree(run, o);
     if (strcmp(argv[2], "scores") == 0)
         return analyse_scores(run, o);
+    if (strcmp(argv[2], "roles") == 0) // behaviour profiles (A3)
+        return analyse_roles(run, o);
+    if (strcmp(argv[2], "groups") == 0)
+        return analyse_groups(run, o);
     if (strcmp(argv[2], "lineages") == 0) {
         TextBuf out, err;
         if (!top_lineages(run, static_cast<u32>(o.top_given ? o.top : 20), out, &err)) {
