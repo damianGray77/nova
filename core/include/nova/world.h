@@ -110,6 +110,9 @@ struct StepProfile {
     // the device's round (upload, the kernel, download) -- both outside update.
     double warp_cpu = 0, warp_gpu = 0;
     double warp_pack = 0, warp_host = 0; // the two halves of warp_cpu
+    // Each node's tick by part (Soup::Timing), thread-seconds summed over the
+    // nodes: they run in parallel, so these add up to more than the wall time.
+    double n_first = 0, n_bodies = 0, n_pack = 0, n_ref = 0, n_unpack = 0, n_host = 0, n_second = 0;
 };
 
 enum class KnobResult { ok, unknown_key, not_live, bad_value };
@@ -136,7 +139,7 @@ class World {
     // One tick: parallel update over all nodes, barrier, serial delivery.
     void step(ThreadPool& pool);
     // Times each part of every step into *p (nullptr = off).
-    void set_profile(StepProfile* p) { prof_ = p; }
+    void set_profile(StepProfile* p); // (each node times its own parts too)
     StepProfile* profile() const { return prof_; }
 
     // Live knobs (demo.* in the demo model; spark.rate, spark.grant,
@@ -268,18 +271,23 @@ class World {
     double warp_compile_ms() const { return warp_compile_ms_; }
     const WarpGpuStats& warp_gpu_stats() const { return warp_gpu_.stats(); }
     // warp.device = auto: the GPU and the CPU reference each take a share of
-    // the nodes every round, at once. A node goes to the CPU when its
-    // longest body ran more than warp_limit() steps last round (the GPU runs
-    // a body's steps one after another); the limit is searched for, round by
-    // round, as the one that makes a round quickest per warp step. Node-rounds
-    // run on each so far. Auto also times whole
-    // ticks run so against ticks without the GPU at all (the plain reference,
-    // as warp.device = cpu), and runs the quicker; warp_plain_ticks() counts
-    // the ticks it ran without the GPU.
+    // the bodies every round, at once. A body goes to the CPU when its last
+    // first round ran more than warp_limit() steps (the GPU runs a body's
+    // steps one after another); the limit is searched for, round by round, as
+    // the one that makes a round quickest per warp step. Body-rounds run on
+    // each so far. Auto also times whole ticks run so against ticks without
+    // the GPU at all (the plain reference, as warp.device = cpu), and runs the
+    // quicker; warp_plain_ticks() counts the ticks it ran without the GPU.
     bool warp_auto() const { return warp_auto_; }
     u32 warp_limit() const { return warp_limit_; }
-    u64 warp_gpu_nodes() const { return warp_gpu_nodes_; }
-    u64 warp_ref_nodes() const { return warp_ref_nodes_; }
+    u64 warp_gpu_bodies() const { return warp_gpu_bodies_; }
+    u64 warp_ref_bodies() const { return warp_ref_bodies_; }
+    // The split's model (seconds a GPU serial step, seconds a reference step
+    // on one thread; 0 until measured), and the CPU threads' wall time on
+    // their share of the GPU rounds so far, in seconds.
+    double warp_model_gstep() const { return warp_gstep_; }
+    double warp_model_hstep() const { return warp_hstep_; }
+    double warp_ref_wall() const { return warp_ref_wall_; }
     u64 warp_plain_ticks() const { return warp_plain_ticks_; }
     u64 warp_split_ticks() const { return warp_auto_ticks_ - warp_plain_ticks_; }
     // The GPU failed while it held warps' lanes: the world stopped (it can't
@@ -298,8 +306,9 @@ class World {
 
     // Snapshot support. Call load_state() on a world freshly init()ed from the
     // snapshot's config; it replaces tick, graph, pools and soups.
+    // `version`: the snapshot format's (snapshot.h); older ones lack a part.
     void save_state(ByteWriter& w) const;
-    bool load_state(ByteReader& r, TextBuf* err);
+    bool load_state(ByteReader& r, TextBuf* err, u32 version = 2);
 
   private:
     struct Tally {
@@ -519,10 +528,14 @@ class World {
     double warp_stride_ = 1.0; //   and the last round's cost (seconds a warp step) and tick
     double warp_cost_ = 0;
     u64 warp_cost_tick_ = 0;
+    bool warp_climb_fresh_ = true; // auto: the next GPU round follows a tick without it (or a start)
     u64 warp_auto_ticks_ = 0;  // auto: ticks decided so far, and how many ran without the GPU
     u64 warp_plain_ticks_ = 0;
     double warp_tick_s_[2] = {0, 0}; // auto: recent seconds a tick, [0] with the GPU, [1] without
     u32 warp_last_plain_ = 2;        // auto: how the last tick ran (2: none yet)
+    u32 warp_run_len_ = 0;           // auto: ticks run that way in a row
+    u32 warp_probe_left_ = 0;        // auto: ticks still to run of a probe of the other way
+    bool warp_probe_plain_ = false;  // ... and which way it is
     bool warp_go_plain();            // auto: this tick without the GPU?
     bool warp_failed_ = false;
     bool warp_verifying_ = false; // this round also runs on the reference (warp.verify)
@@ -530,24 +543,43 @@ class World {
     u32 warp_round_ = 0;
     double warp_compile_ms_ = 0;
     u64 warp_gpu_rounds_ = 0, warp_ref_rounds_ = 0, warp_verified_ = 0, warp_mismatches_ = 0;
-    u64 warp_gpu_nodes_ = 0, warp_ref_nodes_ = 0;
+    u64 warp_gpu_bodies_ = 0, warp_ref_bodies_ = 0;
     TextBuf warp_notes_;
     Array<u8> warp_active_;      // per node: still has warps to run this tick
-    Array<u8> warp_on_gpu_;      // per node: the GPU runs its round
+    Array<u8> warp_on_gpu_;      // per node: the GPU runs some of its bodies this round
     Array<WarpJob> warp_jobs_;
     Array<u32> warp_job_node_;
     Array<u32> warp_send_;       // the jobs' lanes to send (warp slots)
+    Array<u32> warp_job_recs_, warp_job_words_; // the jobs' records (the bodies the GPU runs) and their sizes
+    Array<u64> warp_vstate_;     // warp.verify: (node << 40 | slot << 8 | lane state) before the round
     Array<WarpFetch> warp_fetch_;
     Array<u32> warp_fetch_node_;
     Array<u32> warp_save_img_, warp_save_lanes_; // warp.verify: the packed round, before the GPU ran it
     Array<u64> warp_save_off_;   // per job: where its image and lanes start in those
     void warp_open(Config& cfg);
-    void warp_step(ThreadPool& pool);
+    void warp_step(ThreadPool& pool, bool use_gpu = true); // use_gpu false: every node on the reference
     void warp_fail(Str why);
     bool warp_fetch(Array<WarpFetch>& list, Array<u32>& nodes);
     static void warp_first_task(void* ctx, u32 node);
     static void warp_pack_task(void* ctx, u32 node);
     static void warp_ref_task(void* ctx, u32 node);
+    // The reference's share of a round, record by record over the threads
+    // (a node's records are independent): (node << 32 | record), the
+    // heaviest nodes first, and each one's time when profiling.
+    Array<u64> warp_ref_list_;
+    Array<double> warp_ref_time_;
+    Array<u8> warp_got_; // scratch: which waiting warps' lanes came back with their round
+    void warp_ref_build();
+    // auto's split from a model (world.cpp): the GPU's seconds a serial step
+    // and the reference's a warp step on one thread (0 until measured), the
+    // limit they give, and their measuring after a round.
+    double warp_gstep_ = 0, warp_hstep_ = 0, warp_ref_wall_ = 0;
+    u32 warp_gpu_guess_ = 0; // the longest chain guessed among the bodies the GPU took this tick
+    Array<u64> warp_chains_; // scratch: the bodies' chains
+    u32 warp_model_limit(u32 threads);
+    bool warp_model_pick(u32 threads, double rest, u32* limit);
+    void warp_model_measure(u32 round, bool cpu_ran);
+    static void warp_ref_rec_task(void* ctx, u32 i);
     static void warp_unpack_task(void* ctx, u32 node);
     static void warp_host_task(void* ctx, u32 node);
     static void warp_second_task(void* ctx, u32 node);

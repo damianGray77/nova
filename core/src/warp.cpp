@@ -14,16 +14,67 @@
 // Nothing in the soup changes while warps run, and they touch only their own
 // body's memory, so every record can run independently and in any order.
 #include <cmath>
+#include <cstdio> // snprintf (the debugging trace)
 #include <cstring>
 
 #include "nova/lineage.h"
+#include "nova/pool.h" // clock_seconds (profiling)
 #include "nova/soup.h"
 
 #include "warp_layout.inc"
 
 namespace nova {
 
+namespace {
+// Profiling: adds the time from here to the end of the scope to *slot (when on).
+struct Lap {
+    double* slot;
+    double t0;
+    Lap(bool on, double* s) : slot(on ? s : nullptr), t0(on ? clock_seconds() : 0) {}
+    ~Lap() {
+        if (slot)
+            *slot += clock_seconds() - t0;
+    }
+};
+} // namespace
+
+
 // --- the interpreter, compiled as C++ --------------------------------------------
+
+namespace {
+
+// Debugging (warp.verify's account of a difference): one lane's instructions
+// as the reference runs them, a line each. One thread, on demand.
+struct WarpTrace {
+    bool on = false;
+    u32 lane0 = 0, lane = 0;
+    TextBuf* out = nullptr;
+};
+WarpTrace g_trace;
+
+void warp_trace(u32 lane0, u32 l, u32 step, u32 ip, u32 op, const Lane& L) {
+    if (!g_trace.on || lane0 != g_trace.lane0 || l != g_trace.lane || !g_trace.out)
+        return;
+    char line[256];
+    snprintf(line, sizeof line,
+             "    step %u ip %u %s -> ax %08x bx %08x cx %08x dx %08x sp %u err %u errs %u halted %u yielded %u\n",
+             step, ip, op < kOpCount ? op_name(static_cast<Op>(op)) : "(not its code)", L.ax, L.bx, L.cx, L.dx, L.sp,
+             L.err, L.errs, L.halted, L.yielded);
+    g_trace.out->append(line);
+}
+
+} // namespace
+
+void warp_trace_begin(u32 lane0, u32 lane, TextBuf* out) {
+    g_trace.on = true;
+    g_trace.lane0 = lane0;
+    g_trace.lane = lane;
+    g_trace.out = out;
+}
+
+void warp_trace_end() {
+    g_trace = WarpTrace{};
+}
 
 namespace {
 
@@ -64,6 +115,7 @@ struct WarpVM {
             (x) = (v);                                                                                                 \
     } while (0)
 #define W_LOOP
+#define W_TRACE(wr, l, step, ip, op, L) warp_trace(IMG((wr) + WW_LANE0), (l), (step), (ip), (op), (L))
 #define LANE_T Lane
 #define STACK_GET(L, i) ((L).stack[(i)])
 #define STACK_SET(L, i, v) ((L).stack[(i)] = (v))
@@ -92,6 +144,7 @@ struct WarpVM {
 #undef GS_ADD
 #undef GS_MAX
 #undef W_LOOP
+#undef W_TRACE
 };
 
 // The shared source names Ops by number; they must be nova::Op's.
@@ -434,10 +487,13 @@ void Soup::build_warp_consts() {
 // --- a round ----------------------------------------------------------------------
 
 bool Soup::warp_pack(u32 round) {
+    Lap lap(timing_on_, &timing_.pack);
     wimg_.clear();
     wrec_.clear();
     wbody_.clear();
     wwarp_.clear();
+    wrec_gpu_.clear();
+    wround_ = round;
     const u32 L = p_->warp_lanes;
     const usize n = sched_n_;
     if (n == 0 || warps_.size() == free_warps_.size())
@@ -639,10 +695,13 @@ bool Soup::warp_pack(u32 round) {
         wrec_.push(rec);
         wbody_.push(b);
     }
+    wrec_gpu_.resize(wrec_.size()); // none on the GPU until the world says so
+    wrec_gpu_.fill(0);
     return !wrec_.empty();
 }
 
 void Soup::warp_run_ref() {
+    Lap lap(timing_on_, &timing_.ref);
 #ifndef NDEBUG
     { // the reference needs the round's lanes here, not only on the GPU
         const u32* I = wimg_.data();
@@ -659,13 +718,27 @@ void Soup::warp_run_ref() {
         vm.w_run_body(wrec_[i]);
 }
 
-void Soup::warp_unpack(bool on_gpu) {
+// One record of the round on the reference (independent of the others: it
+// writes only its own record and its own warps' lanes).
+void Soup::warp_run_record(usize i) {
+    WarpVM vm;
+    vm.g_img = wimg_.data();
+    vm.g_cst = wcst_.data();
+    vm.g_lanes = lanes_.data();
+    vm.w_run_body(wrec_[i]);
+}
+
+void Soup::warp_unpack(bool all_on_gpu) {
+    Lap lap(timing_on_, &timing_.unpack);
     const u32 L = p_->warp_lanes;
     const u32* I = wimg_.data();
     const bool stamps = !stamp_.empty();
     u32 chain = 0;
+    if (wround_ == 0 && wbody_chain_.size() < bodies_.size())
+        wbody_chain_.resize(bodies_.size());
     for (usize r = 0; r < wrec_.size(); ++r) {
         const u32 rec = wrec_[r], b = wbody_[r];
+        const bool on_gpu = all_on_gpu || (r < wrec_gpu_.size() && wrec_gpu_[r]);
         u32 body_steps = 0;
         const u32 nblk = I[rec + WB_NBLK], blk = I[rec + WB_BLK];
         for (u32 j = 0; j < nblk; ++j) {
@@ -723,6 +796,13 @@ void Soup::warp_unpack(bool on_gpu) {
             body_steps += steps;
         }
         chain = body_steps > chain ? body_steps : chain;
+        // The split's guess at its next rounds' length (later rounds run a few
+        // freed warps): the peak, decaying a quarter a round, since a body
+        // whose warps waited on the host one tick runs in full the next.
+        if (wround_ == 0) {
+            const u32 held = wbody_chain_[b] - wbody_chain_[b] / 4;
+            wbody_chain_[b] = body_steps > held ? body_steps : held;
+        }
         // Warp work heats the body's GPU units as block ops do: in element-ops.
         if (gpu_count(b) && used_all) {
             const double el = static_cast<double>(used_all) * p_->gpu_elements / p_->warp_capacity;
@@ -761,6 +841,7 @@ void Soup::resolve_warp_actions() {
 }
 
 void Soup::warp_host(u32 round) {
+    Lap lap(timing_on_, &timing_.host);
     (void)round;
     const u32* I = wimg_.data();
     const u32 L = p_->warp_lanes;

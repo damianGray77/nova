@@ -7,6 +7,8 @@
 //     reads are fine (their value is masked off when unused).
 //   - functions are defined before use (HLSL), all temporaries declared at
 //     the top of a function (HLSL switch cases can't declare).
+//   - no / or % on integers: w_udiv and w_umod (a GPU's own integer division
+//     can be wrong, see there).
 //
 // The includer provides:
 //   uint                 32-bit unsigned
@@ -30,6 +32,8 @@
 //   GS_MIN(x, v) / GS_ADD(x, v) groupshared atomics on gs_min, gs_count
 //   gs_min, gs_count, gs_wa[], gs_wv[], gs_ctl[8]  groupshared words
 //   W_LOOP               [loop] (HLSL) / nothing
+//   W_TRACE(wr, l, step, ip, op, L)  after a lane's instruction: nothing on the
+//                        GPU; the C++ reference can log one lane (debugging)
 //   struct Lane          as nova::Lane (soup.h)
 //
 // What a warp is (6.14):
@@ -89,6 +93,49 @@ uint w_below(uint d, uint n) {
     return w_mulhi(d, n);
 }
 
+// Unsigned division and remainder, exact, never with the compilers' own / or
+// %: a GPU's integer division can be wrong. (Phase 10 profiling: the RTX
+// 5080's gave 1593955456 / 33913946 = 173, not 46 -- its float estimate
+// rounded up to 47, the remainder wrapped, and the correction added 126 --
+// whenever a quotient falls within float precision below an integer.) So:
+// long division, a bit at a time, behind the quick cases (a < 2b), which are
+// most of the address arithmetic. b must not be 0.
+uint w_ulong(uint a, uint b, INOUT(uint) rem) {
+    uint q = 0u;
+    uint r = 0u;
+    uint i = 0u;
+    uint top = 0u;
+    for (i = 0u; i < 32u; i++) {
+        top = r >> 31; // r << 1 would carry out: then r >= b surely
+        r = (r << 1) | ((a >> (31u - i)) & 1u);
+        if (top != 0u || r >= b) {
+            r = r - b;
+            q = q | (1u << (31u - i));
+        }
+    }
+    rem = r;
+    return q;
+}
+
+uint w_udiv(uint a, uint b) {
+    uint r = 0u;
+    if (a < b)
+        return 0u;
+    if (a - b < b)
+        return 1u;
+    return w_ulong(a, b, r);
+}
+
+uint w_umod(uint a, uint b) {
+    uint r = 0u;
+    if (a < b)
+        return a;
+    if (a - b < b)
+        return a - b;
+    w_ulong(a, b, r);
+    return r;
+}
+
 // Signed division and remainder as C does them (truncating), with unsigned
 // operations only, so both compilers give the same bits. The caller handles
 // b == 0 and INT_MIN / -1.
@@ -100,7 +147,7 @@ uint w_sdiv(uint a, uint b) {
         ua = 0u - a;
     if ((b & 0x80000000u) != 0u)
         ub = 0u - b;
-    q = ua / ub;
+    q = w_udiv(ua, ub);
     if (((a ^ b) & 0x80000000u) != 0u)
         q = 0u - q;
     return q;
@@ -114,7 +161,7 @@ uint w_smod(uint a, uint b) {
         ua = 0u - a;
     if ((b & 0x80000000u) != 0u)
         ub = 0u - b;
-    r = ua % ub;
+    r = w_umod(ua, ub);
     if ((a & 0x80000000u) != 0u)
         r = 0u - r;
     return r;
@@ -189,10 +236,10 @@ uint w_adv(uint b, uint a, uint n) {
     uint len = 0u;
     uint size = IMG(b + WB_SIZE);
     if (e == W_NONE)
-        return (a + n % size) % size;
+        return w_umod(a + w_umod(n, size), size);
     s = IMG(e + WK_START);
     len = IMG(e + WK_LEN);
-    return s + (a - s + n % len) % len;
+    return s + w_umod(a - s + w_umod(n, len), len);
 }
 
 // n codons back from a, the mirror of w_adv.
@@ -202,10 +249,10 @@ uint w_back(uint b, uint a, uint n) {
     uint len = 0u;
     uint size = IMG(b + WB_SIZE);
     if (e == W_NONE)
-        return (a + size - n % size) % size;
+        return w_umod(a + size - w_umod(n, size), size);
     s = IMG(e + WK_START);
     len = IMG(e + WK_LEN);
-    return s + (a - s + len - n % len) % len;
+    return s + w_umod(a - s + len - w_umod(n, len), len);
 }
 
 // The address after an instruction at a and its n-codon template.
@@ -362,7 +409,7 @@ uint w_search(uint b, uint a, uint t0, uint t1, uint n, int dir) {
             if (st + (int)n <= size) {
                 g_seen += 1u; // a place looked at
                 if (w_complement_at(b, (uint)st, t0, t1, n))
-                    return w_adv(b, ((uint)st + n - 1u) % (uint)size, 1u);
+                    return w_adv(b, w_umod((uint)st + n - 1u, (uint)size), 1u);
             }
         }
         if (dir <= 0 && d <= bmax) {
@@ -370,7 +417,7 @@ uint w_search(uint b, uint a, uint t0, uint t1, uint n, int dir) {
             if (st >= 0) {
                 g_seen += 1u;
                 if (w_complement_at(b, (uint)st, t0, t1, n))
-                    return w_adv(b, ((uint)st + n - 1u) % (uint)size, 1u);
+                    return w_adv(b, w_umod((uint)st + n - 1u, (uint)size), 1u);
             }
         }
     }
@@ -547,8 +594,8 @@ bool w_exec(uint b, INOUT(LANE_T) L, uint lane, uint op, uint ip, uint key, uint
         }
         break;
     case OP_T_MOVII: // [AX] <- [BX], no lane offsets
-        x = L.ax % size;
-        y = L.bx % size;
+        x = w_umod(L.ax, size);
+        y = w_umod(L.bx, size);
         fw = w_word(b, y);
         ok = false;
         if (fw != W_NONE) {
@@ -609,7 +656,7 @@ bool w_exec(uint b, INOUT(LANE_T) L, uint lane, uint op, uint ip, uint key, uint
     case OP_T_RET:
         ok = w_pop(L, v);
         if (ok)
-            next = v % size;
+            next = w_umod(v, size);
         break;
     case OP_DJNZ:
         L.cx--;
@@ -1012,6 +1059,7 @@ void w_run_warp(uint b, uint wi) {
                     gs_wa[l] = wto;
                     gs_wv[l] = wval;
                 }
+                W_TRACE(wr, l, step, minip, op, L); // debugging, C++ only (nothing on the GPU)
             }
         LANE_END
         SYNC

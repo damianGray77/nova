@@ -199,6 +199,35 @@ void suite_async() {
         }
         CHECK(filled_at == latency); // issued in tick 0, landed at the barrier ending tick latency - 1
     }
+    // A result's writes land at the barrier, after the tick's heat update, so
+    // they heat their pages next tick: a snapshot taken between must keep
+    // them. One once didn't (found in Phase 10 profiling) and a resumed run
+    // drifted. The fill program again, with heat on.
+    {
+        const char* cfg = "seed = 5\nworld.model = soup\nworld.nodes = 1\nworld.soup_size = 1024\n"
+                          "world.millicores = 1000\nworld.gpus = 50\nseed.gpus = 10\nseed.at = 100\n"
+                          "seed.millicores = 500\naccel.mode = async\naccel.latency = 2\n"
+                          "hazard.copy = 0\nhazard.flaw = 0\nhazard.rot = 0\nmem.upkeep = 0\n"
+                          "seed.genome = ZERO INC SHL SHL SHL ALLOC ZERO INC INC INC INC INC ROTB ZERO INC SHL SHL "
+                          "SHL GPU NOP1 NOP0 YIELD JMP NOP0 NOP1\n";
+        Run first;
+        CHECK(make_run(first, cfg, 1));
+        bool pending = false;
+        for (u32 t = 0; t < 6 && !pending; ++t) {
+            first.step();
+            pending = first.world().node_soup(0).pages_pending();
+        }
+        CHECK(pending);
+        ByteWriter bytes;
+        first.snapshot(bytes);
+        Run resumed;
+        TextBuf err;
+        CHECK(resumed.init_from_snapshot(bytes.data(), bytes.size(), 1, &err));
+        CHECK(resumed.world().node_soup(0).pages_pending());
+        first.run_until(20);
+        resumed.run_until(20);
+        CHECK_EQ_U64(resumed.world().hash(), first.world().hash());
+    }
     // Snapshot resume with ops in flight, and thread counts, give the same world.
     {
         TextBuf cfg;

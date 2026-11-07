@@ -2,7 +2,7 @@
 
 // Versioned binary snapshots (design.md 7.1 H).
 //
-// Format v1, all integers little-endian:
+// Format v2 (v1 is read too, see kSnapshotVersion), all integers little-endian:
 //   "NOVASNAP"   8-byte magic
 //   u32          format version (kSnapshotVersion)
 //   u32          flags (0)
@@ -21,7 +21,11 @@
 
 namespace nova {
 
-inline constexpr u32 kSnapshotVersion = 1;
+// v2 (Phase 10 profiling): each soup also keeps its pages' heat inputs carried
+// into the next tick (Soup::save). v1 is still read, those inputs as zero (as
+// v1 builds resumed it: the world then drifts from the run that wrote it).
+inline constexpr u32 kSnapshotVersion = 2;
+inline constexpr u32 kSnapshotOldest = 1;
 
 void snapshot_write(const World& world, const Config& cfg, ByteWriter& out);
 

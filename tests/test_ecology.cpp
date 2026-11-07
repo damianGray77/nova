@@ -488,8 +488,24 @@ void test_defaults() {
                 CHECK(soup_ok(run.world().node_soup(n)));
     }
     CHECK_EQ_U64(h[1], h[0]);
+    // ... and resumed from a snapshot exactly, on every default.
+    const u64 snap_tick = 50;
+    {
+        Run run;
+        CHECK(make_run(run, w, 4));
+        run.run_until(snap_tick);
+        ByteWriter snap;
+        run.snapshot(snap);
+        Run resumed;
+        TextBuf err;
+        CHECK(resumed.init_from_snapshot(snap.data(), snap.size(), 4, &err));
+        run.run_until(120);
+        resumed.run_until(120);
+        CHECK_EQ_U64(resumed.world().hash(), run.world().hash());
+    }
     CHECK(Config::set_fallback(kLegacyDefaults, nullptr));
-    printf("  defaults world: 100 ticks, hash %016llx\n", static_cast<unsigned long long>(h[0]));
+    printf("  defaults world: 100 ticks, hash %016llx; snapshot at tick %llu resumed exactly\n",
+           static_cast<unsigned long long>(h[0]), static_cast<unsigned long long>(snap_tick));
 }
 
 } // namespace

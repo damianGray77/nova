@@ -34,7 +34,8 @@ bool Run::init(u32 threads, TextBuf* err) {
     return true;
 }
 
-bool Run::init_from_snapshot(const u8* data, usize n, u32 threads, TextBuf* err) {
+bool Run::init_from_snapshot(const u8* data, usize n, u32 threads, TextBuf* err, bool (*edit)(Config&, void*),
+                             void* ctx) {
     SnapshotHeader h;
     if (!snapshot_parse(data, n, &h, err))
         return false;
@@ -42,6 +43,10 @@ bool Run::init_from_snapshot(const u8* data, usize n, u32 threads, TextBuf* err)
     if (!config_.parse(h.config_text, &pe)) {
         err->append("snapshot: embedded config: ");
         err->append(pe.msg);
+        return false;
+    }
+    if (edit && !edit(config_, ctx)) {
+        err->append("snapshot: the config's changes were refused");
         return false;
     }
     budget_notes_.clear(); // a snapshot's budgets were resolved when it ran: this only checks the fit
@@ -53,7 +58,7 @@ bool Run::init_from_snapshot(const u8* data, usize n, u32 threads, TextBuf* err)
         return false;
     }
     ByteReader r(data + h.world_offset, h.world_size);
-    if (!world_.load_state(r, err))
+    if (!world_.load_state(r, err, h.version))
         return false;
     if (r.remaining() != 0) {
         err->append("snapshot: trailing bytes after the world section");

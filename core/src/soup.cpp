@@ -6,6 +6,7 @@
 #include <cstdio> // snprintf
 
 #include "nova/lineage.h"
+#include "nova/pool.h" // clock_seconds (profiling)
 
 namespace nova {
 
@@ -622,6 +623,9 @@ void Soup::init(const SoupParams* p, u64 seed, u32 node, u32 life, const Ruins* 
     wact_.clear();
     wstate_.clear();
     wchain_ = 0;
+    wrec_gpu_.clear();
+    wbody_chain_.clear();
+    wround_ = 0;
     wcst_.clear();
     if (p->warps)
         build_warp_consts();
@@ -916,6 +920,8 @@ u32 Soup::new_body() {
         warp_count_[b] = 0;
         warp_carry_[b] = 0.0f;
         warp_upkeep_[b] = 0.0;
+        if (b < wbody_chain_.size()) // (the split's guess: a new body's warps haven't run)
+            wbody_chain_[b] = 0;
     }
     if (ek()) { // Phase 9c: no E millicores yet
         if (eunits_.size() < bodies_.size()) {
@@ -1956,6 +1962,8 @@ void Soup::tick(u64 tick) {
 
 // The tick's first half: sparks and the bodies' CPUs.
 void Soup::tick_first(u64 tick) {
+    const double t0 = timing_on_ ? clock_seconds() : 0; // (profiling)
+    double t_bodies = 0;
     begin_tick(tick);
     if (!vent_at_.empty()) // Phase 10: fresh material before anything claims it
         vents();
@@ -1981,18 +1989,32 @@ void Soup::tick_first(u64 tick) {
     if (n > 0) {
         usize start = static_cast<usize>(rng_.below(n));
         sched_start_ = start;
+        const double tb = timing_on_ ? clock_seconds() : 0;
         for (usize k = 0; k < n; ++k) {
             u32 b = order_[(start + k) % n];
             if (bodies_[b].alive)
                 run_body(b, tick);
         }
+        if (timing_on_)
+            t_bodies = clock_seconds() - tb;
     }
     if (p_->spark_late)
         sparks(count);
+    if (timing_on_) {
+        timing_.bodies += t_bodies;
+        timing_.first += clock_seconds() - t0 - t_bodies;
+    }
 }
 
 // The tick's second half: heat, hazards and the death sweep.
 void Soup::tick_second() {
+    const double t0 = timing_on_ ? clock_seconds() : 0; // (profiling)
+    tick_second_parts();
+    if (timing_on_)
+        timing_.second += clock_seconds() - t0;
+}
+
+void Soup::tick_second_parts() {
     heat_update();
     accel_heat_update();
     bit_rot();
@@ -2778,6 +2800,73 @@ void Soup::hash_into(Hasher& h) const {
         h.bytes(last_ran_.data(), last_ran_.size() * sizeof(u64));
     if (!vent_at_.empty()) // Phase 10: the vents' places
         h.bytes(vent_at_.data(), vent_at_.size() * sizeof(u32));
+    if (pages_pending()) { // heat inputs carried into the next tick (only then: worlds without them hash as before)
+        h.bytes(page_fetch_.data(), page_fetch_.size() * sizeof(u32));
+        h.bytes(page_write_.data(), page_write_.size() * sizeof(u32));
+    }
+}
+
+bool Soup::pages_pending() const {
+    for (usize i = 0; i < page_fetch_.size(); ++i)
+        if (page_fetch_[i] | page_write_[i])
+            return true;
+    return false;
+}
+
+// Debugging (nova run/resume --dump-node): this soup's state a section a
+// file, <prefix>.<section>, to compare two runs byte by byte, plus the parts
+// a snapshot leaves out but a tick carries on with.
+void Soup::debug_dump(const char* prefix) const {
+    auto out = [&](const char* name, const void* p, usize n) {
+        TextBuf path;
+        path.append(prefix);
+        path.append_char('.');
+        path.append(name);
+        write_file(path.c_str(), static_cast<const u8*>(p), n);
+    };
+    const u64 head[2] = {waste_, next_serial_};
+    out("head", head, sizeof head);
+    out("mem", mem_.data(), mem_.size());
+    out("owner", owner_.data(), owner_.size() * sizeof(u32));
+    out("blocks", blocks_.data(), blocks_.size() * sizeof(Block));
+    out("free_blocks", free_blocks_.data(), free_blocks_.size() * sizeof(u32));
+    out("bodies", bodies_.data(), bodies_.size() * sizeof(Body));
+    out("free_bodies", free_bodies_.data(), free_bodies_.size() * sizeof(u32));
+    out("cpus", cpus_.data(), cpus_.size() * sizeof(Cpu));
+    out("free_cpus", free_cpus_.data(), free_cpus_.size() * sizeof(u32));
+    out("order", order_.data(), order_.size() * sizeof(u32));
+    out("unit_owner", unit_owner_.data(), unit_owner_.size() * sizeof(u32));
+    out("unit_heat", unit_heat_.data(), unit_heat_.size() * sizeof(float));
+    out("unit_next", unit_next_.data(), unit_next_.size() * sizeof(u32));
+    out("unit_prev", unit_prev_.data(), unit_prev_.size() * sizeof(u32));
+    out("pool", pool_.data(), pool_.size() * sizeof(u32));
+    out("page_heat", page_heat_.data(), page_heat_.size() * sizeof(float));
+    out("stamp", stamp_.data(), stamp_.size() * sizeof(u32));
+    out("cpu_gen", cpu_gen_.data(), cpu_gen_.size() * sizeof(u32));
+    out("cpu_result", cpu_result_.data(), cpu_result_.size() * sizeof(u32));
+    out("cpu_pending", cpu_pending_.data(), cpu_pending_.size() * sizeof(u32));
+    out("warps", warps_.data(), warps_.size() * sizeof(Warp));
+    out("free_warps", free_warps_.data(), free_warps_.size() * sizeof(u32));
+    out("lanes", lanes_.data(), lanes_.size() * sizeof(Lane));
+    out("warp_head", warp_head_.data(), warp_head_.size() * sizeof(u32));
+    out("warp_count", warp_count_.data(), warp_count_.size() * sizeof(u32));
+    out("warp_carry", warp_carry_.data(), warp_carry_.size() * sizeof(float));
+    out("wuntil", wuntil_.data(), wuntil_.size() * sizeof(u64));
+    out("wtime", wtime_.data(), wtime_.size() * sizeof(u32));
+    out("actions", actions_.data(), actions_.size() * sizeof(Action));
+    out("cpu_kind", cpu_kind_.data(), cpu_kind_.size());
+    out("epool", epool_.data(), epool_.size() * sizeof(u32));
+    out("last_ran", last_ran_.data(), last_ran_.size() * sizeof(u64));
+    out("vent_at", vent_at_.data(), vent_at_.size() * sizeof(u32));
+    // Not in a snapshot:
+    out("x_wleft", wleft_.data(), wleft_.size() * sizeof(u32));
+    out("x_wlive", wlive_.data(), wlive_.size() * sizeof(u32));
+    out("x_wact", wact_.data(), wact_.size() * sizeof(u32));
+    out("x_wagain", wagain_.data(), wagain_.size() * sizeof(wagain_[0]));
+    out("x_eunits", eunits_.data(), eunits_.size() * sizeof(u32));
+    out("x_espeed", espeed_.data(), espeed_.size() * sizeof(float));
+    out("x_ework", ework_.data(), ework_.size() * sizeof(u32));
+    out("x_warp_upkeep", warp_upkeep_.data(), warp_upkeep_.size() * sizeof(double));
 }
 
 namespace {
@@ -2996,9 +3085,16 @@ void Soup::save(ByteWriter& w) const {
         put_array(w, last_ran_);
     if (p_->vent_spacing > 0)
         put_array(w, vent_at_);
+    // The pages' heat inputs carried into the next tick (async accelerator
+    // results land at the barrier, after the tick's heat update). Snapshots
+    // before this (Phase 10 profiling) lost them, so a resumed run drifted.
+    if (p_->heat_on) {
+        put_array(w, page_fetch_);
+        put_array(w, page_write_);
+    }
 }
 
-bool Soup::load(ByteReader& r, TextBuf* err) {
+bool Soup::load(ByteReader& r, TextBuf* err, u32 version) {
     const u64 n = p_->size, m = p_->millicores, many = 0xFFFFFFFFull;
     bool ok = r.get_u32(&waste_) && r.get_u64(&next_serial_) && get_array(r, &mem_, n) &&
               get_array(r, &owner_, n) && get_array(r, &blocks_, many) &&
@@ -3135,6 +3231,20 @@ bool Soup::load(ByteReader& r, TextBuf* err) {
             return false;
         }
     }
+    page_fetch_.clear();
+    page_write_.clear();
+    const bool pages = p_->heat_on && version >= 2;
+    if (pages && (!get_array(r, &page_fetch_, page_heat_.size()) || page_fetch_.size() != page_heat_.size() ||
+                  !get_array(r, &page_write_, page_heat_.size()) || page_write_.size() != page_heat_.size())) {
+        err->append("snapshot: page heat inputs truncated or the wrong shape");
+        return false;
+    }
+    if (!pages) {
+        page_fetch_.resize(page_heat_.size());
+        page_fetch_.fill(0);
+        page_write_.resize(page_heat_.size());
+        page_write_.fill(0);
+    }
     collapse_ = false; // a snapshot is taken after the barrier applied any collapse
     // Rebuild the derived structures, then demand every invariant.
     used_.resize((static_cast<usize>(n) + 63) / 64);
@@ -3163,10 +3273,6 @@ bool Soup::load(ByteReader& r, TextBuf* err) {
         }
         pool_pos_[epool_[i]] = i;
     }
-    page_fetch_.resize(page_heat_.size());
-    page_fetch_.fill(0);
-    page_write_.resize(page_heat_.size());
-    page_write_.fill(0);
     TextBuf why;
     if (!check(&why)) {
         err->append("snapshot: soup invariant broken: ");

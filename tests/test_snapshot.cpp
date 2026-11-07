@@ -93,9 +93,9 @@ void test_rejects_damage() {
     err.clear();
     Run r4;
     bad.assign(good.data(), good.size());
-    bad[8] = 2; // format version 2
+    bad[8] = static_cast<u8>(kSnapshotVersion + 1); // a format from the future
     CHECK(!r4.init_from_snapshot(bad.data(), bad.size(), 1, &err));
-    CHECK(contains(err, "unsupported format version 2"));
+    CHECK(contains(err, "unsupported format version 3"));
 
     err.clear();
     Run r5;

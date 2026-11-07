@@ -38,6 +38,17 @@ and turns every feature of the world on by default (set a key to change it):
   test suites keep the old defaults (`Config::set_fallback`) so they still
   test one feature at a time.
 
+**Profiling after the hour-long test** (design.md 6.16) found GPU life (about
+42,000 warps) to be the cost (28–29 ms a tick with the GPU), and fixed three
+bugs: `warp.device = auto` getting stuck without the GPU for 15,000 ticks at
+four times the cost; the RTX 5080's integer division being wrong for some
+operands, which made runs differ (warp code now divides exactly, so the GPU
+and the reference agree again); and snapshots losing a tick's pending page
+heat (snapshot format v2). `nova resume <snapshot>` continues a snapshot
+headlessly for timing and bisecting. `warp.device = auto` now shares each
+round per body (long bodies to the CPU threads, the rest to the GPU) with
+the split set by a measured model of both sides.
+
 **Phase 9** charges every instruction in world time measured on the real
 machine (`cost.table = home_v1`, the default since Phase 10; `classic` is
 every instruction costing 1), and (9c) gives bodies threads and two kinds of
@@ -327,7 +338,7 @@ its gate hash and replay logs are unchanged.
 | Path | Role |
 |------|------|
 | `core/` | `nova_core` static library, namespace `nova`. Containers (`Array`, `HashMap`, `Str`, `TextBuf`), counter-based RNG, hashing, `key = value` config, Win32 thread pool, world + tick loop, run driver, snapshots, CSV stats, replay log. Phase 1a: `isa` (codon tables), `soup` (a node's organisms, ledger, heat, hazards, sparks, death sweep), `interp.cpp` (the instructions). Phase 1b: `lineage` (the replicator detector), `genebank`, `compress`. Phase 2 and 2b: the GPU and NPU (`UnitLedger` in `soup`, the accelerator verb in `interp.cpp`). Phase 3: `graph` (procedural generation and noise), per-node parameters, transit and delivery in `world`. Phase 4: the disk (`DiskLedger`), volatility, stamps and salvage, wear and ruins in `soup`; corruption, link failures, signal propagation, collapse, recovery and graph rebuilds in `world`. Phase 5: `accelop.h` and `accel_ref.cpp` (async ops and the CPU reference), `accel.h` and `accel_dx.cpp` (device discovery, probes, the Direct3D 12 GPU backend and the DirectML NPU backend), the ops in flight and the devices in `world`. Phase 6: `view` (view frames, the live session, a finished run's files, the phylogeny layout), `png` (the PNG writer), the shared stats row in `stats`, the new live knobs in `world`, the genebank log and numbered snapshots in `run`. Phase 7: `landscape` (land, nodes, the triangulation, paths, bridges, distributions), the landscape mode, bridge schedules and fixed-path lifecycle in `world`, the step profile; `budget` (budgets, calibration, the fit checks) and `mapped` (memory-mapped files for the disk tier). Phase 8: `warp_isa.inc` (the warp interpreter, one source for C++ and HLSL) and `warp_layout.inc` (its image), `warp.cpp` (packing, unpacking, the warps' bookkeeping), host instructions in `interp.cpp`, `WarpGpu` in `accel_dx.cpp` (the kernel), the tick split and device choice in `world`. |
-| `app/` | The `nova` command line, including `nova bench`, `nova bench devices`, `nova devices` and `nova view` (`view_cmd.cpp`: the window and the sim thread). `canvas` and `viewer` (the GDI canvas and the panels) form the `nova_viewer` library, which the tests drive headless. |
+| `app/` | The `nova` command line, including `nova bench`, `nova bench devices`, `nova devices`, `nova resume` and `nova view` (`view_cmd.cpp`: the window and the sim thread). `canvas` and `viewer` (the GDI canvas and the panels) form the `nova_viewer` library, which the tests drive headless. |
 | `tests/` | One `nova_tests` executable, one CTest entry per suite, hand-rolled `tests/check.h` harness. |
 | `tools/` | `check_includes.cmake`, the no-STL guard; `bench.ps1`, the Release benchmark; `abio.ps1`, the trial harness (single-node abiogenesis trials, or world trials with `-Threads`). |
 | `configs/` | Example run configs; `abio.cfg` is the Phase 1b baseline trial, `world.cfg` the Phase 3 100-node world. |

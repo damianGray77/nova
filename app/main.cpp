@@ -24,6 +24,11 @@
 //   nova replay <log> [--threads N]
 //       Re-runs a replay log and checks every logged hash and event.
 //
+//   nova resume <snapshot> [--threads N] [--ticks N] [--set key=value]...
+//       Continues a snapshot headlessly up to tick N, printing its hash every
+//       replay.checkpoint_every ticks; --set changes its settings first. For
+//       bisecting a divergence; nothing is written.
+//
 //   nova bench <seconds> [--threads N]
 //       Interpreter throughput on three workloads (bench.cpp), single-threaded
 //       and on N threads. Build in Release first: tools/bench.ps1.
@@ -44,6 +49,7 @@
 #include "nova/pool.h"
 #include "nova/accel.h"
 #include "nova/config.h"
+#include "nova/hash.h"
 #include "nova/io.h"
 #include "nova/replay.h"
 #include "nova/run.h"
@@ -167,8 +173,10 @@ namespace {
 int usage() {
     fprintf(stderr, "usage:\n"
                     "  nova run <config> [--threads N] [--ticks N] [--set key=value]...\n"
-                    "           [--stop-file PATH] [--no-esc] [--profile]\n"
+                    "           [--stop-file PATH] [--no-esc] [--profile] [--profile-csv PATH]\n"
                     "  nova replay <log> [--threads N]\n"
+                    "  nova resume <snapshot> [--threads N] [--ticks N] [--set key=value]...\n"
+                    "              (continued headlessly to tick N, hashes printed; nothing written)\n"
                     "  nova bench <seconds per measurement> [--threads N]\n"
                     "  nova bench devices [--threads N]   (the GPU and NPU against the CPU reference)\n"
                     "  nova bench costs                   (this machine's basic operations, for cost tables)\n"
@@ -226,6 +234,13 @@ struct Args {
     const char* stop_file = nullptr;
     bool no_esc = false;
     bool profile = false; // --profile: where each tick's time goes (Phase 7)
+    const char* profile_csv = nullptr; // --profile-csv PATH: the same every 1,000 ticks, as CSV
+    // Bisecting a divergence (run and resume): the world's hash every tick
+    // from tick N on, and each node's hash at the end, a line each, to a file.
+    bool has_hashes_from = false;
+    u64 hashes_from = 0;
+    const char* node_hashes = nullptr;
+    const char* dump_node = nullptr; // --dump-node N:PREFIX: node N's state at the end, a section a file
 };
 
 bool parse_args(int argc, char** argv, Args* a) {
@@ -252,6 +267,17 @@ bool parse_args(int argc, char** argv, Args* a) {
             a->has_ticks = parse_u64(argv[++i], &a->ticks);
             if (!a->has_ticks)
                 return false;
+        } else if (strcmp(argv[i], "--profile-csv") == 0) {
+            a->profile_csv = argv[++i];
+            a->profile = true;
+        } else if (strcmp(argv[i], "--hashes-from") == 0) {
+            a->has_hashes_from = parse_u64(argv[++i], &a->hashes_from);
+            if (!a->has_hashes_from)
+                return false;
+        } else if (strcmp(argv[i], "--node-hashes") == 0) {
+            a->node_hashes = argv[++i];
+        } else if (strcmp(argv[i], "--dump-node") == 0) {
+            a->dump_node = argv[++i];
         } else if (strcmp(argv[i], "--set") == 0) {
             if (a->set_count == static_cast<int>(sizeof a->sets / sizeof a->sets[0]))
                 return false;
@@ -272,6 +298,48 @@ bool apply_sets(const Args& a, Config& cfg) {
         if (!apply_set(cfg, a.sets[i]))
             return false;
     return true;
+}
+
+// --hashes-from: the world's hash after this tick, if it's in the window.
+void print_tick_hash(const Args& a, const World& w) {
+    if (a.has_hashes_from && w.tick() >= a.hashes_from) {
+        printf("tickhash %llu %016llx\n", static_cast<unsigned long long>(w.tick()),
+               static_cast<unsigned long long>(w.hash()));
+        fflush(stdout);
+    }
+}
+
+// --node-hashes: each node's own hash, a line each ("node tick hash").
+void write_node_hashes(const Args& a, const World& w) {
+    if (!a.node_hashes || w.model() != Model::soup)
+        return;
+    FILE* f = fopen(a.node_hashes, "w");
+    if (!f) {
+        fprintf(stderr, "nova: cannot write %s\n", a.node_hashes);
+        return;
+    }
+    w.hash(); // (brings every lane home first)
+    for (u32 n = 0; n < w.node_count(); ++n) {
+        Hasher h(0x6E6F64652D686173ull);
+        w.node_soup(n).hash_into(h);
+        fprintf(f, "%u %llu %016llx\n", n, static_cast<unsigned long long>(w.tick()),
+                static_cast<unsigned long long>(h.finish()));
+    }
+    fclose(f);
+}
+
+// --dump-node N:PREFIX: node N's state, a section a file (Soup::debug_dump).
+void dump_node(const Args& a, const World& w) {
+    if (!a.dump_node || w.model() != Model::soup)
+        return;
+    const char* colon = strchr(a.dump_node, ':');
+    u64 n = 0;
+    if (!colon || !parse_u64(Str(a.dump_node, static_cast<usize>(colon - a.dump_node)), &n) || n >= w.node_count()) {
+        fprintf(stderr, "nova: --dump-node expects N:PREFIX\n");
+        return;
+    }
+    w.hash(); // (brings every lane home first)
+    w.node_soup(static_cast<u32>(n)).debug_dump(colon + 1);
 }
 
 // Prints the accelerator notes from byte `from` on, a line each with the
@@ -642,10 +710,10 @@ bool write_result(const char* path, const Run& run, const char* stop, double sec
             kv("warp_device");
             t.append(w.warp_device_name());
             t.append_char('\n');
-            const char* const wkeys[] = {"warp_gpu_rounds",  "warp_reference_rounds", "warp_gpu_node_rounds",
-                                         "warp_reference_node_rounds", "warp_ticks_without_gpu",
+            const char* const wkeys[] = {"warp_gpu_rounds",  "warp_reference_rounds", "warp_gpu_body_rounds",
+                                         "warp_reference_body_rounds", "warp_ticks_without_gpu",
                                          "warp_verified",    "warp_mismatches"};
-            const u64 wvals[] = {w.warp_gpu_rounds(), w.warp_ref_rounds(),    w.warp_gpu_nodes(), w.warp_ref_nodes(),
+            const u64 wvals[] = {w.warp_gpu_rounds(), w.warp_ref_rounds(),    w.warp_gpu_bodies(), w.warp_ref_bodies(),
                                  w.warp_plain_ticks(), w.warp_verified(), w.warp_mismatches()};
             for (int i = 0; i < 7; ++i) {
                 kv(wkeys[i]);
@@ -808,6 +876,26 @@ int cmd_run(const Args& a) {
     }
     fflush(stdout);
 
+    // --profile-csv: every 1,000 ticks, where the time went (ms a tick, the
+    // nodes' parts in thread-ms a tick), what warp.device = auto chose, and
+    // how much the world did.
+    FILE* pcsv = nullptr;
+    StepProfile pmark;
+    u64 pmark_plain = w.warp_plain_ticks(), pmark_split = w.warp_split_ticks(), pmark_gn = w.warp_gpu_bodies(),
+        pmark_rn = w.warp_ref_bodies();
+    double pmark_wall = now_ms();
+    u64 pw_steps = 0, pw_lanes = 0, pw_instr = 0;
+    if (a.profile_csv) {
+        ensure_parent_dir(a.profile_csv);
+        pcsv = fopen(a.profile_csv, "w");
+        if (!pcsv) {
+            fprintf(stderr, "nova: cannot write %s\n", a.profile_csv);
+            return 1;
+        }
+        fprintf(pcsv, "tick,ticks,wall_ms,update,warp_cpu,warp_gpu,accel,barrier,after,total,"
+                      "n_first,n_bodies,n_pack,n_ref,n_unpack,n_host,n_second,"
+                      "plain_ticks,gpu_ticks,gpu_body_share,warp_limit,bodies,warps,warp_steps,lane_instr,instructions\n");
+    }
     EscWatch esc;
     if (!a.no_esc)
         esc.start();
@@ -816,6 +904,56 @@ int cmd_run(const Args& a) {
     usize announced = 0;
     while (ticks == 0 || w.tick() < ticks) {
         run.step();
+        print_tick_hash(a, w);
+        if (pcsv) {
+            const SoupTally& lt = w.last_soup_tick();
+            pw_steps += lt.warp_steps;
+            pw_lanes += lt.lane_instr;
+            pw_instr += lt.instructions;
+            if (prof.ticks - pmark.ticks >= 1000) {
+                const double n = static_cast<double>(prof.ticks - pmark.ticks), per = 1000.0 / n;
+                const double barrier = (prof.signals + prof.departures + prof.delivery + prof.links + prof.lifecycle +
+                                        prof.tally + prof.ports) -
+                                       (pmark.signals + pmark.departures + pmark.delivery + pmark.links +
+                                        pmark.lifecycle + pmark.tally + pmark.ports);
+                const double parts[] = {prof.update - pmark.update, prof.warp_cpu - pmark.warp_cpu,
+                                        prof.warp_gpu - pmark.warp_gpu, prof.accel - pmark.accel, barrier,
+                                        prof.after - pmark.after};
+                double total = 0;
+                for (double p : parts)
+                    total += p;
+                const u64 gn = w.warp_gpu_bodies() - pmark_gn, rn = w.warp_ref_bodies() - pmark_rn;
+                u64 bodies = 0;
+                for (u32 i = 0; i < w.node_count(); ++i)
+                    bodies += w.node_soup(i).body_count();
+                u64 warps = 0;
+                for (u32 i = 0; i < w.node_count(); ++i)
+                    warps += w.node_soup(i).warps_on() ? w.node_soup(i).warps_alive() : 0;
+                const double wall = now_ms();
+                fprintf(pcsv,
+                        "%llu,%.0f,%.1f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%llu,%llu,"
+                        "%.3f,%u,%llu,%llu,%.0f,%.0f,%.0f\n",
+                        static_cast<unsigned long long>(w.tick()), n, (wall - pmark_wall) / n, parts[0] * per,
+                        parts[1] * per, parts[2] * per, parts[3] * per, parts[4] * per, parts[5] * per, total * per,
+                        (prof.n_first - pmark.n_first) * per, (prof.n_bodies - pmark.n_bodies) * per,
+                        (prof.n_pack - pmark.n_pack) * per, (prof.n_ref - pmark.n_ref) * per,
+                        (prof.n_unpack - pmark.n_unpack) * per, (prof.n_host - pmark.n_host) * per,
+                        (prof.n_second - pmark.n_second) * per,
+                        static_cast<unsigned long long>(w.warp_plain_ticks() - pmark_plain),
+                        static_cast<unsigned long long>(w.warp_split_ticks() - pmark_split),
+                        gn + rn ? static_cast<double>(gn) / static_cast<double>(gn + rn) : 0.0, w.warp_limit(),
+                        static_cast<unsigned long long>(bodies), static_cast<unsigned long long>(warps),
+                        pw_steps / n, pw_lanes / n, pw_instr / n);
+                fflush(pcsv);
+                pmark = prof;
+                pmark_plain = w.warp_plain_ticks();
+                pmark_split = w.warp_split_ticks();
+                pmark_gn = w.warp_gpu_bodies();
+                pmark_rn = w.warp_ref_bodies();
+                pmark_wall = wall;
+                pw_steps = pw_lanes = pw_instr = 0;
+            }
+        }
         for (; announced < run.event_count(); ++announced) {
             printf("nova: tick %llu: %.*s\n", static_cast<unsigned long long>(run.event_tick(announced)),
                    static_cast<int>(run.event_text(announced).n), run.event_text(announced).p);
@@ -866,6 +1004,10 @@ int cmd_run(const Args& a) {
         }
     }
     double ms = now_ms() - t0;
+    if (pcsv)
+        fclose(pcsv);
+    write_node_hashes(a, w);
+    dump_node(a, w);
     run.finish();
     if (strcmp(stop, "ticks") != 0)
         printf("nova: stopped (%s) at tick %llu\n", stop, static_cast<unsigned long long>(w.tick()));
@@ -893,13 +1035,13 @@ int cmd_run(const Args& a) {
         if (prof.warp_cpu > 0)
             printf("  (warps' CPU passes: %.4f packing, %.4f unpacking and host instructions)\n",
                    prof.warp_pack * 1000.0 / prof.ticks, prof.warp_host * 1000.0 / prof.ticks);
-        const u64 gn = w.warp_gpu_nodes(), rn = w.warp_ref_nodes();
+        const u64 gn = w.warp_gpu_bodies(), rn = w.warp_ref_bodies();
         if (w.warps() && w.warp_auto() && w.warp_plain_ticks() > 0) // Phase 8: auto's choice, tick by tick
             printf("  warp.device auto: %llu ticks with the GPU, %llu without it\n",
                    static_cast<unsigned long long>(w.warp_split_ticks()),
                    static_cast<unsigned long long>(w.warp_plain_ticks()));
         if (w.warps() && gn + rn > 0) // Phase 8: how the rounds were shared
-            printf("  warp rounds%s: %.0f%% of the node-rounds on the GPU, %.0f%% on the CPU at once\n",
+            printf("  warp rounds%s: %.0f%% of the body-rounds on the GPU, %.0f%% on the CPU at once\n",
                    w.warp_auto() ? " with the GPU" : "", 100.0 * gn / (gn + rn), 100.0 * rn / (gn + rn));
         const WarpGpuStats& ws = w.warp_gpu_stats();
         if (ws.rounds) { // Phase 8: what the GPU rounds moved, and where their time went
@@ -934,6 +1076,97 @@ int cmd_run(const Args& a) {
     printf("nova: tick %llu  hash %016llx  units %llu  (%.1f ms)\n",
            static_cast<unsigned long long>(w.tick()), static_cast<unsigned long long>(w.hash()),
            static_cast<unsigned long long>(w.total_units()), ms);
+    return 0;
+}
+
+// nova resume <snapshot> [--threads N] [--ticks N] [--set key=value]...
+// A snapshot continued headlessly up to tick N (the world's tick, not a
+// count), printing its hash every replay.checkpoint_every ticks and the
+// accelerator and warp notes, for bisecting a divergence between two runs.
+// --set changes the snapshot's settings first (warp.device, warp.verify,
+// accel.verify, ...). Nothing is written.
+bool resume_edit(Config& cfg, void* ctx) {
+    return apply_sets(*static_cast<const Args*>(ctx), cfg);
+}
+
+int cmd_resume(const Args& a) {
+    Array<u8> bytes;
+    if (!read_file(a.path, &bytes)) {
+        fprintf(stderr, "nova: cannot read '%s'\n", a.path);
+        return 1;
+    }
+    RunKeys defaults;
+    apply_priority(defaults);
+    Run run;
+    TextBuf err;
+    if (!run.init_from_snapshot(bytes.data(), bytes.size(), machine_threads(defaults, a.has_threads ? a.threads : 0),
+                                &err, &resume_edit, const_cast<Args*>(&a))) {
+        fprintf(stderr, "nova: %s\n", err.c_str());
+        return 1;
+    }
+    bytes = Array<u8>();
+    const u64 every = run.config().get_u64("replay.checkpoint_every", 100);
+    const World& w = run.world();
+    const u64 ticks = a.has_ticks ? a.ticks : w.tick() + 1000;
+    printf("nova: resumed at tick %llu (hash %016llx) on %u threads, to tick %llu\n",
+           static_cast<unsigned long long>(w.tick()), static_cast<unsigned long long>(w.hash()), run.threads(),
+           static_cast<unsigned long long>(ticks));
+    usize notes_shown = print_notes(w.accel_notes(), 0), warp_notes_shown = print_notes(w.warp_notes(), 0);
+    StepProfile prof;
+    if (a.profile)
+        run.world().set_profile(&prof);
+    const u64 plain0 = w.warp_plain_ticks(), split0 = w.warp_split_ticks(), gn0 = w.warp_gpu_bodies(),
+              rn0 = w.warp_ref_bodies();
+    const double t0 = now_ms();
+    while (w.tick() < ticks) {
+        run.step();
+        print_tick_hash(a, w);
+        run.drop_events();
+        if (w.accel_notes().n > notes_shown)
+            notes_shown = print_notes(w.accel_notes(), notes_shown);
+        if (w.warp_notes().n > warp_notes_shown)
+            warp_notes_shown = print_notes(w.warp_notes(), warp_notes_shown);
+        if (w.warp_failed()) {
+            printf("nova: stopped (warp_device_error) at tick %llu\n", static_cast<unsigned long long>(w.tick()));
+            return 1;
+        }
+        if (every && w.tick() % every == 0) {
+            printf("hash %llu %016llx\n", static_cast<unsigned long long>(w.tick()),
+                   static_cast<unsigned long long>(w.hash()));
+            fflush(stdout);
+        }
+    }
+    if (a.profile && prof.ticks) { // ms a tick: the parts, and what auto chose
+        const double per = 1000.0 / static_cast<double>(prof.ticks);
+        const double barrier = prof.signals + prof.departures + prof.delivery + prof.links + prof.lifecycle +
+                               prof.tally + prof.ports;
+        const u64 gn = w.warp_gpu_bodies() - gn0, rn = w.warp_ref_bodies() - rn0;
+        printf("nova: profile over %llu ticks, ms a tick: update %.3f, warps' CPU passes %.3f, warp rounds %.3f, "
+               "accelerators %.3f, barrier %.3f, after %.3f; nodes' reference %.3f thread-ms; %llu ticks with the "
+               "GPU, %llu without; %.1f%% of body-rounds on the GPU\n",
+               static_cast<unsigned long long>(prof.ticks), prof.update * per, prof.warp_cpu * per,
+               prof.warp_gpu * per, prof.accel * per, barrier * per, prof.after * per, prof.n_ref * per,
+               static_cast<unsigned long long>(w.warp_split_ticks() - split0),
+               static_cast<unsigned long long>(w.warp_plain_ticks() - plain0),
+               gn + rn ? 100.0 * static_cast<double>(gn) / static_cast<double>(gn + rn) : 0.0);
+        const WarpGpuStats& ws = w.warp_gpu_stats();
+        if (ws.rounds) {
+            const double r = static_cast<double>(ws.rounds);
+            printf("nova: GPU rounds %llu: %.0f warp steps a round, %.0f in the longest body; on the device's clock "
+                   "%.3f ms kernel, %.3f upload, %.3f download a round; %.0f warps' lanes sent a round; the CPU "
+                   "threads' share %.3f ms a round; model %.3f us a GPU step, %.4f us a reference step, limit %u\n",
+                   static_cast<unsigned long long>(ws.rounds), ws.steps / r, ws.steps_longest / r, ws.ms_dev_kernel / r,
+                   ws.ms_dev_up / r, ws.ms_dev_down / r, ws.lanes_sent / r, w.warp_ref_wall() * 1000.0 / r,
+                   w.warp_model_gstep() * 1e6, w.warp_model_hstep() * 1e6, w.warp_limit());
+        }
+    }
+    write_node_hashes(a, w);
+    dump_node(a, w);
+    printf("nova: tick %llu  hash %016llx  (%.1f ms)  warp verified rounds %llu, mismatches %llu; accel mismatches "
+           "%llu\n",
+           static_cast<unsigned long long>(w.tick()), static_cast<unsigned long long>(w.hash()), now_ms() - t0,
+           static_cast<unsigned long long>(w.warp_verified()), static_cast<unsigned long long>(w.warp_mismatches()),
+           static_cast<unsigned long long>(w.accel_mismatches()));
     return 0;
 }
 
@@ -989,6 +1222,8 @@ int main(int argc, char** argv) {
         return cmd_run(a);
     if (strcmp(a.mode, "replay") == 0)
         return cmd_replay(a);
+    if (strcmp(a.mode, "resume") == 0)
+        return cmd_resume(a);
     if (strcmp(a.mode, "bench") == 0 && strcmp(a.path, "devices") == 0)
         return cmd_bench_devices(a.has_threads ? static_cast<u32>(a.threads) : 0);
     if (strcmp(a.mode, "bench") == 0) {

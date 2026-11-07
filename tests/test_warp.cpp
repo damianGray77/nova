@@ -546,11 +546,11 @@ void test_gpu_device() {
     mixed.snapshot(snap);
     mixed.run_until(120);
     const World& mw = mixed.world();
-    printf("  warp mixed: %llu node-rounds on the GPU, %llu on the CPU, %llu warps' lanes sent and %llu fetched\n",
-           static_cast<unsigned long long>(mw.warp_gpu_nodes()), static_cast<unsigned long long>(mw.warp_ref_nodes()),
+    printf("  warp mixed: %llu body-rounds on the GPU, %llu on the CPU, %llu warps' lanes sent and %llu fetched\n",
+           static_cast<unsigned long long>(mw.warp_gpu_bodies()), static_cast<unsigned long long>(mw.warp_ref_bodies()),
            static_cast<unsigned long long>(mw.warp_gpu_stats().lanes_sent),
            static_cast<unsigned long long>(mw.warp_gpu_stats().lanes_fetched));
-    CHECK(mw.warp_gpu_nodes() > 0 && mw.warp_ref_nodes() > 0 && mw.warp_mismatches() == 0 && !mw.warp_failed());
+    CHECK(mw.warp_gpu_bodies() > 0 && mw.warp_ref_bodies() > 0 && mw.warp_mismatches() == 0 && !mw.warp_failed());
     CHECK_EQ_U64(mw.hash(), want);
     Run resumed;
     TextBuf err;
@@ -558,7 +558,7 @@ void test_gpu_device() {
     resumed.run_until(120);
     CHECK_EQ_U64(resumed.world().hash(), want);
     // auto: the split moves with the measured times, and whole ticks go with
-    // or without the GPU (the first 10 alternate); the same world
+    // or without the GPU (five of each first); the same world
     TextBuf ac;
     ac.append(busy_warp_world());
     ac.append("warp.device = auto\n");
@@ -567,6 +567,75 @@ void test_gpu_device() {
     au.run_until(120);
     CHECK(au.world().warp_plain_ticks() >= 5 && au.world().warp_split_ticks() >= 5);
     CHECK_EQ_U64(au.world().hash(), want);
+}
+
+// A loop of signed divisions, from a warp that differed on the GPU in Phase 10
+// profiling (warp.verify, node 577 at tick 35725): run N steps on the GPU and
+// on the reference, for every N, and the lanes must agree. With the GPU's own
+// integer division, 1593955456 / 33913946 came out 173 (not 46) at step 164
+// (warp_isa.inc, w_ulong); each lane divides a different dividend.
+void test_gpu_div_loop() {
+    AccelDevice devs[16];
+    const u32 n = accel_list(devs, 16);
+    u32 dev = kNone;
+    for (u32 i = 0; i < n && dev == kNone; ++i)
+        if (devs[i].gpu && devs[i].hardware)
+            dev = i;
+    if (dev == kNone)
+        return;
+    WarpGpu gpu;
+    TextBuf err;
+    CHECK(gpu.open(dev, 32, &err));
+    if (!gpu.is_open())
+        return;
+    const char* prog = "DIV INC ROT NOP1 IFZ NOP0 DIV SWAP";
+    auto start = [](WFix& f) {
+        for (u32 l = 0; l < 32; ++l) {
+            Lane& x = f.lane(l);
+            x.ip = 106; // the second DIV
+            x.ax = 0xffffffbbu;
+            x.bx = 0xa0fe2b80u + l; // a different dividend per lane
+            x.cx = 0x01568f9du;
+        }
+    };
+    u32 first_bad = 0;
+    for (u32 steps = 1; steps <= 490 && !first_bad; ++steps) {
+        WFix r, g;
+        CHECK(r.init(prog, 32, steps));
+        CHECK(g.init(prog, 32, steps));
+        start(r);
+        start(g);
+        r.s.tick(0); // the reference
+        g.s.tick_first(0);
+        CHECK(g.s.warp_pack(0));
+        Array<u32> send;
+        send.push(g.w);
+        WarpJob j = {};
+        j.node = 0;
+        j.img = g.s.warp_image().data();
+        j.img_words = static_cast<u32>(g.s.warp_image().size());
+        j.recs = g.s.warp_records().data();
+        j.nrec = static_cast<u32>(g.s.warp_records().size());
+        j.lanes = g.s.lanes_mut().data();
+        j.nlanes = static_cast<u32>(g.s.lanes_mut().size());
+        j.send = send.data();
+        j.nsend = 1;
+        CHECK(gpu.run(g.s.warp_consts().data(), static_cast<u32>(g.s.warp_consts().size()), &j, 1, &err));
+        WarpFetch f = {0, g.w, g.s.lanes_mut().data() + static_cast<usize>(g.w) * 32};
+        CHECK(gpu.fetch(&f, 1, &err));
+        for (u32 l = 0; l < 32 && !first_bad; ++l) {
+            const Lane& a = r.lane(l);
+            const Lane& b = g.lane(l);
+            if (memcmp(&a, &b, sizeof(Lane)) != 0) {
+                first_bad = steps;
+                printf("  div loop: lane %u differs after %u steps: reference ip %u ax %08x bx %08x cx %08x, GPU ip %u "
+                       "ax %08x bx %08x cx %08x\n",
+                       l, steps, a.ip, a.ax, a.bx, a.cx, b.ip, b.ax, b.bx, b.cx);
+            }
+        }
+    }
+    CHECK(first_bad == 0);
+    printf("  warp GPU division: a loop of DIVs agrees with the reference for 1 to 490 steps\n");
 }
 
 // gpu.warps = false is Phase 7 exactly: the same hash as no key at all.
@@ -611,5 +680,6 @@ void suite_warp() {
     test_view_warps();
     test_determinism();
     test_gpu_device();
+    test_gpu_div_loop();
     test_off_is_phase7();
 }

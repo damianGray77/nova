@@ -62,7 +62,11 @@ class Run {
     // threads: total threads, 0 = all hardware threads.
     bool init(u32 threads, TextBuf* err);
     // Resumes from snapshot bytes: config and world both come from the snapshot.
-    bool init_from_snapshot(const u8* data, usize n, u32 threads, TextBuf* err);
+    // `edit`, if given, may change the snapshot's config before the world is
+    // made (nova resume --set: warp.device, warp.verify and the like); false
+    // from it stops the resume.
+    bool init_from_snapshot(const u8* data, usize n, u32 threads, TextBuf* err,
+                            bool (*edit)(Config&, void*) = nullptr, void* ctx = nullptr);
     // What the budgets (budget.h) resolved to, a line each ("" if none).
     Str budget_notes() const { return budget_notes_.view(); }
 

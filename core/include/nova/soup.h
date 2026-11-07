@@ -541,6 +541,12 @@ struct DispersalPorts {
     u32 capacity = 0;
 };
 
+// Debugging (warp.verify, warp.cpp): while on, the reference logs every
+// instruction of one lane (the warp whose first lane is lane0, its lane
+// `lane`) into `out`, a line each. One thread at a time.
+void warp_trace_begin(u32 lane0, u32 lane, TextBuf* out);
+void warp_trace_end();
+
 class Soup {
   public:
     Soup() = default;
@@ -674,7 +680,10 @@ class Soup {
 
     void hash_into(Hasher& h) const;
     void save(ByteWriter& w) const;
-    bool load(ByteReader& r, TextBuf* err);
+    // `version`: the snapshot format's (v1 lacks the pages' heat inputs).
+    bool load(ByteReader& r, TextBuf* err, u32 version = 2);
+    // Debugging: the state a section a file, <prefix>.<section> (soup.cpp).
+    void debug_dump(const char* prefix) const;
 
     // The replicator detector (lineage.h), or nullptr. It only watches: the
     // soup tells it about new blocks, freed blocks and DIVIDEs, and nothing it
@@ -713,7 +722,9 @@ class Soup {
     void tick_first(u64 tick);
     bool warp_pack(u32 round);
     void warp_run_ref();
-    void warp_unpack(bool on_gpu = false); // on_gpu: the round's lanes are now the GPU's
+    // all_on_gpu: every record ran on the GPU; otherwise those marked in
+    // warp_record_on_gpu() did. Their warps' lanes are now the GPU's.
+    void warp_unpack(bool all_on_gpu = false);
     void warp_host(u32 round);
     void tick_second();
     // Where a warp's lanes are current (Phase 8b): the GPU keeps them between
@@ -726,6 +737,22 @@ class Soup {
     u8 lane_state(u32 w) const { return wstate_[w]; }
     void set_lane_state(u32 w, u8 s) { wstate_[w] = s; }
     bool lanes_on_device() const; // any warp's lanes only on the GPU
+    // The round's records after warp_pack, and one run on the CPU reference:
+    // records are independent, so threads may share a node's round (the
+    // world spreads a heavy node's records over them). warp_run_ref() runs
+    // them all, one after another.
+    usize warp_record_count() const { return wrec_.size(); }
+    void warp_run_record(usize i);
+    // The per-body split (Phase 10 profiling): which of the round's records
+    // the GPU runs (1; all 0 after warp_pack), each record's size in words,
+    // and the length of its body's last first round in warp steps (a GPU
+    // runs a body's steps one after another; 0 for a body that hasn't run;
+    // the peak, decaying a quarter a round).
+    Array<u8>& warp_record_on_gpu() { return wrec_gpu_; }
+    u32 warp_record_words(usize i) const {
+        return static_cast<u32>((i + 1 < wrec_.size() ? wrec_[i + 1] : wimg_.size()) - wrec_[i]);
+    }
+    u32 warp_record_chain(usize i) const { return wbody_[i] < wbody_chain_.size() ? wbody_chain_[wbody_[i]] : 0; }
     // Lanes not halted (and not yielded either) after a warp's last run.
     u32 warp_live(u32 w) const { return wlive_[w]; }
     // The longest body's warp steps in the last round (a GPU runs a body's
@@ -734,6 +761,7 @@ class Soup {
     // The round's packed image (body records), the record offsets, the
     // constants, and the node's lanes: what the GPU backend moves.
     Array<u32>& warp_image() { return wimg_; }
+    const Array<u32>& warp_image_view() const { return wimg_; }
     const Array<u32>& warp_records() const { return wrec_; }
     const Array<u32>& warp_consts() const { return wcst_; }
     Array<Lane>& lanes_mut() { return lanes_; }
@@ -810,6 +838,7 @@ class Soup {
     void pool_remove(u32 u);
 
     // tick phases
+    void tick_second_parts(); // tick_second's work (it times it)
     void sparks(u32 count);
     void prepare_heat();
     void run_body(u32 b, u64 tick);
@@ -846,7 +875,15 @@ class Soup {
     Array<u32> pool_pos_; // index in pool_, or kNone
 
     Array<float> page_heat_;
-    Array<u32> page_fetch_, page_write_; // this tick's heat inputs
+    // This tick's heat inputs. Writes after the tick's heat update (async
+    // accelerator results at the barrier, actions landing) count toward the
+    // next tick's, so they are state: saved, and hashed when any are pending.
+    Array<u32> page_fetch_, page_write_;
+
+  public:
+    bool pages_pending() const; // any heat inputs carried into the next tick
+
+  private:
 
     // GPU and NPU units (world state; empty without one)
     UnitLedger gpu_, npu_;
@@ -899,6 +936,9 @@ class Soup {
     Array<u32> wlive_, wact_;   // per warp slot: lanes not halted / nor yielded (follow the lanes)
     Array<u8> wstate_;          // per warp slot: kLanesHost, kLanesDevice or kLanesBoth
     u32 wchain_ = 0;            // the last round's longest body, in steps
+    Array<u8> wrec_gpu_;        // per record of the round: the GPU runs it (the per-body split)
+    Array<u32> wbody_chain_;    // per body slot: its warp steps in its last first round
+    u32 wround_ = 0;            // the round warp_pack packed
     // Phase 9b, timed tables: per warp slot, its own clock's time used this
     // tick (working state), and the tick it may run again after a host
     // instruction or an action (world state, as the warps are).
@@ -966,7 +1006,21 @@ class Soup {
     // Phase 10: the node's vents (their places in memory; none without them).
     const Array<u32>& vent_places() const { return vent_at_; }
 
+    // Profiling (`nova run --profile`): when on, each part of this node's
+    // tick adds its wall time here, in seconds. Working state that changes
+    // nothing in the world.
+    struct Timing {
+        double first;  // vents, sparks, heat and GPU prep: tick_first without the bodies
+        double bodies; // the bodies' CPUs (run_body)
+        double pack, ref, unpack, host; // warps: packing, the CPU reference's run, unpacking, host instructions
+        double second; // heat, hazards, decay and the death sweep (tick_second)
+    };
+    void set_timing(bool on) { timing_on_ = on; }
+    Timing& timing() { return timing_; }
+
   private:
+    bool timing_on_ = false;
+    Timing timing_ = {};
 
   public:
     // Phase 9c: a body's E millicores (0 without them), and the node's.

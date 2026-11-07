@@ -1443,6 +1443,7 @@ const char* const kWarpHead = R"(
 #define GS_ADD(x, v) InterlockedAdd(x, v)
 #define GS_MAX(x, v) InterlockedMax(x, v)
 #define W_LOOP [loop]
+#define W_TRACE(wr, l, step, ip, op, L)
 #define LANE_T LaneR
 #define WARP_LANE0(wr, wi) IMG((wr) + WW_LANE0)
 #define STACK_GET(L, i) g_lanes[g_lidx].stack[(i)]
@@ -1649,24 +1650,77 @@ bool ensure_buffer(Queue& q, ID3D12Resource*& res, u64& cap, u64 need, D3D12_HEA
 
 // The lanes' own small kernel: moves whole warps' lanes between a packed list
 // and the GPU's lane heap (mode 0: list into the heap, sending them; mode 1:
-// heap into the list, fetching them). Lanes are 29 words.
+// heap into the list, fetching them). Lanes are 29 words. A group a warp, so
+// no integer division (which this GPU can get wrong, warp_isa.inc's w_ulong:
+// a word's warp as t / words once landed lanes in the wrong warp).
 const char* const kLaneMoveHlsl = R"(
 StructuredBuffer<uint> g_at : register(t0);
 StructuredBuffer<uint> g_src : register(t1);
 RWStructuredBuffer<uint> g_heap : register(u0);
 RWStructuredBuffer<uint> g_out : register(u1);
-cbuffer K : register(b0) { uint g_words; uint g_warp_words; uint g_mode; uint g_row; };
+cbuffer K : register(b0) { uint g_warps; uint g_warp_words; uint g_mode; uint g_row; };
 [numthreads(64, 1, 1)]
-void main(uint3 id : SV_DispatchThreadID) {
-    uint t = id.y * g_row * 64u + id.x;
-    if (t >= g_words)
+void main(uint3 g : SV_GroupID, uint3 l : SV_GroupThreadID) {
+    uint w = g.y * g_row + g.x;
+    if (w >= g_warps)
         return;
-    uint w = t / g_warp_words;
-    uint h = g_at[w] * 29u + (t - w * g_warp_words);
-    if (g_mode == 0u)
-        g_heap[h] = g_src[t];
-    else
-        g_out[t] = g_heap[h];
+    uint h = g_at[w] * 29u, s = w * g_warp_words;
+    for (uint k = l.x; k < g_warp_words; k += 64u) {
+        if (g_mode == 0u)
+            g_heap[h + k] = g_src[s + k];
+        else
+            g_out[s + k] = g_heap[h + k];
+    }
+}
+)";
+
+// The lanes of warps that stopped at a host instruction, gathered after the
+// round's run into one buffer that comes back with the round (so the host
+// needn't fetch them in a round trip of their own). A group per record and
+// warp: the first thread checks the warp's wait flag and takes a slot (in any
+// order: the host finds each warp by its lane index); the group copies the
+// lanes. g_out: [0] the count, [1, 1 + cap) each slot's heap lane index, then
+// the slots' lanes. A warp past the capacity isn't gathered (the host
+// fetches it as before). Groups: x the warp in its record, y + z x g_row the
+// record (no integer division: see kLaneMoveHlsl).
+const char* const kLaneGatherHlsl = R"(
+StructuredBuffer<uint4> g_tab : register(t0);
+StructuredBuffer<uint> g_img : register(t1);
+RWStructuredBuffer<uint> g_heap : register(u0);
+RWStructuredBuffer<uint> g_out : register(u1);
+cbuffer K : register(b0) { uint g_n; uint g_cap; uint g_lw; uint g_row; };
+groupshared uint gs_slot;
+groupshared uint gs_at;
+[numthreads(64, 1, 1)]
+void main(uint3 g : SV_GroupID, uint3 t : SV_GroupThreadID) {
+    uint r = g.z * g_row + g.y;
+    if (r >= g_n)
+        return;
+    uint lanes = g_lw & 0xFFFFu;
+    uint4 e = g_tab[r];
+    uint i = g.x;
+    uint rec = e.x + e.y;
+    if (t.x == 0u) {
+        gs_slot = 0xFFFFFFFFu;
+        if (i < g_img[rec + WB_NWARP] && g_img[rec + WB_WARPS + i * WW_SIZE + WW_WAIT] != 0u) {
+            uint at = e.z + g_img[rec + WB_WARPS + i * WW_SIZE + WW_LANE0];
+            uint k = 0u;
+            InterlockedAdd(g_out[0], 1u, k);
+            if (k < g_cap) {
+                gs_slot = k;
+                gs_at = at;
+                g_out[1u + k] = at;
+            }
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    uint slot = gs_slot;
+    if (slot == 0xFFFFFFFFu)
+        return;
+    uint words = lanes * 29u;
+    uint src = gs_at * 29u, dst = 1u + g_cap + slot * words;
+    for (uint w = t.x; w < words; w += 64u)
+        g_out[dst + w] = g_heap[src + w];
 }
 )";
 
@@ -1678,6 +1732,13 @@ struct WarpGpu::Impl {
     ID3D12PipelineState* pso = nullptr;      // records in memory
     ID3D12PipelineState* pso_lds = nullptr;  // records of at most kWarpLdsWords, in groupshared memory
     ID3D12PipelineState* pso_move = nullptr; // sending and fetching lanes
+    ID3D12PipelineState* pso_gather = nullptr; // waiting warps' lanes into the round's readback
+    // The gathered lanes: their buffer and readback, the round's capacity in
+    // warps (from the last round's count), and whether the last round has them.
+    ID3D12Resource *gout = nullptr, *grb = nullptr;
+    u64 gout_cap = 0, grb_cap = 0;
+    u32 gcap = 256, gcap_round = 0;
+    bool gathered = false;
     // A round's buffers.
     ID3D12Resource *up = nullptr, *img = nullptr, *rb = nullptr;
     u64 up_cap = 0, img_cap = 0, rb_cap = 0;
@@ -1740,7 +1801,7 @@ bool WarpGpu::open(u32 index, u32 lanes, TextBuf* err, double* compile_ms) {
     snprintf(lds, sizeof lds, "%u", kWarpLdsWords);
     const D3D_SHADER_MACRO defs[] = {{"W_LANES", nl}, {"W_LDS", "0"}, {nullptr, nullptr}};
     const D3D_SHADER_MACRO defs_lds[] = {{"W_LANES", nl}, {"W_LDS", lds}, {nullptr, nullptr}};
-    ID3DBlob *msg = nullptr, *sig = nullptr, *mv = nullptr;
+    ID3DBlob *msg = nullptr, *sig = nullptr, *mv = nullptr, *ga = nullptr;
     HRESULT hr = S_OK;
     Array<u8> code, code_lds;
     const double t0 = clock_seconds();
@@ -1752,6 +1813,22 @@ bool WarpGpu::open(u32 index, u32 lanes, TextBuf* err, double* compile_ms) {
                         D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &mv, &msg);
         if (FAILED(hr)) {
             say_hr(err, "lane kernel failed to compile", hr);
+            ok = false;
+        }
+        release(msg);
+    }
+    if (ok) { // the gather kernel reads the image's layout
+        TextBuf gsrc;
+        gsrc.append(reinterpret_cast<const char*>(kWarplayoutSource));
+        gsrc.append(kLaneGatherHlsl);
+        hr = D3DCompile(gsrc.c_str(), gsrc.size(), "lane_gather", nullptr, nullptr, "main", "cs_5_1",
+                        D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &ga, &msg);
+        if (FAILED(hr)) {
+            say_hr(err, "gather kernel failed to compile", hr);
+            if (msg && err) {
+                err->append(": ");
+                err->append(static_cast<const char*>(msg->GetBufferPointer()));
+            }
             ok = false;
         }
         release(msg);
@@ -1794,6 +1871,10 @@ bool WarpGpu::open(u32 index, u32 lanes, TextBuf* err, double* compile_ms) {
             pd.CS.BytecodeLength = mv->GetBufferSize();
             if (ok && FAILED(hr = m->q.dev->CreateComputePipelineState(&pd, IID_PPV_ARGS(&m->pso_move))))
                 ok = false;
+            pd.CS.pShaderBytecode = ga->GetBufferPointer();
+            pd.CS.BytecodeLength = ga->GetBufferSize();
+            if (ok && FAILED(hr = m->q.dev->CreateComputePipelineState(&pd, IID_PPV_ARGS(&m->pso_gather))))
+                ok = false;
             if (!ok)
                 say_hr(err, "pipeline failed", hr);
         }
@@ -1801,6 +1882,7 @@ bool WarpGpu::open(u32 index, u32 lanes, TextBuf* err, double* compile_ms) {
     release(msg);
     release(sig);
     release(mv);
+    release(ga);
     if (ok) { // timestamps for --profile; a device without them just has none
         D3D12_QUERY_HEAP_DESC qd = {};
         qd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
@@ -1834,9 +1916,12 @@ void WarpGpu::close() {
     release(m->fup);
     release(m->fstage);
     release(m->frb);
+    release(m->gout);
+    release(m->grb);
     release(m->pso);
     release(m->pso_lds);
     release(m->pso_move);
+    release(m->pso_gather);
     release(m->root);
     m->q.destroy();
     delete m;
@@ -1873,10 +1958,14 @@ void warp_copy_in(void* ctx, u32 j) {
     }
 }
 
+// Only the records the GPU ran come back: the CPU threads may be running the
+// node's others in the same image meanwhile (the per-body split).
 void warp_copy_out(void* ctx, u32 j) {
     const WarpCopy& c = *static_cast<const WarpCopy*>(ctx);
     const WarpJob& job = c.jobs[j];
-    memcpy(job.img, c.rbuf + c.img_at[j], static_cast<usize>(job.img_words) * 4);
+    for (u32 r = 0; r < job.nrec; ++r)
+        memcpy(job.img + job.recs[r], c.rbuf + c.img_at[j] + static_cast<u64>(job.recs[r]) * 4,
+               static_cast<usize>(warp_job_rec_words(job, r)) * 4);
 }
 
 } // namespace
@@ -1971,7 +2060,7 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
         for (u32 j = 0; j < njobs; ++j) {
             for (u32 r = 0; r < jobs[j].nrec; ++r) {
                 const u32 rec = jobs[j].recs[r];
-                const u32 size = (r + 1 < jobs[j].nrec ? jobs[j].recs[r + 1] : jobs[j].img_words) - rec;
+                const u32 size = warp_job_rec_words(jobs[j], r);
                 const bool fits = size <= kWarpLdsWords;
                 if (fits == (pass == 0)) {
                     m->table[t++] = static_cast<u32>(m->img_at[j]);
@@ -1991,11 +2080,28 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
     const u64 cst_b = align256(static_cast<u64>(ncst) * 4), tab_b = align256(nrec * 16);
     const u64 img_b = align256((img_words ? img_words : 1) * 4);
     const u64 send_b = align256((sent ? sent : 1) * wl * sizeof(Lane)), at_b = align256((sent ? sent : 1) * 4);
-    if (!ensure_buffer(m->q, m->up, m->up_cap, cst_b + tab_b + img_b + send_b + at_b, D3D12_HEAP_TYPE_UPLOAD,
+    const u64 zero_at = cst_b + tab_b + img_b + send_b + at_b; // 256 zero bytes (the gather's count)
+    // The gather (waiting warps' lanes back with the round): its capacity in
+    // warps, and the most warps a record holds.
+    u32 wmax = 0;
+    for (u32 j = 0; j < njobs; ++j)
+        for (u32 r = 0; r < jobs[j].nrec; ++r) {
+            const u32 nw = jobs[j].img[jobs[j].recs[r] + WB_NWARP];
+            wmax = nw > wmax ? nw : wmax;
+        }
+    m->gathered = false;
+    m->gcap_round = m->pso_gather && wmax ? m->gcap : 0;
+    const u64 g_bytes = align256((1ull + m->gcap_round + static_cast<u64>(m->gcap_round) * wl * 29) * 4);
+    if (!ensure_buffer(m->q, m->up, m->up_cap, zero_at + 256, D3D12_HEAP_TYPE_UPLOAD,
                        D3D12_RESOURCE_STATE_GENERIC_READ, false) ||
         !ensure_buffer(m->q, m->img, m->img_cap, img_b, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, true) ||
         !ensure_buffer(m->q, m->rb, m->rb_cap, img_b, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST,
-                       false)) {
+                       false) ||
+        (m->gcap_round &&
+         (!ensure_buffer(m->q, m->gout, m->gout_cap, g_bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON,
+                         true) ||
+          !ensure_buffer(m->q, m->grb, m->grb_cap, g_bytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST,
+                         false)))) {
         say(err, "warp buffers could not be made (out of video memory?)");
         return false;
     }
@@ -2009,6 +2115,7 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
     memcpy(up, cst, static_cast<usize>(ncst) * 4);
     memcpy(up + cst_b, m->table.data(), nrec * 16);
     memcpy(up + cst_b + tab_b + img_b + send_b, m->at.data(), sent * 4);
+    memset(up + zero_at, 0, 256);
     Array<u64> img_off, send_off;
     for (u32 j = 0; j < njobs; ++j) {
         img_off.push(cst_b + tab_b + m->img_at[j] * 4);
@@ -2039,8 +2146,7 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
         L->SetComputeRootShaderResourceView(1, va + cst_b + tab_b + img_b);
         L->SetComputeRootUnorderedAccessView(2, m->heap->GetGPUVirtualAddress());
         L->SetComputeRootUnorderedAccessView(3, m->heap->GetGPUVirtualAddress());
-        const u64 words = sent * wl * 29;
-        m->dispatch_rows(L, (words + 63) / 64, static_cast<u32>(words), wl * 29, 0);
+        m->dispatch_rows(L, sent, static_cast<u32>(sent), wl * 29, 0); // a group a warp
         m->q.uav_barrier(m->heap);
     }
     if (stamps)
@@ -2063,7 +2169,29 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
     }
     if (stamps)
         L->EndQuery(m->qh, D3D12_QUERY_TYPE_TIMESTAMP, 2);
-    m->q.barrier(m->img, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_RESOURCE_STATES img_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    if (m->gcap_round) { // the waiting warps' lanes, gathered to come back with the round
+        m->q.uav_barrier(m->img);
+        m->q.uav_barrier(m->heap);
+        m->q.barrier(m->img, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        img_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        m->q.barrier(m->gout, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+        L->CopyBufferRegion(m->gout, 0, m->up, zero_at, 4); // the count starts at 0
+        m->q.barrier(m->gout, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        L->SetPipelineState(m->pso_gather);
+        L->SetComputeRootShaderResourceView(0, va + cst_b);
+        L->SetComputeRootShaderResourceView(1, m->img->GetGPUVirtualAddress());
+        L->SetComputeRootUnorderedAccessView(2, m->heap->GetGPUVirtualAddress());
+        L->SetComputeRootUnorderedAccessView(3, m->gout->GetGPUVirtualAddress());
+        const u32 ry = nrec < 65535 ? static_cast<u32>(nrec) : 65535u; // records: y, then z
+        const u32 rz = static_cast<u32>((nrec + ry - 1) / ry);
+        const u32 k[4] = {static_cast<u32>(nrec), m->gcap_round, wl | (wmax << 16), ry};
+        L->SetComputeRoot32BitConstants(4, 4, k, 0);
+        L->Dispatch(wmax, ry, rz);
+        m->q.barrier(m->gout, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        L->CopyBufferRegion(m->grb, 0, m->gout, 0, g_bytes);
+    }
+    m->q.barrier(m->img, img_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
     if (img_words)
         L->CopyBufferRegion(m->rb, 0, m->img, 0, img_words * 4);
     if (stamps) {
@@ -2081,7 +2209,8 @@ bool WarpGpu::finish(TextBuf* err, ThreadPool* pool) {
     if (!impl_)
         return false;
     Impl* m = impl_;
-    last_ms_ = 0;
+    last_ms_ = last_kernel_ms_ = 0;
+    last_longest_ = 0;
     if (!m->busy)
         return m->nrec == 0 || m->njobs == 0 ? true : false;
     m->busy = false;
@@ -2111,13 +2240,24 @@ bool WarpGpu::finish(TextBuf* err, ThreadPool* pool) {
             warp_copy_out(&cout, j);
     D3D12_RANGE none = {0, 0};
     m->rb->Unmap(0, &none);
+    if (m->gcap_round) { // the gathered lanes are this round's; the next capacity follows the count
+        u32 count = 0;
+        void* gm = nullptr;
+        D3D12_RANGE first = {0, 4};
+        if (SUCCEEDED(m->grb->Map(0, &first, &gm))) {
+            count = *static_cast<const u32*>(gm);
+            m->grb->Unmap(0, &none);
+            m->gathered = true;
+        }
+        const u64 want = static_cast<u64>(count) * 5 / 4 + 64;
+        m->gcap = static_cast<u32>(want < 256 ? 256 : (want > 8192 ? 8192 : want));
+    }
     u64 longest = 0; // the longest body's steps: a group runs its warps one after another
     stats_.img_words += m->img_words;
     for (u32 j = 0; j < m->njobs; ++j) {
         const WarpJob& job = m->jobs[j];
         for (u32 r = 0; r < job.nrec; ++r) {
-            const u32 end = r + 1 < job.nrec ? job.recs[r + 1] : job.img_words;
-            const u64 size = end - job.recs[r];
+            const u64 size = warp_job_rec_words(job, r);
             stats_.rec_words_max = size > stats_.rec_words_max ? size : stats_.rec_words_max;
             const u32* rec = job.img + job.recs[r];
             u64 body = 0;
@@ -2128,6 +2268,7 @@ bool WarpGpu::finish(TextBuf* err, ThreadPool* pool) {
         }
     }
     stats_.steps_longest += longest;
+    last_longest_ = longest;
     if (m->freq) {
         u64 ts[4] = {};
         if (read_back(m->qrb, ts, sizeof ts) && ts[3] >= ts[0]) {
@@ -2136,6 +2277,7 @@ bool WarpGpu::finish(TextBuf* err, ThreadPool* pool) {
             stats_.ms_dev_kernel += (ts[2] - ts[1]) * tk;
             stats_.ms_dev_down += (ts[3] - ts[2]) * tk;
             last_ms_ = (ts[3] - ts[0]) * tk;
+            last_kernel_ms_ = (ts[2] - ts[1]) * tk;
         }
     }
     if (last_ms_ == 0)
@@ -2150,6 +2292,60 @@ bool WarpGpu::finish(TextBuf* err, ThreadPool* pool) {
     stats_.ms_gpu += gpu_s * 1000.0;
     stats_.ms_out += (clock_seconds() - t_out) * 1000.0;
     return true;
+}
+
+u32 WarpGpu::take_gathered(const WarpFetch* list, u32 n, u8* got) {
+    for (u32 i = 0; i < n; ++i)
+        got[i] = 0;
+    if (!impl_ || impl_->busy || !impl_->gathered || n == 0)
+        return 0;
+    Impl* m = impl_;
+    m->gathered = false; // once a round
+    const u32 wl = m->lanes, cap = m->gcap_round;
+    const u64 words = static_cast<u64>(wl) * 29;
+    void* mapped = nullptr;
+    D3D12_RANGE head = {0, static_cast<SIZE_T>((1ull + cap) * 4)};
+    if (FAILED(m->grb->Map(0, &head, &mapped)))
+        return 0;
+    const u32* out = static_cast<const u32*>(mapped);
+    const u32 ng = out[0] < cap ? out[0] : cap;
+    Array<u64> keys; // (heap lane index << 32 | slot), sorted
+    keys.resize(ng);
+    for (u32 k = 0; k < ng; ++k)
+        keys[k] = (static_cast<u64>(out[1 + k]) << 32) | k;
+    D3D12_RANGE none = {0, 0};
+    m->grb->Unmap(0, &none);
+    if (ng == 0)
+        return 0;
+    sort_u64(keys.data(), keys.size());
+    D3D12_RANGE all = {0, static_cast<SIZE_T>((1ull + cap + static_cast<u64>(ng) * words) * 4)};
+    if (FAILED(m->grb->Map(0, &all, &mapped)))
+        return 0;
+    out = static_cast<const u32*>(mapped);
+    u32 taken = 0;
+    for (u32 i = 0; i < n; ++i) {
+        if (list[i].node >= m->rbase.size())
+            continue;
+        const u64 at = m->rbase[list[i].node] + static_cast<u64>(list[i].slot) * wl;
+        usize lo = 0, hi = keys.size();
+        while (lo < hi) { // the first key >= at << 32
+            const usize mid = (lo + hi) / 2;
+            if ((keys[mid] >> 32) < at)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        if (lo == keys.size() || (keys[lo] >> 32) != at)
+            continue;
+        const u32 slot = static_cast<u32>(keys[lo] & 0xFFFFFFFFu);
+        memcpy(list[i].dst, out + 1 + cap + static_cast<u64>(slot) * words, static_cast<usize>(words) * 4);
+        got[i] = 1;
+        ++taken;
+    }
+    m->grb->Unmap(0, &none);
+    stats_.lanes_gathered += taken;
+    stats_.bytes_down += static_cast<u64>(ng) * words * 4;
+    return taken;
 }
 
 bool WarpGpu::fetch(const WarpFetch* list, u32 n, TextBuf* err) {
@@ -2196,8 +2392,7 @@ bool WarpGpu::fetch(const WarpFetch* list, u32 n, TextBuf* err) {
     L->SetComputeRootShaderResourceView(1, va);
     L->SetComputeRootUnorderedAccessView(2, m->heap->GetGPUVirtualAddress());
     L->SetComputeRootUnorderedAccessView(3, m->fstage->GetGPUVirtualAddress());
-    const u64 words = static_cast<u64>(n) * wl * 29;
-    m->dispatch_rows(L, (words + 63) / 64, static_cast<u32>(words), wl * 29, 1);
+    m->dispatch_rows(L, n, n, wl * 29, 1); // a group a warp
     m->q.barrier(m->fstage, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
     L->CopyBufferRegion(m->frb, 0, m->fstage, 0, bytes);
     if (!m->q.exec(err) || !m->q.wait(err)) {

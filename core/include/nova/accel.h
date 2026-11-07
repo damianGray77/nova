@@ -113,13 +113,23 @@ struct WarpJob {
     u32 node;            // which node: where its lanes live on the GPU
     u32* img;            // the node's image (warp_isa.inc's records): read and written
     u32 img_words;
-    const u32* recs;     // its record offsets
+    const u32* recs;     // the record offsets the GPU runs (any of the image's: the rest are left as they are)
     u32 nrec;
     const void* lanes;   // the node's lanes on the host (soup.h Lane), by slot
     u32 nlanes;          // how many (warp slots x lanes)
     const u32* send;     // warp slots whose host lanes must go to the GPU first
     u32 nsend;
+    // Each record's size in words, beside recs; nullptr when recs are all the
+    // image's records in order (each then runs to the next, the last to the end).
+    const u32* rec_words = nullptr;
 };
+
+// A job's record r's size in words.
+inline u32 warp_job_rec_words(const WarpJob& j, u32 r) {
+    if (j.rec_words)
+        return j.rec_words[r];
+    return (r + 1 < j.nrec ? j.recs[r + 1] : j.img_words) - j.recs[r];
+}
 
 // A warp's lanes to bring back from the GPU into the host's copy.
 struct WarpFetch {
@@ -133,6 +143,7 @@ struct WarpGpuStats {
     u64 bytes_up = 0, bytes_down = 0;
     u64 lanes_sent = 0, lanes_fetched = 0; // warps' lanes moved (each warp's, lanes-per-warp Lanes)
     double ms_fetch = 0;                   // fetching lanes back (a round trip each time)
+    u64 lanes_gathered = 0;                // warps' lanes that came back with their round (no round trip)
     double ms_in = 0;   // copying the round into the upload buffer (CPU)
     double ms_gpu = 0;  // the device: upload, kernel, download
     double ms_out = 0;  // copying the results out of the readback buffer (CPU)
@@ -168,18 +179,30 @@ class WarpGpu {
     bool finish(TextBuf* err, class ThreadPool* pool = nullptr);
     // Brings warps' lanes from the GPU into the host's copies (n of them).
     bool fetch(const WarpFetch* list, u32 n, TextBuf* err);
+    // The lanes of warps that stopped at a host instruction come back with
+    // their round (gathered on the GPU after the run, into the round's own
+    // readback), so most host instructions need no fetch. After finish():
+    // copies those of the listed warps it has, sets got[i] for each, and
+    // returns how many (the rest still need fetch()). Once a round.
+    u32 take_gathered(const WarpFetch* list, u32 n, u8* got);
     // submit() then finish(): the round with nothing in between.
     bool run(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, TextBuf* err, class ThreadPool* pool = nullptr) {
         return submit(cst, ncst, jobs, njobs, err, pool) && finish(err, pool);
     }
     // The device's time for the last round (its timestamps), or 0.
     double last_ms() const { return last_ms_; }
+    // The last round's kernel time on the device's clock (0 without
+    // timestamps) and its longest body's warp steps: a GPU runs a body's
+    // steps one after another, so the one sets the other (the split's model).
+    double last_kernel_ms() const { return last_kernel_ms_; }
+    u64 last_longest() const { return last_longest_; }
 
   private:
     struct Impl;
     Impl* impl_ = nullptr;
     WarpGpuStats stats_;
-    double last_ms_ = 0;
+    double last_ms_ = 0, last_kernel_ms_ = 0;
+    u64 last_longest_ = 0;
 };
 
 // The NPU backend: dot, matvec and matmul through DirectML as float16 matrix

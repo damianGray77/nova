@@ -34,10 +34,12 @@ bool snapshot_parse(const u8* data, usize n, SnapshotHeader* h, TextBuf* err) {
     u32 flags = 0;
     r.get_bytes(magic, sizeof magic);
     r.get_u32(&h->version);
-    if (r.ok() && h->version != kSnapshotVersion) {
+    if (r.ok() && (h->version < kSnapshotOldest || h->version > kSnapshotVersion)) {
         err->append("snapshot: unsupported format version ");
         err->append_u64(h->version);
-        err->append(" (this build reads version ");
+        err->append(" (this build reads versions ");
+        err->append_u64(kSnapshotOldest);
+        err->append(" to ");
         err->append_u64(kSnapshotVersion);
         err->append_char(')');
         return false;
