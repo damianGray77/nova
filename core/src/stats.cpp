@@ -38,12 +38,16 @@ const char* const kColumns[kStatsColumns] = {
     // Phase 10: vents, decay, bites and death (sums)
     "vent_codons",  "decayed",      "bites_waste",   "bites_body",   "codons_bitten", "threads_ended",
     "died_halted",  "died_frozen",  "died_worn",
+    // dormancy and drift (five sums, then two gauges)
+    "dormant_started", "dormant_woke", "dormant_expired", "dormant_eaten", "dormant_hops", "drifting", "resting",
     "compress",     "ambient"};
 // The first 39 tally fields fill columns 3-41; Phase 8's five go after
 // live_nodes, then Phase 9's four after the warp gauges, then Phase 9c's two
-// and its gauge, then Phase 10's nine.
-inline constexpr u32 kTallyEarly = 39, kTallyWarp = 5, kTallyAction = 4, kTallyThread = 2, kTallyLife = 9;
-static_assert(sizeof(SoupTally) / sizeof(u64) == kTallyEarly + kTallyWarp + kTallyAction + kTallyThread + kTallyLife,
+// and its gauge, then Phase 10's nine, then dormancy's five and its gauges.
+inline constexpr u32 kTallyEarly = 39, kTallyWarp = 5, kTallyAction = 4, kTallyThread = 2, kTallyLife = 9,
+                     kTallyDormant = 5;
+static_assert(sizeof(SoupTally) / sizeof(u64) ==
+                  kTallyEarly + kTallyWarp + kTallyAction + kTallyThread + kTallyLife + kTallyDormant,
               "a SoupTally field was added: update kColumns");
 
 } // namespace
@@ -115,7 +119,7 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
                         disk_held,       w.live_nodes()};
     const usize nt = sizeof tail / sizeof tail[0];
     static_assert(3 + kTallyEarly + sizeof tail / sizeof tail[0] + kTallyWarp + 2 + kTallyAction + kTallyThread + 1 +
-                          kTallyLife ==
+                          kTallyLife + kTallyDormant + 2 ==
                       kStatsIntColumns,
                   "stats row shape");
     for (usize i = 0; i < nt; ++i)
@@ -132,6 +136,14 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
     for (usize i = 0; i < kTallyLife; ++i) // Phase 10
         v[42 + nt + kTallyWarp + 2 + kTallyAction + kTallyThread + 1 + i] =
             t[kTallyEarly + kTallyWarp + kTallyAction + kTallyThread + i];
+    const usize dz = 42 + nt + kTallyWarp + 2 + kTallyAction + kTallyThread + 1 + kTallyLife;
+    for (usize i = 0; i < kTallyDormant; ++i) // dormancy and drift
+        v[dz + i] = t[kTallyEarly + kTallyWarp + kTallyAction + kTallyThread + kTallyLife + i];
+    u64 resting = 0;
+    for (u32 n = 0; n < w.node_count(); ++n)
+        resting += w.node_soup(n).resting_count();
+    v[dz + kTallyDormant] = w.drifting();
+    v[dz + kTallyDormant + 1] = resting;
     marks->links = links;
     marks->inject = inject;
     marks->gpu = gpu;

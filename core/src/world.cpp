@@ -288,7 +288,7 @@ bool World::init(Config& cfg) {
             recover_every_ = get_u32_in(cfg, "node.recover_every", 100, 1, 1000000000);
             fallow_min_ = cfg.get_u64("node.fallow_min", 2000);
         }
-        lifecycle_ = soup_params_.endurance > 0 || soup_params_.starve_ticks > 0 || land_ < 1.0;
+        lifecycle_ = soup_params_.endurance > 0 || land_ < 1.0;
         if (lifecycle_ && !spatial_)
             cfg.fail("node.endurance", "the node lifecycle needs world.graph = procedural or landscape");
         budget_ = budget;
@@ -674,8 +674,8 @@ void World::init_ports() {
     }
     in_flight_.resize(e);
     in_flight_.fill(0);
-    for (usize i = 0; i < cargo_.size(); ++i)
-        ++in_flight_[cargo_[i].edge];
+    for (usize i = 0; i < cargo_.size(); ++i) // (dormant programs travel outside the capacity)
+        in_flight_[cargo_[i].edge] += cargo_[i].dormant ? 0 : 1;
     // Phase 4: each edge's opposite, and which are down (down_until_ is world
     // state, kept by its owner; this derives the flags the ports read).
     edge_rev_.resize(e);
@@ -965,8 +965,22 @@ void World::land_at(u64 tick, Array<u8>* mask) {
     }
 }
 
+u64 World::arrived_dry_sum() const {
+    u64 s = 0;
+    for (u32 n = 0; n < nodes_; ++n)
+        s += soups_[n].arrived_dry();
+    return s;
+}
+
+u64 World::arrived_sum() const {
+    u64 s = 0;
+    for (u32 n = 0; n < nodes_; ++n)
+        s += soups_[n].arrived_all();
+    return s;
+}
+
 // The barrier (Phase 4 lifecycle, design.md 6.10). In node order, each node
-// whose tick found it worn out or starved collapses: every body dies an
+// whose tick found it worn out collapses: every body dies an
 // ordinary death (its code stays behind as remnants), and it goes fallow.
 // Then, every node.recover_every ticks, fallow sites become nodes again in
 // site order while the live count is under the budget: fallow long enough,
@@ -979,6 +993,8 @@ void World::lifecycle_update() {
     for (u32 n = 0; n < nodes_; ++n) {
         if (!live_[n] || !soups_[n].collapse_due())
             continue;
+        collapse_age_ += tick_ - born_[n]; // (diagnostics only: how old, and how many bodies it took)
+        collapse_bodies_ += soups_[n].body_count();
         soups_[n].collapse();
         live_[n] = 0;
         fallow_since_[n] = tick_;
@@ -2402,7 +2418,7 @@ void World::drop_cargo(const u8* drop) {
     for (usize i = 0; i < cargo_.size(); ++i) {
         Cargo c = cargo_[i];
         if (drop[c.edge]) {
-            --in_flight_[c.edge];
+            in_flight_[c.edge] -= c.dormant ? 0 : 1;
             ++world_transit_lost_;
             continue;
         }
@@ -2481,13 +2497,99 @@ void World::take_departures() {
             c.form = dep.form;
             c.emillicores = dep.emillicores;
             c.kind = dep.kind;
+            c.dormant = dep.dormant;
+            c.mem_reserve = dep.mem_reserve;
+            c.hops = dep.hops;
             c.ticks = static_cast<u32>(c.due - tick_);
             cargo_codons_.append(s.departure_codons() + dep.codon_off, dep.len);
             cargo_.push(c);
-            ++in_flight_[e];
+            in_flight_[e] += c.dormant ? 0 : 1; // (dormant programs travel outside the capacity)
         }
         s.clear_departures();
     }
+}
+
+// Dormancy and drift (docs/dormancy-plan.md): a random open path out of node
+// n (not down, not to a fallow site) from a stream keyed by the cargo's send
+// number and hop, so the choice doesn't depend on delivery order; kNone if
+// there is none.
+u32 World::drift_edge(u32 n, u64 seq, u32 hops) const {
+    const u32 deg = out_begin_[n + 1] - out_begin_[n];
+    u32 open = 0;
+    for (u32 k = 0; k < deg; ++k)
+        open += drift_open(port_list_[out_begin_[n] + k]) ? 1 : 0;
+    if (open == 0)
+        return kNone;
+    Rng r(seed_, Rng::kWorldNode, 0x6472696674000000ull + (seq << 8) + hops); // "drift"
+    u32 pick = static_cast<u32>(r.below(open));
+    for (u32 k = 0; k < deg; ++k) {
+        const u32 e = port_list_[out_begin_[n] + k];
+        if (drift_open(e) && pick-- == 0)
+            return e;
+    }
+    return kNone;
+}
+
+bool World::drift_open(u32 e) const {
+    if (lifecycle_ && !live_[edge_dst_[e]])
+        return false;
+    if (!port_down_.empty() && port_down_[e])
+        return false;
+    if (!link_down_.empty() && link_down_[e])
+        return false;
+    return true;
+}
+
+// A drifting dormant program due here: the clock first (its reserves spent
+// over the ticks it travelled; spent out, it dies on the way), then it lands
+// if the node has room for its code, else it passes through to a random open
+// path out of here, a hop with no rest (dying with nowhere to go). Passers-by
+// are put on their paths after this barrier's deliveries (drift_out_).
+void World::deliver_dormant(Cargo& c) {
+    const u32 dst = edge_dst_[c.edge];
+    const SoupParams& np = node_params_[dst];
+    u64 spend = static_cast<u64>(np.dormant_mem_loss) * c.ticks;
+    if (spend <= c.mem_reserve) {
+        c.mem_reserve -= static_cast<u32>(spend);
+    } else {
+        const u64 over = np.dormant_mem_loss ? (spend - c.mem_reserve) / np.dormant_mem_loss : 0; // ticks on disk
+        c.mem_reserve = 0;
+        const u64 dspend = static_cast<u64>(np.dormant_disk_loss) * over;
+        c.disk = dspend < c.disk ? static_cast<u32>(c.disk - dspend) : 0;
+    }
+    if (c.mem_reserve == 0 && c.disk == 0) {
+        ++world_dormant_expired_;
+        return;
+    }
+    Dormant d = {};
+    d.mem_reserve = c.mem_reserve;
+    d.disk_reserve = c.disk;
+    d.millicores = c.millicores;
+    d.emillicores = c.emillicores;
+    d.gpus = c.gpus;
+    d.npus = c.npus;
+    d.form = c.form;
+    d.kind = c.kind;
+    d.hops = c.hops;
+    if (live_.empty() || live_[dst])
+        if (soups_[dst].land_dormant(cargo_codons_.data() + c.codon_off, c.len, d, c.tag))
+            return;
+    const u32 e = drift_edge(dst, c.seq, c.hops);
+    if (e == kNone) {
+        ++world_dormant_expired_;
+        return;
+    }
+    Cargo n = c;
+    const u32 bw = edge_bandwidth_[e];
+    n.edge = e;
+    n.due = tick_ + (c.len + bw - 1) / bw + edge_latency_[e]; // as if it left at this barrier
+    n.ticks = static_cast<u32>(n.due - tick_);
+    n.seq = next_seq_++; // (a fresh send number: its corruption stream is its own)
+    n.hops = c.hops + 1;
+    n.codon_off = static_cast<u32>(drift_codons_.size());
+    drift_codons_.append(cargo_codons_.data() + c.codon_off, c.len);
+    drift_out_.push(n);
+    ++world_dormant_hops_;
 }
 
 // The barrier, part 2: every cargo due at this tick arrives, in the fixed
@@ -2506,15 +2608,22 @@ void World::deliver_cargo() {
         order_scratch_.push((static_cast<u64>(edge_dst_[e]) << 44) | (static_cast<u64>(edge_src_[e]) << 24) | j);
     }
     sort_u64(order_scratch_.data(), order_scratch_.size());
+    drift_out_.clear();
+    drift_codons_.clear();
     for (usize i = 0; i < order_scratch_.size(); ++i) {
         Cargo& c = cargo_[due_scratch_[order_scratch_[i] & 0xFFFFFF]];
         if (edge_corruption_ > 0)
             corrupt(c);
+        if (c.dormant) { // a drifting dormant program (outside the capacity)
+            deliver_dormant(c);
+            continue;
+        }
         soups_[edge_dst_[c.edge]].arrive(cargo_codons_.data() + c.codon_off, c.len, c.millicores, c.gpus,
                                          c.npus, c.disk, c.tag, c.form, c.emillicores, static_cast<u8>(c.kind));
         --in_flight_[c.edge];
     }
-    // Keep the rest, in order, with their codons packed.
+    // Keep the rest, in order, with their codons packed; then the dormant
+    // programs passing through, in the order they arrived.
     Array<u8> codons;
     usize w = 0;
     for (usize i = 0; i < cargo_.size(); ++i) {
@@ -2527,6 +2636,13 @@ void World::deliver_cargo() {
         cargo_[w++] = c;
     }
     cargo_.resize(w);
+    for (usize i = 0; i < drift_out_.size(); ++i) {
+        Cargo c = drift_out_[i];
+        const u32 off = static_cast<u32>(codons.size());
+        codons.append(drift_codons_.data() + c.codon_off, c.len);
+        c.codon_off = off;
+        cargo_.push(c);
+    }
     cargo_codons_ = static_cast<Array<u8>&&>(codons);
 }
 
@@ -2789,6 +2905,7 @@ void World::step(ThreadPool& pool) {
         // Then sum the tallies (arrivals count on their destination), in node
         // order.
         world_corrupted_ = world_transit_lost_ = 0;
+        world_dormant_expired_ = world_dormant_hops_ = 0;
         if (accel_async_) {
             accel_barrier();
             lap(prof_ ? &prof_->accel : nullptr);
@@ -2821,6 +2938,8 @@ void World::step(ThreadPool& pool) {
         }
         soup_last_.corrupted = world_corrupted_;
         soup_last_.transit_lost = world_transit_lost_;
+        soup_last_.dormant_expired += world_dormant_expired_; // (those that died on the way)
+        soup_last_.dormant_hops += world_dormant_hops_;       // (those that passed through)
         soup_last_.collapses = lifecycle_ ? world_collapses_ : 0;
         soup_last_.recoveries = lifecycle_ ? world_recoveries_ : 0;
         lap(prof_ ? &prof_->tally : nullptr);
@@ -2879,6 +2998,10 @@ u64 World::hash() const {
                     h.word(c.form);
                 if (soup_params_.kinds) // Phase 9c: her E millicores, her kind
                     h.word((static_cast<u64>(c.emillicores) << 32) | c.kind);
+                if (soup_params_.dormancy) { // a drifting dormant program, its memory reserve and hops
+                    h.word(c.dormant);
+                    h.word((static_cast<u64>(c.mem_reserve) << 32) | c.hops);
+                }
                 h.bytes(cargo_codons_.data() + c.codon_off, c.len);
             }
             if (edge_failure_ > 0) // Phase 4: which links are down, until when
@@ -2952,6 +3075,11 @@ void World::save_state(ByteWriter& w) const {
                 if (soup_params_.kinds) { // Phase 9c
                     w.put_u32(c.emillicores);
                     w.put_u32(c.kind);
+                }
+                if (soup_params_.dormancy) { // dormancy (v3)
+                    w.put_u32(c.dormant);
+                    w.put_u32(c.mem_reserve);
+                    w.put_u32(c.hops);
                 }
                 w.put_bytes(cargo_codons_.data() + c.codon_off, c.len);
             }
@@ -3081,8 +3209,13 @@ bool World::load_state(ByteReader& r, TextBuf* err, u32 version) {
                     r.get_u32(&c.emillicores);
                     r.get_u32(&c.kind);
                 }
+                if (soup_params_.dormancy && version >= 3) { // (none before v3)
+                    r.get_u32(&c.dormant);
+                    r.get_u32(&c.mem_reserve);
+                    r.get_u32(&c.hops);
+                }
                 if (!r.ok() || c.edge >= edge_src_.size() || c.len == 0 || c.len > r.remaining() ||
-                    c.due < tick || c.seq >= next_seq_ || c.form > kFormGpu || c.kind > kKindE) {
+                    c.due < tick || c.seq >= next_seq_ || c.form > kFormGpu || c.kind > kKindE || c.dormant > 1) {
                     err->append("snapshot: cargo out of range");
                     return false;
                 }

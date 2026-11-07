@@ -564,7 +564,7 @@ void outputs() {
     CHECK(strstr(text, ",npu_held,in_flight,links,") != nullptr);
     CHECK(strstr(text, ",genotypes_in_top,colonised,links_down,disk_held,live_nodes,warp_steps,lane_instr,"
                        "warp_host,launches,gpu_births,warps,gpu_bodies,actions_started,actions_landed,"
-                       "actions_failed,actions_defended,threads_started,e_work,e_held,vent_codons,decayed,bites_waste,bites_body,codons_bitten,threads_ended,died_halted,died_frozen,died_worn,compress,ambient\n") !=
+                       "actions_failed,actions_defended,threads_started,e_work,e_held,vent_codons,decayed,bites_waste,bites_body,codons_bitten,threads_ended,died_halted,died_frozen,died_worn,dormant_started,dormant_woke,dormant_expired,dormant_eaten,dormant_hops,drifting,resting,compress,ambient\n") !=
           nullptr);
     CHECK(read_file(nodes, &bytes));
     bytes.push(0);

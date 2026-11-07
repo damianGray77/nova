@@ -327,6 +327,149 @@ void test_bite_shield() {
     CHECK(soup_ok(f.s));
 }
 
+// Dormancy (docs/dormancy-plan.md): a frozen body with a reserve (here, disk)
+// goes dormant instead of dying -- its cores and disk back to the node, its
+// code kept -- and with nowhere to go rests here, waking when a core of its
+// kind is free (its own freed ones); woken, it holds its code and cores again.
+// A bare frozen body dies as before. The clock spends its reserve and kills
+// it when the reserve is gone.
+void test_dormant() {
+    const char* base = "heat.enabled = false\nhazard.copy = 0\nhazard.flaw = 0\nhazard.rot = 0\nmem.upkeep = 1000000\n"
+                       "world.millicores = 2000\nworld.disk = 4096\nlife.frozen_ticks = 5\nlife.dormancy = true\n";
+    EcoFix f;
+    CHECK(f.init("", 1024, base));
+    const u32 b = plant(f.s, 100, "ALLOC INC INC INC", 1000);
+    const u32 bare = plant(f.s, 300, "INC INC INC INC", 500);
+    Cpu& c = f.s.cpu_mut(f.s.body(b).cpus);
+    c.bx = 3; // disk
+    c.cx = 16;
+    f.s.run_cpu(f.s.body(b).cpus, 1);
+    CHECK(f.s.disk_held(b) == 16);
+    for (u64 t = 0; t <= 5; ++t)
+        f.s.tick(t);
+    CHECK(f.s.body(b).alive && f.s.dormant(b) && f.s.body(b).units == 0 && f.s.body(b).cpus == kNone);
+    CHECK(f.s.body(b).mem == 4 && f.s.disk_held(b) == 0 && f.s.dormant_state(b).disk_reserve == 16);
+    CHECK(f.s.dormant_state(b).millicores == 1000 && f.s.free_units() == f.s.params().millicores);
+    CHECK(f.s.tally().dormant_started == 1 && f.s.frozen_bare() == 1 && !f.s.body(bare).alive);
+    CHECK(soup_ok(f.s));
+    f.s.tick(6); // its own freed millicores are free: it wakes, with them and its disk
+    CHECK(f.s.body(b).alive && !f.s.dormant(b) && f.s.body(b).units == 1000 && f.s.body(b).cpus != kNone);
+    CHECK(f.s.body(b).mem == 4 && f.s.disk_held(b) == 16 && f.s.tally().dormant_woke == 1);
+    CHECK(soup_ok(f.s));
+    // The clock: with every millicore held elsewhere it can't wake, and its
+    // reserve runs out (8 disk codons a tick: 16 in 2 ticks).
+    EcoFix g;
+    TextBuf gb;
+    gb.append(base);
+    gb.append("dormant.disk_loss = 8\n");
+    CHECK(g.init("", 1024, gb.c_str()));
+    const u32 d = plant(g.s, 100, "ALLOC INC INC INC", 1000);
+    Cpu& dc = g.s.cpu_mut(g.s.body(d).cpus);
+    dc.bx = 3;
+    dc.cx = 16;
+    g.s.run_cpu(g.s.body(d).cpus, 1);
+    CHECK(g.s.force_dormant(d) && g.s.dormant(d));
+    const u32 hog = plant(g.s, 400, "INC INC INC INC", g.s.params().millicores);
+    CHECK(hog != kNone && g.s.free_units() == 0);
+    g.s.begin_tick(1);
+    g.s.death_sweep();
+    CHECK(g.s.dormant(d) && g.s.dormant_state(d).disk_reserve == 8);
+    g.s.begin_tick(2);
+    g.s.death_sweep();
+    CHECK(!g.s.body(d).alive && g.s.tally().dormant_expired == 1);
+    CHECK(soup_ok(g.s));
+}
+
+// A resting dormant program is easy food: no surface shields it from a blind
+// bite (a live body with the same surface would be), and swallowed whole it
+// is gone.
+void test_dormant_bitten() {
+    EcoFix f;
+    CHECK(f.init("engulf.bite = true\nworld.disk = 4096\nlife.dormancy = true\n"));
+    CHECK(plant(f.s, 90, "NOP1 NOP1 NOP1 NOP1 NOP1 NOP1 NOP1 NOP1 NOP1 NOP1", 100) != kNone);
+    const u32 e = plant(f.s, 100, "ENGULF INC INC INC", 100);
+    const u32 prey = plant(f.s, 104, "NOP1 ALLOC INC INC", 100);
+    Cpu& pc = f.s.cpu_mut(f.s.body(prey).cpus);
+    pc.ip = 105;
+    pc.bx = 3;
+    pc.cx = 16;
+    f.s.run_cpu(f.s.body(prey).cpus, 1);
+    CHECK(f.s.force_dormant(prey) && f.s.dormant(prey));
+    Cpu& c = f.s.cpu_mut(f.s.body(e).cpus);
+    c.cx = 4;
+    f.s.run_cpu(f.s.body(e).cpus, 1);
+    CHECK(c.err == 0 && !f.s.body(prey).alive && f.s.owner_body(104) == e);
+    CHECK(f.s.tally().engulfs == 1 && f.s.tally().dormant_eaten == 1);
+    f.s.death_sweep();
+    CHECK(soup_ok(f.s));
+}
+
+// Dormancy in a world: frozen bodies go dormant, drift between nodes and wake
+// where there's room; the same world at 1, 4 and 20 threads, under reversed
+// dispatch, and through a snapshot taken with programs drifting and resting.
+const char* const kDormantExtra = "life.frozen_ticks = 40\nlife.dormancy = true\nmem.upkeep = 6\nworld.disk = 1024\n";
+
+void test_dormant_world() {
+    TextBuf cfg;
+    cfg.append(kSoupWorldProc);
+    cfg.append(kDormantExtra);
+    u64 hashes[4] = {};
+    const u32 threads[4] = {1, 4, 20, 4};
+    Array<u32> order;
+    SoupTally sum = {};
+    u64 most_drifting = 0, snap_tick = 0;
+    ByteWriter snap;
+    for (u32 v = 0; v < 4; ++v) {
+        Run run;
+        CHECK(make_run(run, cfg.c_str(), threads[v]));
+        if (v == 3) {
+            const u32 n = run.world().node_count();
+            order.resize(n);
+            for (u32 i = 0; i < n; ++i)
+                order[i] = n - 1 - i;
+            run.set_dispatch_order(order.data());
+        }
+        for (u64 t = 1; t <= 400; ++t) {
+            run.run_until(t);
+            if (v == 0) {
+                const SoupTally& s = run.world().last_soup_tick();
+                sum.dormant_started += s.dormant_started;
+                sum.dormant_woke += s.dormant_woke;
+                sum.dormant_expired += s.dormant_expired;
+                sum.dormant_hops += s.dormant_hops;
+                const u64 dr = run.world().drifting();
+                if (dr > most_drifting && snap.size() == 0 && t > 50) { // a snapshot with programs on the move
+                    most_drifting = dr;
+                    run.snapshot(snap);
+                    snap_tick = t;
+                }
+            }
+        }
+        hashes[v] = run.world().hash();
+        if (v == 0)
+            for (u32 n = 0; n < run.world().node_count(); ++n)
+                CHECK(soup_ok(run.world().node_soup(n)));
+    }
+    CHECK_EQ_U64(hashes[1], hashes[0]);
+    CHECK_EQ_U64(hashes[2], hashes[0]);
+    CHECK_EQ_U64(hashes[3], hashes[0]);
+    CHECK(sum.dormant_started > 0 && sum.dormant_woke > 0 && sum.dormant_hops > 0);
+    CHECK(snap.size() > 0);
+    if (snap.size() > 0) {
+        Run b;
+        TextBuf err;
+        CHECK(b.init_from_snapshot(snap.data(), snap.size(), 4, &err));
+        b.run_until(400);
+        CHECK_EQ_U64(b.world().hash(), hashes[0]);
+    }
+    printf("  dormant world: 400 ticks, %llu went dormant, %llu woke, %llu expired, %llu hops; snapshot at tick %llu "
+           "with %llu drifting resumed exactly; hash %016llx\n",
+           static_cast<unsigned long long>(sum.dormant_started), static_cast<unsigned long long>(sum.dormant_woke),
+           static_cast<unsigned long long>(sum.dormant_expired), static_cast<unsigned long long>(sum.dormant_hops),
+           static_cast<unsigned long long>(snap_tick), static_cast<unsigned long long>(most_drifting),
+           static_cast<unsigned long long>(hashes[0]));
+}
+
 // With a timed table a bite is an action: its codons at
 // engulf.codons_per_tick, the CPU busy meanwhile, landing at its end.
 void test_bite_action() {
@@ -467,11 +610,12 @@ void test_defaults() {
         CHECK(p.threads && p.e_share == 0.5 && p.cpu_wear == 0.001);
         CHECK(p.gpus == 400 && p.npus == 200 && p.warps && p.spark_gpu_grant == 8 && p.accel_async);
         CHECK(p.disk == 4096 && p.salvage_ratio == 4.0 && p.signal_channels == 16 && p.volatility == 0.00001);
-        CHECK(p.ambient == 0.05f && p.endurance == 0 && p.starve_ticks == 0); // (no lifecycle without a map)
+        CHECK(p.ambient == 0.05f && p.endurance == 0 && !p.map); // (no lifecycle without a map)
         CHECK(p.mem_decay > 0 && p.rot_rate > 0 && p.rot_rate < p.mem_decay * 0.011 && p.rot_rate > p.mem_decay * 0.009);
         CHECK(p.disk_decay == 1e-6 && p.disk_rot == 1e-8);
         CHECK(p.vent_spacing == 4096 && p.vent_rate == 64 && p.vent_radius == 256);
         CHECK(p.bites && p.engulf_cpt == 8 && p.threads_end && p.frozen_ticks == 200);
+        CHECK(p.dormancy && p.dormant_mem_loss == 1 && p.dormant_disk_loss == 1 && p.dormant_dwell == 15);
     }
     // A small world on every default: deterministic at 1 and 4 threads.
     const char* w = "world.model = soup\nworld.nodes = 4\nworld.soup_size = 4096\nspark.initial = 40\n"
@@ -521,6 +665,9 @@ void suite_ecology() {
     test_bite_body();
     test_bite_shield();
     test_bite_action();
+    test_dormant();
+    test_dormant_bitten();
+    test_dormant_world();
     test_eco_world();
     test_defaults();
 }

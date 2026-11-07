@@ -750,34 +750,18 @@ void suite_lifecycle() {
         g.op(100, 0, 17, 0);
         CHECK(g.cpu().err == 0 && g.cpu().cx == 100);
     }
-    // Starvation: a meter that gains 1 on each starving tick and ebbs like heat.
+    // A full node doesn't collapse for being full (docs/dormancy-plan.md D7:
+    // the starvation rule is gone): with wear far off, a node with all its
+    // millicores held runs on, its health untouched.
     {
-        DiskFix f; // no ebb: three starving ticks fill a meter of 3
-        CHECK(f.init(kBusy, 0, "node.starve_below = 0.6\nnode.starve_ticks = 3\nnode.starve_ebb = 0\n"));
-        f.s.tick(0); // 500 of 1000 millicores held: starving
-        CHECK(near(f.s.starve_meter(), 1.0) && f.s.health() == 66 && !f.s.collapse_due());
-        f.s.tick(1);
-        f.s.tick(2);
-        CHECK(f.s.collapse_due() && f.s.health() == 0);
-        // A tick with plenty free dents the meter instead of emptying it.
-        DiskFix g;
-        CHECK(g.init(kBusy, 0, "node.starve_below = 0.6\nnode.starve_ticks = 10\nnode.starve_ebb = 0.5\n"));
-        g.s.tick(0); // 1
-        g.s.tick(1); // 1 x 0.5 + 1
-        CHECK(near(g.s.starve_meter(), 1.5));
-        kill_now(g.s, g.b); // the pool fills
-        g.s.tick(2);         // 1.5 x 0.5
-        CHECK(near(g.s.starve_meter(), 0.75) && g.s.health() == 92 && !g.s.collapse_due());
-        // Constantly starving, the meter settles at 1 / ebb: a level above
-        // that never collapses the node.
-        DiskFix h;
-        CHECK(h.init(kBusy, 0, "node.starve_below = 0.6\nnode.starve_ticks = 5\nnode.starve_ebb = 0.25\n"));
+        DiskFix f;
+        CHECK(f.init(kBusy, 0, "node.endurance = 1e12\n"));
         bool ever = false;
         for (u64 t = 0; t < 200; ++t) {
-            h.s.tick(t);
-            ever = ever || h.s.collapse_due();
+            f.s.tick(t);
+            ever = ever || f.s.collapse_due();
         }
-        CHECK(!ever && near(h.s.starve_meter(), 4.0));
+        CHECK(!ever && f.s.health() == 100);
     }
     // Collapse leaves remnants: every body dies, memory stays, stamped.
     {

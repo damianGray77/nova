@@ -2,7 +2,7 @@
 
 // Versioned binary snapshots (design.md 7.1 H).
 //
-// Format v2 (v1 is read too, see kSnapshotVersion), all integers little-endian:
+// Format v3 (v2 and v1 are read too, see kSnapshotVersion), all integers little-endian:
 //   "NOVASNAP"   8-byte magic
 //   u32          format version (kSnapshotVersion)
 //   u32          flags (0)
@@ -24,7 +24,10 @@ namespace nova {
 // v2 (Phase 10 profiling): each soup also keeps its pages' heat inputs carried
 // into the next tick (Soup::save). v1 is still read, those inputs as zero (as
 // v1 builds resumed it: the world then drifts from the run that wrote it).
-inline constexpr u32 kSnapshotVersion = 2;
+// v3 (docs/dormancy-plan.md D7): the lifecycle section is kept only with wear
+// on (node.endurance > 0); before, every map world had one for its starvation
+// meter, which v2 and v1 snapshots still carry and Soup::load drops.
+inline constexpr u32 kSnapshotVersion = 3;
 inline constexpr u32 kSnapshotOldest = 1;
 
 void snapshot_write(const World& world, const Config& cfg, ByteWriter& out);

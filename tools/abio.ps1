@@ -116,7 +116,7 @@ $p4 = [ordered]@{
     disk      = 'world.disk=4096;mem.volatility=0.00001'
     salvage   = 'salvage.ratio=4'
     signals   = 'signal.channels=16'
-    lifecycle = 'node.endurance=1000000000;node.starve_below=0.002;node.starve_ticks=2000;world.land=0.8;world.drift=0.00001;node.fallow_min=2000;node.recover_every=100'
+    lifecycle = 'node.endurance=1000000000;world.land=0.8;world.drift=0.00001;node.fallow_min=2000;node.recover_every=100'
 }
 foreach ($k in $p4.Keys) { $builtin[$k] = $p4[$k] }
 $builtin['phase4'] = ($p4.Values -join ';')

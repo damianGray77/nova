@@ -256,15 +256,12 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     p->signal_cost_base = get_u32(cfg, "signal.cost_base", 2, 0, 1000000);
     p->signal_cost_per_amp = get_f64(cfg, "signal.cost_per_amp", 1.0 / 32.0, 0, 1e6);
     p->signal_floor = get_f64(cfg, "signal.floor", 1.0, 0, 1e9);
-    // The node lifecycle (Phase 4): endurance 0 and starve_ticks 0 = off.
+    // The node lifecycle (Phase 4): endurance 0 = off. Collapse is wear alone
+    // (Damian, docs/dormancy-plan.md D7): the starvation rule and its keys
+    // (node.starve_below, node.starve_ticks, node.starve_ebb) are gone.
     p->endurance = get_f64(cfg, "node.endurance", spatial ? 1e9 : 0.0, 0, 1e18); // (the lifecycle needs a map)
     p->decline = get_f64(cfg, "node.decline", 4.0, 0, 1e6);
-    p->starve_below = get_f64(cfg, "node.starve_below", 0.002, 0, 1);
-    p->starve_ticks = get_u32(cfg, "node.starve_ticks", spatial ? 2000 : 0, 0, 1000000000);
-    // The meter ebbs like heat (Damian): constantly starving it settles at
-    // 1 / ebb, so it reaches starve_ticks only if the node starves more than
-    // starve_ticks x ebb of the time (half, at the defaults).
-    p->starve_ebb = get_f64(cfg, "node.starve_ebb", 0.00025, 0, 1);
+    p->map = spatial;
 
     // Measured costs (Phase 9, design.md 6.15): classic = exactly Phase 8.
     const Str ct = cfg.get_str("cost.table", "home_v1");
@@ -292,7 +289,7 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
         sense_n = kSenseReadingsWorld;
     if (p->disk)
         sense_n = kSenseReadingsDisk;
-    if (p->endurance > 0 || p->starve_ticks > 0)
+    if (p->endurance > 0)
         sense_n = kSenseReadingsLife; // + node health
     if (p->accel_async)
         sense_n = kSenseReadingsAsync; // + my last accelerator result, my ops pending
@@ -359,6 +356,12 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     p->bites = cfg.get_bool("engulf.bite", true);
     p->threads_end = cfg.get_bool("life.threads_end", true);
     p->frozen_ticks = get_u32(cfg, "life.frozen_ticks", 200, 0, 1000000000);
+    // Dormancy and drift (docs/dormancy-plan.md): the watchdog's frozen body
+    // goes dormant instead of dying, if it has reserves to spend.
+    p->dormancy = cfg.get_bool("life.dormancy", true);
+    p->dormant_mem_loss = get_u32(cfg, "dormant.mem_loss", 1, 0, 1u << 24);
+    p->dormant_disk_loss = get_u32(cfg, "dormant.disk_loss", 1, 0, 1u << 24);
+    p->dormant_dwell = get_u32(cfg, "dormant.dwell", 15, 1, 1000000000);
     p->kinds = p->threads || p->e_share > 0;
     if (p->kinds)
         sense_n = kSenseReadingsThreads; // + my threads, my kind, my E millicores, free E millicores
@@ -631,7 +634,6 @@ void Soup::init(const SoupParams* p, u64 seed, u32 node, u32 life, const Ruins* 
         build_warp_consts();
     // The lifecycle (Phase 4): a fresh life.
     writes_ = 0;
-    starve_meter_ = 0;
     collapse_ = false;
     hazard_mult_ = 1.0;
     // Ruins of an earlier life (Damian): laid over the new soup where the
@@ -694,6 +696,8 @@ void Soup::init(const SoupParams* p, u64 seed, u32 node, u32 life, const Ruins* 
     // every other draw is as without them).
     vent_at_.clear();
     last_ran_.clear();
+    dorm_.clear();
+    dorm_tag_.clear();
     if (p->vent_spacing > 0) {
         const u32 nv = n / p->vent_spacing > 0 ? n / p->vent_spacing : 1;
         Rng vr(seed ^ 0x76656E7473000000ull, node, Rng::kInitTick - life); // "vents"
@@ -939,6 +943,14 @@ u32 Soup::new_body() {
             last_ran_.resize(bodies_.size());
         last_ran_[b] = tick_;
     }
+    if (p_->dormancy) { // not dormant
+        if (dorm_.size() < bodies_.size()) {
+            dorm_.resize(bodies_.size());
+            dorm_tag_.resize(bodies_.size());
+        }
+        dorm_[b] = Dormant{};
+        dorm_tag_[b] = CargoTag{};
+    }
     return b;
 }
 
@@ -1069,6 +1081,9 @@ bool Soup::arrive(const u8* code, u32 len, u32 millicores, u32 gpus, u32 npus, u
     if (obs_)
         obs_->on_arrive(*this, owner_[at], tag, tick_);
     ++tally_.arrived;
+    ++arrived_all_;
+    if (bodies_[b].units == 0)
+        ++arrived_dry_; // (diagnostics: no free millicore here, so she dies in the next sweep)
     return true;
 }
 
@@ -1104,7 +1119,254 @@ void Soup::kill(u32 b) {
     B.ncpu = 0;
     B.mem = 0;
     B.alive = 0;
+    if (b < dorm_.size())
+        dorm_[b].on = 0;
     ++tally_.deaths;
+}
+
+// --- dormancy and drift (docs/dormancy-plan.md) ------------------------------
+
+// A random open neighbour (one whose path isn't down) from this node's stream,
+// as an index into its ports, or kNone with none (no dispersal, a hermit, or
+// every path down).
+u32 Soup::drift_port() {
+    const DispersalPorts& P = ports_;
+    u32 open = 0;
+    for (u32 k = 0; k < P.degree; ++k)
+        open += !(P.down && P.down[P.edges[k]]);
+    if (open == 0)
+        return kNone;
+    u32 pick = static_cast<u32>(rng_.below(open));
+    for (u32 k = 0; k < P.degree; ++k)
+        if (!(P.down && P.down[P.edges[k]]) && pick-- == 0)
+            return k;
+    return kNone;
+}
+
+// A frozen body goes dormant (the death sweep, in place of the watchdog's
+// kill): it keeps its code (its first block) and reserves (the memory in its
+// other blocks, its disk holding) and remembers the cores it held; everything
+// else goes back to this node -- its millicores and GPU/NPU units to the pools
+// with their heat, its other blocks to waste with their contents, its disk as
+// fossils, its warps and threads. Then it drifts to a random neighbour, or
+// rests here with nowhere to go. With no reserves it has no time to search:
+// false, and it dies as before.
+bool Soup::go_dormant(u32 b) {
+    Body& B = bodies_[b];
+    const u32 k = B.blocks;
+    if (k == kNone)
+        return false;
+    const u32 code = blocks_[k].owned;
+    const u32 mem_reserve = B.mem > code ? B.mem - code : 0;
+    const u32 disk_reserve = p_->disk ? disk_.total[b] : 0;
+    if (code == 0 || (mem_reserve == 0 && disk_reserve == 0)) {
+        ++frozen_bare_;
+        return false;
+    }
+    Dormant d = {};
+    d.on = 1;
+    d.dwell = p_->dormant_dwell;
+    d.mem_reserve = mem_reserve;
+    d.disk_reserve = disk_reserve;
+    const u32 e = e_units(b);
+    d.millicores = B.units - e;
+    d.emillicores = e;
+    d.gpus = p_->gpus ? gpu_.count[b] : 0;
+    d.npus = p_->npus ? npu_.count[b] : 0;
+    d.form = B.form;
+    d.kind = kinds_on() && B.cpus != kNone ? cpu_kind_[B.cpus] : kKindP;
+    dorm_tag_[b] = obs_ ? obs_->cargo_tag(k) : CargoTag{};
+    const u32 g = genome_len(b);
+    for (u32 j = blocks_[k].next; j != kNone;) {
+        const u32 next = blocks_[j].next;
+        stamp_block(j, g);
+        free_block(j);
+        j = next;
+    }
+    blocks_[k].next = kNone;
+    B.mem = blocks_[k].owned;
+    B.latest = kNone;
+    while (B.unit_head != kNone) {
+        const u32 u = B.unit_head;
+        unlink_unit(u);
+        pool_push(u);
+    }
+    if (p_->gpus)
+        gpu_.release(b, gpu_.count[b]);
+    if (p_->npus)
+        npu_.release(b, npu_.count[b]);
+    if (p_->disk)
+        disk_.release_tail(b, disk_.total[b], g);
+    if (p_->warps)
+        kill_warps(b);
+    for (u32 c = B.cpus; c != kNone;) {
+        const u32 next = cpus_[c].next;
+        cpus_[c].body = kNone;
+        free_cpus_.push(c);
+        c = next;
+    }
+    B.cpus = kNone;
+    B.ncpu = 0;
+    B.carry = 0.0f; // its upkeep debt goes with its cores: it will start afresh, as an arrival does
+    B.work = 0;
+    B.speed = 0.0f;
+    B.err = 1.0f;
+    dorm_[b] = d;
+    ++tally_.dormant_started;
+    dormant_mem_sum_ += mem_reserve;
+    dormant_disk_sum_ += disk_reserve;
+    const u32 nbr = drift_port();
+    if (nbr != kNone)
+        depart_dormant(b, nbr);
+    return true;
+}
+
+// A dormant program leaves for neighbour nbr: its code becomes cargo (outside
+// the edge's capacity) and the block it rested in waste, keeping its contents,
+// as a departing daughter's does. Its lineage tag goes with it.
+void Soup::depart_dormant(u32 b, u32 nbr) {
+    Dormant& d = dorm_[b];
+    Body& B = bodies_[b];
+    const u32 k = B.blocks;
+    const Block& K = blocks_[k];
+    Departure dep = {};
+    dep.tag = dorm_tag_[b];
+    dep.nbr = nbr;
+    dep.len = K.len;
+    dep.codon_off = static_cast<u32>(departure_codons_.size());
+    departure_codons_.append(mem_.data() + K.start, K.len);
+    dep.millicores = d.millicores;
+    dep.emillicores = d.emillicores;
+    dep.gpus = d.gpus;
+    dep.npus = d.npus;
+    dep.disk = d.disk_reserve;
+    dep.form = d.form;
+    dep.kind = d.kind;
+    dep.dormant = 1;
+    dep.mem_reserve = d.mem_reserve;
+    dep.hops = d.hops + 1;
+    stamp_block(k, K.len);
+    free_block(k);
+    B.blocks = B.latest = kNone;
+    B.mem = 0;
+    B.alive = 0;
+    d.on = 0;
+    departures_.push(dep);
+    ++tally_.dormant_hops;
+}
+
+// Whether a core of its kind is free here: a GPU unit for a GPU-born program
+// that held one, else a millicore of a kind it held.
+bool Soup::can_wake(u32 b) const {
+    const Dormant& d = dorm_[b];
+    if (d.form == kFormGpu && d.gpus > 0)
+        return p_->gpus > 0 && !gpu_.pool.empty();
+    if (!ek())
+        return !pool_.empty();
+    return (d.millicores > 0 && !pool_.empty()) || (d.emillicores > 0 && !epool_.empty());
+}
+
+// It wakes where it rests: it claims up to the cores it held at home, capped
+// by what's free here, and up to its disk reserve (empty), then starts as an
+// arrival does -- one thread at its start, registers zero, in its own form.
+// Its memory reserve was its fuel and is spent. Here it joins its lineage.
+void Soup::wake(u32 b) {
+    Dormant& d = dorm_[b];
+    Body& B = bodies_[b];
+    const u32 start = blocks_[B.blocks].start;
+    if (ek()) {
+        claim_units(b, d.millicores);
+        claim_e_units(b, d.emillicores);
+    } else {
+        claim_units(b, d.millicores + d.emillicores);
+    }
+    if (d.gpus && p_->gpus)
+        claim_gpus(b, d.gpus);
+    if (d.npus && p_->npus)
+        claim_npus(b, d.npus);
+    if (d.disk_reserve && p_->disk)
+        disk_.claim_any(rng_, b, d.disk_reserve);
+    d.on = 0;
+    if (p_->warps)
+        birth(b, start, d.form);
+    else
+        new_cpu(b, start);
+    if (kinds_on() && B.cpus != kNone)
+        cpu_kind_[B.cpus] = static_cast<u8>(d.kind);
+    if (p_->frozen_ticks > 0)
+        last_ran_[b] = tick_;
+    if (obs_)
+        obs_->on_arrive(*this, B.blocks, dorm_tag_[b], tick_);
+    ++tally_.dormant_woke;
+}
+
+// A resting dormant program's end of tick (the death sweep, in schedule
+// order): it wakes if a core of its kind is free; else the clock spends its
+// memory reserve, then its disk reserve, and with neither left (or its code
+// gone to bites or heat) it dies; else, its stay over, it moves on to a random
+// neighbour (staying with nowhere to go).
+void Soup::rest_tick(u32 b) {
+    Dormant& d = dorm_[b];
+    if (bodies_[b].mem == 0) {
+        ++tally_.dormant_expired;
+        kill(b);
+        return;
+    }
+    if (can_wake(b)) {
+        wake(b);
+        return;
+    }
+    if (d.mem_reserve > 0)
+        d.mem_reserve -= d.mem_reserve < p_->dormant_mem_loss ? d.mem_reserve : p_->dormant_mem_loss;
+    else if (d.disk_reserve > 0)
+        d.disk_reserve -= d.disk_reserve < p_->dormant_disk_loss ? d.disk_reserve : p_->dormant_disk_loss;
+    if (d.mem_reserve == 0 && d.disk_reserve == 0) {
+        ++tally_.dormant_expired;
+        kill(b);
+        return;
+    }
+    if (d.dwell > 1) {
+        --d.dwell;
+        return;
+    }
+    const u32 nbr = drift_port();
+    if (nbr == kNone) {
+        d.dwell = p_->dormant_dwell;
+        return;
+    }
+    depart_dormant(b, nbr);
+}
+
+bool Soup::land_dormant(const u8* code, u32 len, const Dormant& d, const CargoTag& tag) {
+    if (len == 0 || len > p_->size || !p_->dormancy)
+        return false;
+    const u32 from = static_cast<u32>(rng_.below(p_->size));
+    u32 at = known_full(len) ? kNone : find_free_fwd(from, len);
+    if (at == kNone && !known_full(len))
+        at = find_free_fwd(0, len);
+    if (at == kNone) {
+        note_full(len);
+        return false;
+    }
+    for (u32 i = 0; i < len; ++i)
+        mem_[at + i] = code[i];
+    const u32 b = new_body();
+    new_block(at, len, b);
+    bodies_[b].form = d.form;
+    dorm_[b] = d;
+    dorm_[b].on = 1;
+    dorm_[b].dwell = p_->dormant_dwell;
+    dorm_tag_[b] = tag;
+    return true;
+}
+
+u32 Soup::resting_count() const {
+    if (!p_->dormancy)
+        return 0;
+    u32 n = 0;
+    for (usize k = 0; k < order_.size(); ++k)
+        n += dorm_[order_[k]].on != 0;
+    return n;
 }
 
 // ---------------------------------------------------------------------------
@@ -1814,18 +2076,11 @@ void Soup::begin_tick(u64 tick) {
     copy_left_ = p_->copy_rate > 0 ? -log(1.0 - rng_.unit()) / (p_->copy_rate * hazard_mult_) : 1e300;
 }
 
-// The end of a tick (Phase 4 lifecycle): the starvation meter, and whether the
-// node is due to collapse -- worn out, or starved too long. The meter works
-// like heat (Damian): it loses node.starve_ebb of itself every tick and gains 1
-// on a tick when the free CPU pool is below the threshold, so a brief recovery
-// only dents it, and only sustained starvation fills it.
+// The end of a tick (Phase 4 lifecycle): whether the node is due to collapse,
+// worn out. (A full node no longer collapses for being full: the starvation
+// rule is gone, docs/dormancy-plan.md D7.)
 void Soup::lifecycle_check() {
-    if (p_->starve_ticks > 0) {
-        const bool starving = static_cast<double>(pool_.size() + epool_.size()) < p_->starve_below * p_->millicores;
-        starve_meter_ = starve_meter_ * (1.0 - p_->starve_ebb) + (starving ? 1.0 : 0.0);
-    }
-    collapse_ = (p_->endurance > 0 && static_cast<double>(writes_) >= p_->endurance) ||
-                (p_->starve_ticks > 0 && starve_meter_ >= p_->starve_ticks);
+    collapse_ = p_->endurance > 0 && static_cast<double>(writes_) >= p_->endurance;
 }
 
 u32 Soup::health() const {
@@ -1834,8 +2089,6 @@ u32 Soup::health() const {
         const double w = static_cast<double>(writes_) / p_->endurance;
         h = min_of(h, 1.0 - w);
     }
-    if (p_->starve_ticks > 0)
-        h = min_of(h, 1.0 - starve_meter_ / p_->starve_ticks);
     h = h < 0 ? 0 : h;
     return static_cast<u32>(h * 100.0);
 }
@@ -1992,7 +2245,7 @@ void Soup::tick_first(u64 tick) {
         const double tb = timing_on_ ? clock_seconds() : 0;
         for (usize k = 0; k < n; ++k) {
             u32 b = order_[(start + k) % n];
-            if (bodies_[b].alive)
+            if (bodies_[b].alive && !dormant(b)) // (a resting dormant program doesn't run, nor pay upkeep)
                 run_body(b, tick);
         }
         if (timing_on_)
@@ -2034,7 +2287,7 @@ void Soup::tick_second_parts() {
     death_sweep();
     if (!actions_.empty()) // Phase 9
         sweep_actions();
-    if (p_->endurance > 0 || p_->starve_ticks > 0)
+    if (p_->endurance > 0)
         lifecycle_check();
 }
 
@@ -2689,6 +2942,10 @@ void Soup::death_sweep() {
         Body& B = bodies_[b];
         if (!B.alive)
             continue;
+        if (p_->dormancy && dorm_[b].on) { // resting: it doesn't run, so it isn't swept as dead
+            rest_tick(b);
+            continue;
+        }
         if (p_->threads_end)
             for (u32 c = B.cpus; c != kNone;) {
                 const u32 next = cpus_[c].next;
@@ -2710,8 +2967,10 @@ void Soup::death_sweep() {
             running = running || warp_runs(b);
         }
         if (running && frozen_on && tick_ >= last_ran_[b] + p_->frozen_ticks) {
-            ++tally_.died_frozen;
-            kill(b);
+            if (!(p_->dormancy && go_dormant(b))) { // dormancy: it goes dormant instead, if it can
+                ++tally_.died_frozen;
+                kill(b);
+            }
         } else if (!running) {
             if (B.units == 0 && !(p_->warps && warp_count(b) > 0))
                 ++tally_.died_worn;
@@ -2769,9 +3028,7 @@ void Soup::hash_into(Hasher& h) const {
     }
     if (lifecycle()) {
         h.word(writes_);
-        u64 bits;
-        memcpy(&bits, &starve_meter_, sizeof bits);
-        h.word(bits);
+        h.word(0); // (the starvation meter's old place: worlds that never starved hash as before)
     }
     if (p_->warps) { // Phase 8: warps and their lanes (the world fetches any the GPU holds first)
         NOVA_ASSERT(!lanes_on_device());
@@ -2798,6 +3055,8 @@ void Soup::hash_into(Hasher& h) const {
     }
     if (p_->frozen_ticks > 0) // Phase 10: when each body last ran
         h.bytes(last_ran_.data(), last_ran_.size() * sizeof(u64));
+    if (p_->dormancy) // dormancy: each body slot's dormant state (the tags are detector data)
+        h.bytes(dorm_.data(), dorm_.size() * sizeof(Dormant));
     if (!vent_at_.empty()) // Phase 10: the vents' places
         h.bytes(vent_at_.data(), vent_at_.size() * sizeof(u32));
     if (pages_pending()) { // heat inputs carried into the next tick (only then: worlds without them hash as before)
@@ -3058,9 +3317,7 @@ void Soup::save(ByteWriter& w) const {
     }
     if (lifecycle()) {
         w.put_u64(writes_);
-        u64 bits;
-        memcpy(&bits, &starve_meter_, sizeof bits);
-        w.put_u64(bits);
+        w.put_u64(0); // (the starvation meter's old place, kept so the section's shape is unchanged)
     }
     if (p_->warps) {
         NOVA_ASSERT(!lanes_on_device());
@@ -3083,6 +3340,8 @@ void Soup::save(ByteWriter& w) const {
         put_array(w, epool_);
     if (p_->frozen_ticks > 0) // Phase 10
         put_array(w, last_ran_);
+    if (p_->dormancy) // dormancy (v3)
+        put_array(w, dorm_);
     if (p_->vent_spacing > 0)
         put_array(w, vent_at_);
     // The pages' heat inputs carried into the next tick (async accelerator
@@ -3133,13 +3392,14 @@ bool Soup::load(ByteReader& r, TextBuf* err, u32 version) {
         issue_ref_.clear();
         issue_addr_.clear();
     }
-    if (lifecycle()) {
-        u64 bits = 0;
-        if (!(r.get_u64(&writes_) && r.get_u64(&bits))) {
+    // Before v3 a map world kept this section whenever its default starvation
+    // rule was on (every map world); its meter is read and dropped.
+    if (lifecycle() || (version < 3 && p_->map)) {
+        u64 dropped = 0;
+        if (!(r.get_u64(&writes_) && r.get_u64(&dropped))) {
             err->append("snapshot: lifecycle section truncated");
             return false;
         }
-        memcpy(&starve_meter_, &bits, sizeof bits);
     }
     if (p_->warps) { // Phase 8
         const u64 lanes_max = many;
@@ -3219,6 +3479,23 @@ bool Soup::load(ByteReader& r, TextBuf* err, u32 version) {
     if (p_->frozen_ticks > 0 && (!get_array(r, &last_ran_, nb) || last_ran_.size() != nb)) {
         err->append("snapshot: frozen watch truncated or the wrong shape");
         return false;
+    }
+    dorm_.clear();
+    dorm_tag_.clear();
+    if (p_->dormancy) { // (none before v3: no one dormant)
+        if (version >= 3) {
+            if (!get_array(r, &dorm_, nb) || dorm_.size() != nb) {
+                err->append("snapshot: dormant state truncated or the wrong shape");
+                return false;
+            }
+        } else {
+            dorm_.resize(nb);
+            for (usize i = 0; i < dorm_.size(); ++i)
+                dorm_[i] = Dormant{};
+        }
+        dorm_tag_.resize(nb);
+        for (usize i = 0; i < dorm_tag_.size(); ++i)
+            dorm_tag_[i] = CargoTag{};
     }
     vent_at_.clear();
     if (p_->vent_spacing > 0 && !get_array(r, &vent_at_, n)) {
@@ -3379,6 +3656,16 @@ bool Soup::check(TextBuf* why) const {
         return fail("E millicore counts the wrong size", eunits_.size());
     if (p_->frozen_ticks > 0 && last_ran_.size() < bodies_.size()) // Phase 10
         return fail("frozen watch the wrong size", last_ran_.size());
+    if (p_->dormancy) { // a resting dormant program holds its code and nothing else
+        if (dorm_.size() < bodies_.size() || dorm_tag_.size() < bodies_.size())
+            return fail("dormant state the wrong size", dorm_.size());
+        for (u32 b = 0; b < bodies_.size(); ++b)
+            if (bodies_[b].alive && dorm_[b].on &&
+                (bodies_[b].units || bodies_[b].cpus != kNone || (p_->gpus && gpu_.count[b]) ||
+                 (p_->npus && npu_.count[b]) || (p_->disk && disk_.total[b]) ||
+                 (p_->warps && warp_count_[b])))
+                return fail("a dormant body holds more than its code", b);
+    }
     if (live != order_.size())
         return fail("schedule order size wrong, live bodies", live);
     for (usize k = 0; k < order_.size(); ++k) {

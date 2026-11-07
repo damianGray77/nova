@@ -1131,9 +1131,26 @@ int cmd_resume(const Args& a) {
     }
     const u64 plain0 = w.warp_plain_ticks(), split0 = w.warp_split_ticks(), gn0 = w.warp_gpu_bodies(),
               rn0 = w.warp_ref_bodies();
+    const u64 col0 = w.collapses_total(), rec0 = w.recoveries_total(), ticks0 = w.tick();
+    const u64 dry0 = w.model() == Model::soup ? w.arrived_dry_sum() : 0;
+    const u64 arr0 = w.model() == Model::soup ? w.arrived_sum() : 0;
+    SoupTally since = {}; // the soup tallies summed since the resume
+    u64 bare0 = 0, dmem0 = 0, ddisk0 = 0;
+    if (w.model() == Model::soup)
+        for (u32 n = 0; n < w.node_count(); ++n) {
+            bare0 += w.node_soup(n).frozen_bare();
+            dmem0 += w.node_soup(n).dormant_mem_sum();
+            ddisk0 += w.node_soup(n).dormant_disk_sum();
+        }
     const double t0 = now_ms();
     while (w.tick() < ticks) {
         run.step();
+        if (w.model() == Model::soup) {
+            const u64* t = reinterpret_cast<const u64*>(&w.last_soup_tick());
+            u64* s = reinterpret_cast<u64*>(&since);
+            for (usize i = 0; i < sizeof(SoupTally) / sizeof(u64); ++i)
+                s[i] += t[i];
+        }
         print_tick_hash(a, w);
         run.drop_events();
         if (w.accel_notes().n > notes_shown)
@@ -1198,6 +1215,50 @@ int cmd_resume(const Args& a) {
            static_cast<unsigned long long>(w.tick()), static_cast<unsigned long long>(w.hash()), now_ms() - t0,
            static_cast<unsigned long long>(w.warp_verified()), static_cast<unsigned long long>(w.warp_mismatches()),
            static_cast<unsigned long long>(w.accel_mismatches()));
+    if (w.model() == Model::soup) {
+        const u64 nc = w.collapses_total() - col0;
+        printf("nova: since tick %llu: %llu collapses (worn out; %.0f ticks old and %.0f bodies each on average), "
+               "%llu recoveries; %llu live nodes of %u\n",
+               static_cast<unsigned long long>(ticks0), static_cast<unsigned long long>(nc),
+               nc ? static_cast<double>(w.collapse_age_sum()) / static_cast<double>(nc) : 0.0,
+               nc ? static_cast<double>(w.collapse_bodies_sum()) / static_cast<double>(nc) : 0.0,
+               static_cast<unsigned long long>(w.recoveries_total() - rec0),
+               static_cast<unsigned long long>(w.live_nodes()), w.node_count());
+        u64 bare = 0, dmem = 0, ddisk = 0, resting = 0;
+        for (u32 n = 0; n < w.node_count(); ++n) {
+            bare += w.node_soup(n).frozen_bare();
+            dmem += w.node_soup(n).dormant_mem_sum();
+            ddisk += w.node_soup(n).dormant_disk_sum();
+            resting += w.node_soup(n).resting_count();
+        }
+        bare -= bare0;
+        dmem -= dmem0;
+        ddisk -= ddisk0;
+        printf("nova: since tick %llu: %llu bodies born, %llu died (%llu halted, %llu frozen, %llu without a millicore), "
+               "%llu swallowed whole\n",
+               static_cast<unsigned long long>(ticks0), static_cast<unsigned long long>(since.births),
+               static_cast<unsigned long long>(since.deaths), static_cast<unsigned long long>(since.died_halted),
+               static_cast<unsigned long long>(since.died_frozen), static_cast<unsigned long long>(since.died_worn),
+               static_cast<unsigned long long>(since.engulfs));
+        if (w.soup_params().dormancy) {
+            const u64 ds = since.dormant_started;
+            printf("nova: since tick %llu: %llu went dormant (reserves %.0f codons of memory and %.0f of disk each on "
+                   "average; %llu frozen with none died), %llu woke, %llu expired, %llu eaten, %llu hops; now %llu "
+                   "drifting and %llu resting\n",
+                   static_cast<unsigned long long>(ticks0), static_cast<unsigned long long>(ds),
+                   ds ? static_cast<double>(dmem) / ds : 0.0, ds ? static_cast<double>(ddisk) / ds : 0.0,
+                   static_cast<unsigned long long>(bare), static_cast<unsigned long long>(since.dormant_woke),
+                   static_cast<unsigned long long>(since.dormant_expired),
+                   static_cast<unsigned long long>(since.dormant_eaten),
+                   static_cast<unsigned long long>(since.dormant_hops), static_cast<unsigned long long>(w.drifting()),
+                   static_cast<unsigned long long>(resting));
+        }
+        const u64 arr = w.arrived_sum() - arr0, dry = w.arrived_dry_sum() - dry0;
+        printf("nova: since tick %llu: %llu arrivals, %llu of them (%.0f%%) with no free millicore (dead in their "
+               "first sweep)\n",
+               static_cast<unsigned long long>(ticks0), static_cast<unsigned long long>(arr),
+               static_cast<unsigned long long>(dry), arr ? 100.0 * static_cast<double>(dry) / arr : 0.0);
+    }
     return 0;
 }
 
@@ -1226,7 +1287,7 @@ int cmd_replay(const Args& a) {
 
 } // namespace
 
-int main(int argc, char** argv) {
+int nova_main(int argc, char** argv) {
     if (argc == 2 && strcmp(argv[1], "devices") == 0)
         return cmd_devices();
     if (argc == 3 && strcmp(argv[1], "bench") == 0 && strcmp(argv[2], "costs") == 0)
@@ -1268,3 +1329,17 @@ int main(int argc, char** argv) {
     return usage();
 }
 
+// Started by a double click in Explorer, nova gets a console window of its
+// own, which closes the moment it exits: what it printed (the usage, an error,
+// a run's result) would vanish unread. So when no other process shares the
+// console, it waits for Enter first. From a terminal it never waits.
+int main(int argc, char** argv) {
+    const int rc = nova_main(argc, argv);
+    DWORD ids[2];
+    if (GetConsoleProcessList(ids, 2) == 1) {
+        fflush(stdout);
+        fprintf(stderr, "\nnova: press Enter to close this window\n");
+        getchar();
+    }
+    return rc;
+}

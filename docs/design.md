@@ -803,7 +803,7 @@ The plan and its calls C0–C23 are in `docs/phase4-plan.md` (revision 2). Durin
 
 **6. The node lifecycle (C12–C18; 4.4a A, C, D).** Needs `world.graph = procedural`.
 - *Wear:* `node.endurance` codon writes (memory writes and disk stores; `vary.endurance`). Hazards (copy, flaw, rot, volatility) × 1 + `node.decline` (4) × wear². Worn out (wear ≥ 1): collapse.
-- *Starvation:* a meter that ebbs like heat (*Damian, after the short check*). Each tick it loses `node.starve_ebb` (0.00025) of itself and gains 1 if the free CPU pool is below `node.starve_below` × millicores; reaching `node.starve_ticks` collapses the node. Constantly starving it settles at 1 / ebb, so it fills only if the node starves more than starve_ticks × ebb of the time (half, at the defaults). A brief recovery dents it instead of emptying it.
+- *Starvation (removed 2026-11-07, 6.17 D7):* a meter that ebbed like heat (*Damian, after the short check*). Each tick it lost `node.starve_ebb` (0.00025) of itself and gained 1 if the free CPU pool was below `node.starve_below` × millicores; reaching `node.starve_ticks` collapsed the node. It was meant to price hogging, but it couldn't tell hogging from success: in the late landscape every collapse was a full node starved (about 2,800 ticks of being full), a mini extinction of the busiest nodes and their lineages. Collapse is now wear alone, and the keys are gone.
 - *Health:* SENSE 17 = 100 × the lower of 1 − wear and 1 − starvation meter / starve_ticks.
 - *Collapse,* at the barrier in node order: every body dies an ordinary death, so its code stays behind as remnants and its disk as fossils (*revised by Damian*: 4.4a C had the code lost). Cargo to or from it is lost; the node is fallow (no tick, no edges); event `collapse`.
 - *Creation and recovery, one mechanism:* the generator's positions are sites. `world.land` (1 = off) is the fraction that are land at once: the top of a land field, drifting through a 3D noise at `world.drift`. Every `node.recover_every` ticks, in site order, a fallow site that has been fallow `node.fallow_min` ticks and is land now becomes a node while the live count is under `world.budget` (default: the live count at the start). It takes its properties from the fields as they are now (drifting too), and its ruins: memory and disk with their stamps, weathered by rot over the fallow time (*Damian's choice*), the overlap kept if its size changed. A fresh pool, initial sparks, an empty detector; event `recovered`.
@@ -1460,6 +1460,63 @@ Code: `Soup::vents`, `Soup::decay`, `DiskLedger::decay` and the ruins' fading in
   - `warp.kernel = fxc` runs FXC's kernel for comparison.
 
 **Determinism.** Suite `ecology` checks: INERT and `nova_v2`; decay of waste and free disk, living code and held disk untouched; ruins fading; vents writing only waste within their radius, the same for the same seed; a halted thread leaving and the body dying when none are left; the watchdog killing a body frozen in upkeep debt but not a running one or one waiting 67 ticks on the disk; bites of waste, whole swallows, pieces from either end with their share of millicores and the prey's thread halting in the bitten code, a surface shielding against a blind bite, bites as timed actions; a busy timed world with every Phase 10 feature the same at 1, 4 and 20 threads, under reversed dispatch and through a snapshot; and the new defaults, a world on nothing but them the same at 1 and 4 threads.
+
+### 6.17 Dormancy and drift [built 2026-11-07 from `docs/dormancy-plan.md` revision 2, approved by Damian with collapse changed to wear only]
+
+**Why.** A node fills up and its programs suffocate. With its neighbours full too there's nowhere to go, and in the late landscape 85% of daughters sent to a neighbour died on arrival for want of a free millicore. Then the starvation rule collapsed the full node, taking its lineages with it. Damian's answer is modelled on bacterial spores: a suffocating program goes dormant, leaves its cores behind (freeing its node instead of taking from the next), drifts at random until it finds room, and wakes there.
+
+Code: `Soup::go_dormant`, `rest_tick`, `depart_dormant`, `can_wake`, `wake`, `land_dormant` (`core/src/soup.cpp`); `World::deliver_dormant` and `drift_edge` (`core/src/world.cpp`); the bite rules in `contest_pick`, `engulf_body` and `bite_piece` (`core/src/interp.cpp`). Keys: `life.dormancy` (on), `dormant.mem_loss` (1 codon a tick), `dormant.disk_loss` (1), `dormant.dwell` (15 ticks).
+
+**Going dormant (D1).**
+- *The only trigger, for now:* the watchdog's frozen body (6.16 C6: millicores and a live thread, no instruction run for `life.frozen_ticks`, typically stuck in upkeep debt) goes dormant instead of dying.
+- *It keeps:* its code (its first block); its **memory reserve** (the codons in its other blocks); its **disk reserve** (its disk holding); and a note of the cores it held (P and E millicores, GPU and NPU units), its form, its thread's kind and its lineage tag.
+- *It leaves:* everything else goes back to its node, as a death's would. Its cores go to the pools with their heat, its other blocks become waste with their contents, its disk becomes fossils, and its warps and threads end. Its upkeep debt goes too: it will start afresh.
+- *It departs at once* to a random open neighbour. On a hermit node it rests at home.
+- *With no reserves* it has no time to search, and dies as before (`died_frozen`).
+
+**The clock (D2).** Each tick, drifting or resting, it loses `dormant.mem_loss` codons of its memory reserve, then `dormant.disk_loss` of its disk reserve. With both gone it dies (`dormant_expired`). The clock never eats its code; only transit corruption, bites and memory hazards can.
+
+**Drift (D3, D4).**
+- It travels hop by hop along paths as cargo with the path's latency and bandwidth, outside the edge's capacity. It picks a uniformly random open neighbour (not down, not fallow) from the node's stream, or from a world stream keyed by its send number when passing through.
+- On arrival, if the node has a waste run its code fits, it lands there as a **resting** body: holding its code and nothing else, not running, paying no upkeep. It stays up to `dormant.dwell` ticks, then moves on.
+- With no room in memory it passes straight through, a hop with no rest. With nowhere to go it dies.
+
+**Waking (D5).**
+- A resting program wakes at the end of a tick if a core of its kind is free: a GPU unit for a GPU-born program that held one, else a millicore of a kind it held.
+- It claims up to the cores it held at home, capped by what's free, and its remaining disk reserve (empty). Its memory reserve was its fuel and is spent.
+- It starts as an arrival does: one thread at its start, registers zero, in its own form. It joins its lineage then, a colonist if the lineage was founded elsewhere.
+
+**Predation (D6).** A resting program is easy food. It has no surface to shield it from a blind bite, and it can't respond. A bite takes the piece at the point of contact and the same share of its reserves; swallowed whole it's gone (`dormant_eaten`).
+
+**Collapse is wear alone (D7, Damian).** The starvation rule (6.10) and its keys are removed, so a full node no longer collapses for being full. Health is wear alone. At `node.endurance` 10⁹ writes no node wore out in 40,000 ticks, so collapse and recovery all but stop; lowering `node.endurance` is the knob if renewal is wanted. Snapshots v3 keep the lifecycle section only with wear on; v2 and v1 snapshots still load, their meter dropped.
+
+**Seeing it.** `stats.csv` gains `dormant_started`, `dormant_woke`, `dormant_expired`, `dormant_eaten`, `dormant_hops` (sums), `drifting` and `resting` (gauges); `in_flight` now counts daughters only. `nova resume` prints births and deaths by cause, dormancy's totals, collapses, and arrivals that found no free millicore.
+
+**Measured** (the late landscape from `snap.35000`, 5,000 ticks, starvation collapse gone in both):
+
+| | dormancy off | dormancy on |
+|---|---:|---:|
+| births | 191,591 | 230,843 (+20%) |
+| deaths | 1,110,219 | 992,868 (−11%) |
+| frozen deaths | 190,865 | 192,026 (bare: no reserves) |
+| went dormant | — | 190,163 (61 codons of memory and 4 of disk in reserve, on average) |
+| woke | — | 177,981 (94%) |
+| expired / eaten | — | 11,547 / 40 |
+| hops | — | 265,705 (about 1.4 each) |
+| time | 152.4 s | 152.6 s |
+
+- Most wake within a hop or two. Shedding their extra memory also cures the upkeep debt that froze them.
+- About half of frozen bodies are bare (just their code), so they can't go dormant. Some that woke freeze again later, with only their disk reserve left.
+- Daughters dispersed to a neighbour still mostly die on arrival (82% against 85%); dormancy doesn't change that rule.
+
+**Determinism.** Suite `ecology` checks:
+- a frozen body with a reserve going dormant (cores and disk freed, its code kept), resting with nowhere to go and waking on its own freed cores, with its cores and disk again;
+- a bare one dying;
+- the clock spending its reserve and killing it;
+- a resting program with a surface swallowed by a blind bite;
+- a dispersal world with dormancy on giving the same hash at 1, 4 and 20 threads, under reversed dispatch, and through a snapshot taken with programs drifting.
+
+Every other suite runs with dormancy off (the legacy defaults) and keeps its hashes.
 
 ## 7. Technical direction [decided via 7.1]
 

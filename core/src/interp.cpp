@@ -406,8 +406,8 @@ struct Exec {
         if (P.down && P.down[P.edges[nbr]]) // a failed link (Phase 4)
             return false;
         u32 queued = P.in_flight[P.edges[nbr]];
-        for (usize i = 0; i < s.departures_.size(); ++i)
-            queued += s.departures_[i].nbr == nbr;
+        for (usize i = 0; i < s.departures_.size(); ++i) // (dormant programs drift outside the capacity)
+            queued += s.departures_[i].nbr == nbr && !s.departures_[i].dormant;
         if (queued >= P.capacity)
             return false;
         // The detector sees her birth (and adopts her into the lineage) before
@@ -731,7 +731,7 @@ struct Exec {
             if (dist > p.contact_range)
                 continue;
             ++seen;
-            u32 m = surface(t, sb);
+            u32 m = s.dormant(t) ? 0 : surface(t, sb); // a resting dormant program can't shield itself
             u32 len = n > m ? n : m;
             u32 match = 0;
             for (u32 j = 0; j < n && j < m; ++j)
@@ -817,6 +817,10 @@ struct Exec {
         P.units = P.mem = P.ncpu = 0;
         P.alive = 0; // its slot is recycled by the death sweep
         ++s.tally_.engulfs;
+        if (s.dormant(prey)) { // easy food: a resting dormant program swallowed whole
+            s.dorm_[prey].on = 0;
+            ++s.tally_.dormant_eaten;
+        }
     }
 
     // Overwrites (never inserts, 6.4 #3) up to CX codons of the victim's first
@@ -1098,6 +1102,12 @@ struct Exec {
         if (p.npus)
             s.npu_.move(prey, eater,
                         static_cast<u32>((2 * static_cast<u64>(s.npu_.count[prey]) * share_n + share_d) / (2 * share_d)));
+        if (s.dormant(prey)) { // a resting dormant program loses the same share of its reserves
+            Dormant& d = s.dorm_[prey];
+            d.mem_reserve -= static_cast<u32>((2 * static_cast<u64>(d.mem_reserve) * share_n + share_d) / (2 * share_d));
+            d.disk_reserve -=
+                static_cast<u32>((2 * static_cast<u64>(d.disk_reserve) * share_n + share_d) / (2 * share_d));
+        }
         ++s.tally_.bites_body;
         return taken;
     }

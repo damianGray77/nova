@@ -230,7 +230,13 @@ class World {
     double edge_distance(u32 e) const { return spatial_ ? edge_dist_[e] : 0.0; }
     u32 edge_capacity() const { return edge_capacity_; }
     u32 edge_in_flight(u32 e) const { return in_flight_[e]; }
-    u64 in_flight() const { return cargo_.size(); } // cargoes in transit now
+    u64 in_flight() const { return cargo_.size() - drifting(); } // daughters in transit now
+    u64 drifting() const {                                         // dormant programs in transit now
+        u64 n = 0;
+        for (usize i = 0; i < cargo_.size(); ++i)
+            n += cargo_[i].dormant;
+        return n;
+    }
     // Cargo i in transit (send order): its edge, the tick it is due, and its
     // transit time in ticks (so it left at the barrier ending due - ticks).
     u32 cargo_edge(usize i) const { return cargo_[i].edge; }
@@ -251,6 +257,13 @@ class World {
     u64 born(u32 n) const { return born_.empty() ? 0 : born_[n]; }
     u64 collapses_total() const { return collapses_total_; }
     u64 recoveries_total() const { return recoveries_total_; }
+    // Diagnostics since this World object started (not in snapshots): the
+    // collapsed nodes' ages summed (ticks since each was born or returned),
+    // and the bodies they took with them.
+    u64 collapse_age_sum() const { return collapse_age_; }
+    u64 collapse_bodies_sum() const { return collapse_bodies_; }
+    u64 arrived_dry_sum() const; // every node's Soup::arrived_dry, summed
+    u64 arrived_sum() const;     // every node's Soup::arrived_all, summed
     const Array<WorldEvent>& world_events() const { return wevents_; }
     void clear_world_events() { wevents_.clear(); }
     // Phase 7b: the folder holding the disk tier's files ("" = in RAM).
@@ -343,8 +356,13 @@ class World {
         u32 form;  // kFormCpu or kFormGpu (Phase 8)
         u32 emillicores; // her E millicores (Phase 9c; millicores is then P)
         u32 kind;  // the kind of core her thread prefers (Phase 9c)
-        u32 pad;
+        // A dormant program drifting (docs/dormancy-plan.md): the cores and disk
+        // above are what it held at home; it travels outside the edge's capacity.
+        u32 dormant;     // 1: a dormant program, 0: a daughter
+        u32 mem_reserve; // its memory reserve (its disk reserve is `disk`)
+        u32 hops;        // hops so far, this one included
     };
+    static_assert(sizeof(Cargo) == 104, "Cargo must have no implicit padding");
 
     bool build_edges(const u64* keys, usize n); // keys: (src << 32 | dst), strictly increasing
     void update_node(u32 node);
@@ -357,6 +375,15 @@ class World {
     void init_ports();               // neighbour numbering and each soup's ports
     void take_departures();          // the barrier: departures onto edges
     void deliver_cargo();            // the barrier: due cargoes, in the fixed order
+    // Dormancy and drift (docs/dormancy-plan.md): a dormant program due at the
+    // barrier (land or pass through), a random open path out of a node, and
+    // whether a path is open (not down, not to a fallow site).
+    void deliver_dormant(Cargo& c);
+    u32 drift_edge(u32 n, u64 seq, u32 hops) const;
+    bool drift_open(u32 e) const;
+    Array<Cargo> drift_out_;   // scratch: dormant programs passing through this barrier
+    Array<u8> drift_codons_;   // ... and their codons
+    u64 world_dormant_expired_ = 0, world_dormant_hops_ = 0; // this tick, added to the tally
     void apply_spark_rate(double rate);
     // Phase 4
     void corrupt(Cargo& c);          // transit corruption of one cargo, at delivery
@@ -488,6 +515,7 @@ class World {
     Array<u32> life_;         // per site: lives after the first
     Array<u8> lived_;         // per site: has been a node
     u64 collapses_total_ = 0, recoveries_total_ = 0, world_collapses_ = 0, world_recoveries_ = 0;
+    u64 collapse_age_ = 0, collapse_bodies_ = 0; // diagnostics
     Array<WorldEvent> wevents_;
     // Phase 4: signals
     u32 channels_ = 0;

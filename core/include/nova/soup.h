@@ -175,12 +175,11 @@ struct SoupParams {
     u32 signal_cost_base; // signal.cost_base: instructions per EMIT
     double signal_cost_per_amp; // signal.cost_per_amp: instructions per unit of |CX|
     double signal_floor;  // signal.floor: the noise floor (a node property: vary.noise)
-    // the node lifecycle (Phase 4): endurance 0 and starve_ticks 0 = off
+    // the node lifecycle (Phase 4): endurance 0 = off. A node collapses only
+    // when it wears out (docs/dormancy-plan.md D7: the starvation rule is gone).
     double endurance;     // node.endurance: codon writes before the node wears out
     double decline;       // node.decline: hazards x (1 + decline x wear^2) as it wears
-    double starve_below;  // node.starve_below: a free CPU pool below this fraction starves
-    u32 starve_ticks;     // node.starve_ticks: the starvation meter's level that collapses the node
-    double starve_ebb;    // node.starve_ebb: the fraction the meter loses each tick, like heat
+    bool map;             // a procedural or landscape world (where snapshots before v3 kept a starvation meter)
     // warps: programs on the GPU (Phase 8, design.md 6.14); off = exactly Phase 7
     bool warps;           // gpu.warps
     u32 warp_lanes;       // warp.lanes: lanes per warp (1..64)
@@ -215,6 +214,13 @@ struct SoupParams {
     bool bites;           // engulf.bite: ENGULF bites (else it takes whole prey, as in Phase 9)
     bool threads_end;     // life.threads_end: a halted thread leaves its body
     u32 frozen_ticks;     // life.frozen_ticks: a body that runs nothing this long dies (0: never)
+    // Dormancy and drift (docs/dormancy-plan.md): a frozen body with reserves
+    // goes dormant instead of dying, drifts from node to node, and wakes where
+    // a core of its kind is free.
+    bool dormancy;        // life.dormancy
+    u32 dormant_mem_loss;  // dormant.mem_loss: codons of its memory reserve lost a tick
+    u32 dormant_disk_loss; // dormant.disk_loss: disk codons of its disk reserve lost a tick, once memory is gone
+    u32 dormant_dwell;     // dormant.dwell: ticks it rests on a node before moving on
     // optional seeded genome (smoke tests, demos), on every node or one
     u8 seed_genome[kMaxSeedLen];
     u32 seed_len;        // 0 = no seed
@@ -503,6 +509,12 @@ struct SoupTally {
     u64 died_halted;      // bodies dead with no running thread
     u64 died_frozen;      // bodies dead after life.frozen_ticks without running an instruction
     u64 died_worn;        // bodies dead with no millicore left (wear, heat, bites)
+    // Dormancy and drift (docs/dormancy-plan.md); the world adds the ones marked (world)
+    u64 dormant_started;  // frozen bodies that went dormant instead of dying
+    u64 dormant_woke;     // dormant programs that woke where they rested
+    u64 dormant_expired;  // ... that died with their reserves spent (some in transit: world)
+    u64 dormant_eaten;    // ... swallowed whole while resting
+    u64 dormant_hops;     // hops taken by drifting programs (passing through: world)
 };
 
 class Lineages; // lineage.h: the replicator detector, a pure observer
@@ -527,7 +539,28 @@ struct Departure {
     u32 form;      // kFormCpu or kFormGpu: what she is born on there (Phase 8)
     u32 emillicores; // her share of E millicores (Phase 9c; millicores is then P)
     u32 kind;        // the kind of core her thread prefers: her divider's (Phase 9c)
+    // A dormant program drifting on (docs/dormancy-plan.md): the cores and disk
+    // above are what it held at home, claimed up to when it wakes; it travels
+    // outside the edge's capacity.
+    u32 dormant;     // 1: a dormant program, 0: a daughter
+    u32 mem_reserve; // its memory reserve (codons beyond its code)
+    u32 hops;        // hops so far, this one included
 };
+
+// A dormant program resting on this node (docs/dormancy-plan.md): a body with
+// its code and nothing else, which doesn't run. Raw-hashable, per body slot.
+struct Dormant {
+    u32 on;           // 1 while dormant
+    u32 dwell;        // ticks left before it moves on
+    u32 mem_reserve;  // its memory beyond its code, spent first by the clock
+    u32 disk_reserve; // its disk holding, spent once memory is gone
+    u32 millicores, emillicores, gpus, npus; // what it held at home (P, E, GPU, NPU)
+    u32 form;         // kFormCpu or kFormGpu
+    u32 kind;         // its thread's preferred kind of core
+    u32 hops;         // hops it has drifted
+    u32 pad;
+};
+static_assert(sizeof(Dormant) == 48, "Dormant must have no implicit padding");
 
 // A node's view of its out-edges, set by the world (Phase 3): edge ids nearest
 // neighbour first, how many cargoes each already has in flight (world state,
@@ -598,18 +631,37 @@ class Soup {
     // Sets every body's GPU and NPU capacity for this tick from its units'
     // heat (the tick does this itself; tests driving run_cpu directly call it).
     void prepare_gpu();
-    // The lifecycle (Phase 4). collapse_due(): worn out or starved, decided at
-    // the end of the tick. collapse(): every body dies an ordinary death (its
+    // The lifecycle (Phase 4). collapse_due(): worn out, decided at the end of
+    // the tick. collapse(): every body dies an ordinary death (its
     // code stays behind as remnants). idle(): a fallow node's tick (nothing
     // runs). take_ruins(): its memory and disk, for its next life.
     bool collapse_due() const { return collapse_; }
     void collapse();
     void idle(u64 tick) { begin_tick(tick); }
     void take_ruins(Ruins* out, u64 fallow) const;
-    bool lifecycle() const { return p_->endurance > 0 || p_->starve_ticks > 0; }
+    bool lifecycle() const { return p_->endurance > 0; }
     u64 writes() const { return writes_; }
-    double starve_meter() const { return starve_meter_; }
-    u32 health() const; // 0-100, the SENSE reading
+    // Diagnostics (not hashed, not in snapshots): arrivals that found no free
+    // millicore here, so died in their first sweep.
+    u64 arrived_dry() const { return arrived_dry_; }
+    u64 arrived_all() const { return arrived_all_; } // ... and every arrival, likewise
+    u32 health() const; // 0-100, the SENSE reading: what's left of the node's write endurance
+
+    // Dormancy and drift (docs/dormancy-plan.md). A dormant program arriving
+    // here (at the barrier, in the fixed delivery order) lands in a waste run
+    // its code fits, as a resting body that doesn't run; false (changing
+    // nothing) when there is no room, and the world sends it on. Its lineage
+    // tag waits with it, for when it wakes.
+    bool land_dormant(const u8* code, u32 len, const Dormant& d, const CargoTag& tag);
+    bool dormant(u32 b) const { return b < dorm_.size() && dorm_[b].on != 0; }
+    bool force_dormant(u32 b) { return go_dormant(b); } // tests: as if the watchdog found it frozen
+    const Dormant& dormant_state(u32 b) const { return dorm_[b]; }
+    u32 resting_count() const; // dormant programs resting here
+    // Diagnostics (not hashed, not in snapshots): frozen bodies that died with
+    // no reserves to go dormant on, and the reserves of those that went.
+    u64 frozen_bare() const { return frozen_bare_; }
+    u64 dormant_mem_sum() const { return dormant_mem_sum_; }
+    u64 dormant_disk_sum() const { return dormant_disk_sum_; }
 
     // --- inspection ---------------------------------------------------------
     const SoupParams& params() const { return *p_; }
@@ -1013,6 +1065,24 @@ class Soup {
     Array<u64> last_ran_;
     Array<u32> vent_at_;
 
+    // Dormancy and drift (docs/dormancy-plan.md). dorm_: per body slot (world
+    // state with life.dormancy); dorm_tag_: the lineage tag each waits with
+    // (detector data, like a cargo's: not hashed or saved). go_dormant(): a
+    // frozen body keeps its code and reserves, leaves the rest, and drifts on
+    // (or rests here with nowhere to go); false when it has no reserves (it
+    // dies). rest_tick(): a resting one's end of tick (wake, clock, dwell).
+    // depart_dormant(): it leaves for neighbour nbr. drift_port(): a random
+    // open neighbour from this node's stream, or kNone.
+    Array<Dormant> dorm_;
+    Array<CargoTag> dorm_tag_;
+    u64 frozen_bare_ = 0, dormant_mem_sum_ = 0, dormant_disk_sum_ = 0; // diagnostics
+    bool go_dormant(u32 b);
+    void rest_tick(u32 b);
+    void depart_dormant(u32 b, u32 nbr);
+    u32 drift_port();
+    bool can_wake(u32 b) const;
+    void wake(u32 b);
+
   public:
     // Phase 10: the node's vents (their places in memory; none without them).
     const Array<u32>& vent_places() const { return vent_at_; }
@@ -1061,8 +1131,8 @@ class Soup {
     double hazard_mult_ = 1.0;             // the lifecycle's decline, this tick (1 when off)
     // the lifecycle (world state when it's on)
     u64 writes_ = 0;       // codon writes this life
-    double starve_meter_ = 0; // starvation: +1 a starving tick, ebbing by starve_ebb a tick
     bool collapse_ = false;
+    u64 arrived_dry_ = 0, arrived_all_ = 0; // arrived_dry(), arrived_all()
     void lifecycle_check();
     Array<u32> scratch_;
     u64 free_epoch_ = 0;         // bumped whenever a codon becomes waste

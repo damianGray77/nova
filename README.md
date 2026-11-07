@@ -18,6 +18,21 @@ included, linked or shipped (`docs/dxc-plan.md`).
 
 ## Status: Phase 10 built (design.md 6.16, 9.1); tuning after stress tests
 
+**Dormancy and drift** (design.md 6.17, `docs/dormancy-plan.md`): a program
+the watchdog would kill as frozen (200 ticks without running, typically buried
+in upkeep debt) now goes dormant, like a bacterial spore, if it has reserves.
+- It keeps its code, leaves its cores, extra memory and disk to its node, and
+  drifts at random from node to node until it finds a free core of its kind,
+  where it wakes.
+- Its reserves (the memory beyond its code, then its disk) run down as it
+  drifts. Spent out, it dies.
+- Resting on a node it's easy food: no shield, no response.
+- Node collapse now comes only from wear; the starvation rule, which collapsed
+  full nodes, is gone.
+- In the late landscape over 5,000 ticks: 20% more births, 11% fewer deaths,
+  and 94% of dormant programs woke somewhere, most within a hop or two, at no
+  cost in speed (`life.dormancy`, on by default).
+
 **Phase 10** changes where life's material comes from and how things end,
 and turns every feature of the world on by default (set a key to change it):
 
@@ -238,8 +253,8 @@ default, so earlier worlds are unchanged) and its own harness arm:
   big prey's code) gets only pieces;
 - **signals** (`signal.channels`): EMIT and LISTEN on shared channels,
   attenuated per hop, delayed by edge latency, under a noise floor;
-- **the node lifecycle** (`node.endurance`, `node.starve_ticks`, `world.land`):
-  nodes wear out or starve and collapse, leaving ruins, and sites come back as
+- **the node lifecycle** (`node.endurance`, `world.land`): nodes wear out
+  (starving too, until 2026-11-07) and collapse, leaving ruins, and sites come back as
   nodes where a drifting land field allows, with the graph rebuilt.
 
 New milestones `disk_user` and `signaller`; world events `collapse` and
@@ -373,6 +388,26 @@ incremental Ninja build, and runs the tests via CTest. It exits non-zero if the
 build or any test fails.
 
 ## Running
+
+`nova.exe` is a command-line program: run it from a terminal (PowerShell, or
+the Code tab's terminal) with a command and a config, not by double-clicking
+it. Started with nothing to do, it prints its usage and exits; a window opened
+just for it (a double click) now waits for Enter so that can be read.
+
+The quickest start, from the repository folder:
+
+```powershell
+.\tools\build.ps1                                        # build nova.exe (Release) into build-release\bin
+.\build-release\bin\nova.exe view configs\landscape.cfg  # watch the 1,000-node world live (Space pauses; close the window to stop)
+.\build-release\bin\nova.exe run configs\landscape.cfg --ticks 2000 --profile   # headless: prints events, then the hash
+.\build-release\bin\nova.exe                             # the usage: every command and option
+```
+
+A `run` with no tick or time limit (`run.ticks = 0`, `run.seconds = 0`, as in
+`landscape.cfg`) goes on until Esc. Outputs go where the config's `output.*`
+keys say (`runs\landscape\manual\` for `landscape.cfg`).
+
+More:
 
 ```powershell
 .\build\bin\nova.exe run configs\demo.cfg --threads 20

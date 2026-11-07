@@ -90,7 +90,7 @@ const char* const kWorld = "seed = 1\n"
 #define NOVA_WORLD4_EXTRA                                                                          \
     "heat.ambient = 0.05\nedge.corruption = 0.0002\nedge.failure = 0.0001\nworld.disk = 4096\n"    \
     "mem.volatility = 0.00001\nsalvage.ratio = 4\nsignal.channels = 16\nnode.endurance = 1e9\n"    \
-    "node.starve_ticks = 2000\nworld.land = 0.8\nworld.drift = 0.00001\n"
+    "world.land = 0.8\nworld.drift = 0.00001\n"
 const char* const kWorld4 = "seed = 1\n"
                             "world.model = soup\n"
                             "world.graph = procedural\n"
