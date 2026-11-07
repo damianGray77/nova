@@ -203,7 +203,10 @@ bool StatsCsv::open_nodes(const char* path, u32 every) {
     node_windows_ = 0;
     nodes_.write("tick_first,tick_last,node,x,y,degree,soup_size,millicores,gpus,npus,cool,spark_rate,"
                  "radiation,bodies,waste,free_millicores,free_gpus,free_npus,births,deaths,sent,arrived,"
-                 "lost,lineages,colonists,live,health,life,born\n");
+                 "lost,lineages,colonists,live,health,life,born,"
+                 // a varied world (docs/world-plan.md W8), after every earlier column
+                 "sub_p_cores,sub_e_cores,sub_gpu,sub_npu,sub_mem_fast,sub_mem_slow,sub_disk_fast,sub_disk_slow,"
+                 "occupancy\n");
     node_sum_.clear();
     return true;
 }
@@ -329,6 +332,11 @@ void StatsCsv::write_node_rows(const World& w) {
         u(s.lifecycle() && w.live(n) ? s.health() : (w.live(n) ? 100 : 0));
         u(w.life(n));
         u(w.born(n));
+        // A varied world (docs/world-plan.md W8): the node's substrate, each
+        // type's multiplier (1 without substrates), and its occupancy now.
+        for (u32 t = 0; t < kSubstrateTypes; ++t)
+            f6(w.substrate_mult(n, t));
+        f6(s.occupancy());
         row.append_char('\n');
         nodes_.write(row.view());
     }

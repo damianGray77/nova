@@ -1411,13 +1411,21 @@ struct Exec {
         const i32 n = static_cast<i32>(c.cx);
         if (n > 0) {
             const u64 k = static_cast<u64>(n);
+            // The work over the body's units, at the substrate's speed
+            // (docs/world-plan.md W1; 1: exactly as before).
+            const float speed = npu ? p.npu_speed : p.gpu_speed;
+            auto over = [speed](u64 work, u64 units) {
+                return speed == 1.0f ? work / units
+                                     : static_cast<u64>(static_cast<double>(work) /
+                                                        (static_cast<double>(units) * static_cast<double>(speed)));
+            };
             if (npu) {
                 const u64 macs = op == kMatvec ? k * k : (op == kMatmul ? k * k * k : k);
                 const u64 units = s.npu_count(c.body) ? s.npu_count(c.body) : 1;
-                t += macs * costs().npu_mac * 1000 / units;
+                t += over(macs * costs().npu_mac * 1000, units);
             } else {
                 const u64 units = s.gpu_count(c.body) ? s.gpu_count(c.body) : 1;
-                t += k * costs().gpu_thr / units;
+                t += over(k * costs().gpu_thr, units);
             }
         }
         if (acts() && static_cast<double>(t) > p.tick_units) {

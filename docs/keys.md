@@ -9,7 +9,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 - **Families:** a key with a `<placeholder>` stands for one setting per member listed.
 - **Needs:** the switch the setting depends on; it does nothing while that is off.
 
-265 settings, 77 of them from 14 families; 11 hidden (tests and demos).
+275 settings, 77 of them from 14 families; 11 hidden (tests and demos).
 
 ## Contents
 
@@ -17,6 +17,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 - [World and land](#world-and-land)
 - [Paths and bridges](#paths-and-bridges)
 - [Resources](#resources)
+- [Substrates](#substrates)
 - [Sparks](#sparks)
 - [CPU and cores](#cpu-and-cores)
 - [Memory](#memory)
@@ -124,6 +125,20 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `vent.rate` | whole | 64 | 0 to 1048576 | **Vent rate**. Random codons each vent writes a tick. Needs `vent.spacing`. |
 | `vent.radius` | whole | 256 | 1 to 16777216 | **Vent radius**. How far from its vent a codon lands, at most (nearer more often). Needs `vent.spacing`. |
 
+## Substrates
+
+| Key | Kind | Default | Range | Setting |
+|---|---|---|---|---|
+| `substrate.enabled` | switch | true | true or false | **Substrates**. Each node's P cores, E cores, GPU, NPU, fast and slow memory and fast and slow disk perform at one of five levels (the floor, 0.5, 1, 1.5 or 2 times), from smooth noise fields (a ring: every level 1). Needs `world.graph=procedural\|landscape`. |
+| `substrate.smooth` | number | 0.7 | 0 to 1 | **Smoothness**. 0: each node's levels on their own; 1: following the noise fields, so neighbours share them. Needs `substrate.enabled`. |
+| `substrate.scale` | number | 3 | 0.1 to 100 | **Feature scale**. Features of the substrate fields across the height (like land.scale): higher gives smaller regions. Needs `substrate.enabled`. |
+| `substrate.floor` | number | 0.1 | 0.01 to 1 | **Floor**. The lowest level's multiplier: the resource is there but nearly useless. Needs `substrate.enabled`. |
+| `substrate.share_floor` | number | 10 | 0 to 100 | **Share at the floor**. The share of nodes at the lowest level, for each type, by rank (relative to the other four shares). Needs `substrate.enabled`. |
+| `substrate.share_half` | number | 20 | 0 to 100 | **Share at 0.5x**. The share of nodes at 0.5 times, for each type (relative to the other four shares). Needs `substrate.enabled`. |
+| `substrate.share_one` | number | 40 | 0 to 100 | **Share at 1x**. The share of nodes at 1 times, for each type (relative to the other four shares). Needs `substrate.enabled`. |
+| `substrate.share_one_half` | number | 20 | 0 to 100 | **Share at 1.5x**. The share of nodes at 1.5 times, for each type (relative to the other four shares). Needs `substrate.enabled`. |
+| `substrate.share_two` | number | 10 | 0 to 100 | **Share at 2x**. The share of nodes at 2 times, for each type, by rank (relative to the other four shares). Needs `substrate.enabled`. |
+
 ## Sparks
 
 | Key | Kind | Default | Range | Setting |
@@ -140,6 +155,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `spark.min_len` | whole | 8 | 1 to 16777216 (max computed) | **Shortest spark**. The shortest run of waste a spark animates, in codons (at most the node's size; a live knob). |
 | `spark.max_len` | whole | 128 (computed) | 1 to 16777216 (max computed) | **Longest spark**. The longest run a spark animates (default 128, or the node's size if smaller; a live knob). |
 | `spark.timing` | choice | first | first, last | **Spark timing**. Whether sparks fire before the bodies run each tick, or after them. |
+| `spark.activity` | number | 2 | 0 to 100 | **Sparks by activity**. Sparks fade as a node fills: the rate x (1 - occupancy)^this, occupancy being the share of its memory held by living bodies (0 = sparks follow time alone, as before). |
 | `spark.gpu_grant` | whole | 8 (computed) | 0 to 10000000 | **Spark GPU grant**. GPU units a spark draws (default 8 with warps, else 0). Needs `gpu.warps`. |
 | `spark.gpu_born` | number | 0.5 | 0 to 1 | **Born on the GPU**. The chance a spark holding both CPU and GPU starts on the GPU, as a warp. Needs `gpu.warps`. |
 | `world.origins` | choice | all | all, one | **Origins**. Sparks on every node, or only on node 0. Needs `world.model=soup`. |

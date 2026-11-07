@@ -221,6 +221,18 @@ struct SoupParams {
     u32 dormant_mem_loss;  // dormant.mem_loss: codons of its memory reserve lost a tick
     u32 dormant_disk_loss; // dormant.disk_loss: disk codons of its disk reserve lost a tick, once memory is gone
     u32 dormant_dwell;     // dormant.dwell: ticks it rests on a node before moving on
+    // --- a varied world (docs/world-plan.md W1, W5) ---------------------------
+    // Sparks follow node activity (W5): the rate x (1 - occupancy)^this, the
+    // occupancy taken as the tick starts (Soup::occupancy). 0 = by time alone.
+    double spark_activity; // spark.activity
+    // The node's substrate (W1, W2): how well each resource performs, each
+    // the floor, 0.5, 1, 1.5 or 2 (the world sets them per node; 1 = as before).
+    // Heat, error rates and wear don't change: a fast unit is a better unit.
+    float p_speed, e_speed; // P (E) millicores: a millicore's time a tick (the instructions it runs) x this
+    float gpu_speed;        // GPU units: lane throughput (block ops, warp work) and the warps' clock x this
+    float npu_speed;        // NPU units: multiply-adds a tick (npu.macs) x this
+    float mem_fast_speed, mem_slow_speed; // the memory tiers (W3, not built yet): their costs / these
+    float disk_speed, archive_speed;      // the disk tiers (W4): their access and per-codon costs / these
     // optional seeded genome (smoke tests, demos), on every node or one
     u8 seed_genome[kMaxSeedLen];
     u32 seed_len;        // 0 = no seed
@@ -369,9 +381,9 @@ struct UnitLedger {
     u32 claim(Rng& rng, u32 body, u32 k);    // random units from the pool; returns how many
     void move(u32 from, u32 to, u32 k);      // oldest first
     void release(u32 body, u32 k);           // oldest first, into the pool
-    void prepare(const Array<u32>& order, const HeatCurve& curve, bool heat_on, u32 per_unit);
+    void prepare(const Array<u32>& order, const HeatCurve& curve, bool heat_on, float per_unit);
     // Returns how many were freed; `ambient` is the node's leak this tick.
-    u32 heat_update(const HeatCurve& curve, float gain, float decay, u32 per_unit, float ambient);
+    u32 heat_update(const HeatCurve& curve, float gain, float decay, float per_unit, float ambient);
     u32 wear(Rng& rng, double f);            // returns worn
     void hash_into(Hasher& h) const;
     void save(ByteWriter& w) const;
@@ -657,6 +669,13 @@ class Soup {
     bool force_dormant(u32 b) { return go_dormant(b); } // tests: as if the watchdog found it frozen
     const Dormant& dormant_state(u32 b) const { return dorm_[b]; }
     u32 resting_count() const; // dormant programs resting here
+    // A varied world (docs/world-plan.md W5): the share of memory held by
+    // living bodies, counting neither waste nor resting dormant programs; and
+    // the spark rate it gives now, spark.rate x the node's spark weight x
+    // (1 - occupancy)^spark.activity. A tick's sparks are drawn at its start,
+    // from the occupancy then (after the barrier's arrivals and landings).
+    double occupancy() const;
+    double spark_rate_now() const;
     // Diagnostics (not hashed, not in snapshots): frozen bodies that died with
     // no reserves to go dormant on, and the reserves of those that went.
     u64 frozen_bare() const { return frozen_bare_; }
@@ -1051,8 +1070,10 @@ class Soup {
     Array<u32> ework_;
     Array<u32> cpu_time_, cpu_etime_; // per CPU slot, its last tick's time (working state, the viewer's)
     // run_body's share of a body's time among its threads (R3): each first up
-    // to a core of its preferred kind, then the other kind's leftovers.
-    void share_time(usize k, i64 tp, i64 te, i64 cap, u64 tick);
+    // to a core of its preferred kind, then the other kind's leftovers. A core
+    // gives cap of P time or cap_e of E (equal unless the substrate's P and E
+    // speeds differ: docs/world-plan.md W1).
+    void share_time(usize k, i64 tp, i64 te, i64 cap, i64 cap_e, u64 tick);
 
     // Phase 10 (design.md 6.16). decay(): dead matter loses bits. vents():
     // each vent writes its codons into nearby waste. end_thread(): a halted

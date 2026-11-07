@@ -172,6 +172,36 @@ int cmd_land(int argc, char** argv) {
     printf("\n  %u hermits, %u hubs, %u long links; %u bridges (open %u of every %u ticks); min spacing %.4f\n",
            L.hermits, L.hubs, L.long_added, L.bridges, w->land_params().open_ticks, w->land_params().open_every,
            L.spacing);
+    // A varied world (docs/world-plan.md W8): the substrates, distinct ones
+    // (each node's eight levels together) and each type's share per level.
+    if (!w->substrates()) {
+        printf("  substrates: off (substrate.enabled = false)\n");
+    } else {
+        Array<u64> subs;
+        for (u32 i = 0; i < n; ++i) {
+            u64 key = 0;
+            for (u32 t = 0; t < kSubstrateTypes; ++t)
+                key = key << 8 | w->substrate_level(i, t);
+            subs.push(key);
+        }
+        sort_u64(subs.data(), subs.size());
+        u32 distinct = 0;
+        for (usize i = 0; i < subs.size(); ++i)
+            distinct += i == 0 || subs[i] != subs[i - 1];
+        const double fl = w->substrate_params().floor_mult;
+        printf("  substrates: %u distinct over %u nodes (of %u possible); each type's share of nodes at %gx, 0.5x, "
+               "1x, 1.5x, 2x:\n",
+               distinct, n, 390625u, fl);
+        for (u32 t = 0; t < kSubstrateTypes; ++t) {
+            u32 at[kSubstrateLevels] = {};
+            for (u32 i = 0; i < n; ++i)
+                ++at[w->substrate_level(i, t)];
+            printf("    %-12s", substrate_label(t));
+            for (u32 l = 0; l < kSubstrateLevels; ++l)
+                printf(" %5.1f%%", n ? 100.0 * at[l] / n : 0.0);
+            printf("\n");
+        }
+    }
     delete w;
     return 0;
 }

@@ -27,6 +27,9 @@
 // Distributions (C6): each node's share of a total -- sparks, memory, CPU,
 // GPU, NPU, disk -- from a skewed spread, optionally smoothed by a noise
 // field, with barren nodes and hotspots, adding up exactly to the total.
+//
+// Substrates (docs/world-plan.md W2): each node's level of each resource
+// type's performance, by rank over a smooth field per type (below).
 #include "nova/array.h"
 #include "nova/str.h"
 #include "nova/types.h"
@@ -112,5 +115,42 @@ void spread_weights(u64 seed, u32 field, const Spread& s, const Array<double>& x
 // `total` split by the weights into whole shares that add up exactly, each at
 // least `minimum` (barren nodes get the minimum).
 void spread_total(const Array<double>& weights, u64 total, u64 minimum, Array<u64>* out);
+
+// --- substrates (docs/world-plan.md W1, W2) ----------------------------------------
+// How well each of a node's resources performs, by type: P cores, E cores,
+// GPU, NPU, fast and slow memory, fast and slow disk. Each type is at one of
+// five levels, multipliers of the floor (substrate.floor), 0.5, 1, 1.5 and 2.
+// Each type has its own noise field (field id kFieldSubstrate + type, apart
+// from graph.h's NoiseField ids and so from the resource fields), mixed with
+// an independent draw per node by `smooth` as the distributions are (C6), at
+// `scale` features across the height. The levels go by rank across the nodes,
+// in exact shares (substrate.share_*). A pure function of the seed, the
+// settings and the positions (and the time, where the fields drift).
+inline constexpr u32 kSubstrateTypes = 8;
+inline constexpr u32 kSubstrateLevels = 5;
+enum SubstrateType : u32 { kSubP, kSubE, kSubGpu, kSubNpu, kSubMemFast, kSubMemSlow, kSubDiskFast, kSubDiskSlow };
+inline constexpr u32 kFieldSubstrate = 256; // + type: each type's noise field
+inline constexpr u8 kSubstrateOne = 2;      // the 1x level (every level without substrates)
+
+struct SubstrateParams {
+    double smooth = 0.7;     // substrate.smooth: 0 each node on its own, 1 following the field
+    double scale = 3.0;      // substrate.scale: features across the height
+    double floor_mult = 0.1; // substrate.floor: the lowest level's multiplier
+    double share[kSubstrateLevels] = {10, 20, 40, 20, 10}; // substrate.share_*: relative shares
+};
+
+// A type's name for people ("P cores") and for columns ("p_cores").
+const char* substrate_label(u32 type);
+const char* substrate_column(u32 type);
+// A level's multiplier: the floor, 0.5, 1, 1.5 or 2.
+double substrate_multiplier(u32 level, double floor_mult);
+// How many of n nodes take each level: the shares made exact (largest
+// remainders; ties to the lower level), adding up to n.
+void substrate_counts(const SubstrateParams& s, u32 n, u32* counts);
+// Each node's level (0-4) of each type, out[node x kSubstrateTypes + type].
+// time < 0: the static fields; otherwise the fields drifting through their
+// noise, at that time coordinate (world.drift x the tick).
+void substrate_levels(u64 seed, const SubstrateParams& s, const Array<double>& x, const Array<double>& y,
+                      double time, Array<u8>* out);
 
 } // namespace nova

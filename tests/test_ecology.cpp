@@ -616,6 +616,8 @@ void test_defaults() {
         CHECK(p.vent_spacing == 4096 && p.vent_rate == 64 && p.vent_radius == 256);
         CHECK(p.bites && p.engulf_cpt == 8 && p.threads_end && p.frozen_ticks == 200);
         CHECK(p.dormancy && p.dormant_mem_loss == 1 && p.dormant_disk_loss == 1 && p.dormant_dwell == 15);
+        // a varied world (docs/world-plan.md W5; the world sets each node's substrate speeds)
+        CHECK(p.spark_activity == 2.0 && p.p_speed == 1.0f && p.gpu_speed == 1.0f && p.disk_speed == 1.0f);
     }
     // A small world on every default: deterministic at 1 and 4 threads.
     const char* w = "world.model = soup\nworld.nodes = 4\nworld.soup_size = 4096\nspark.initial = 40\n"

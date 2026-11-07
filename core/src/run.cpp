@@ -3,6 +3,7 @@
 #include <cstdio> // snprintf
 
 #include "nova/budget.h"
+#include "nova/keys.h" // the settings registry (pre-v4 snapshots' defaults)
 #include "nova/snapshot.h"
 
 namespace nova {
@@ -48,6 +49,17 @@ bool Run::init_from_snapshot(const u8* data, usize n, u32 threads, TextBuf* err,
     if (edit && !edit(config_, ctx)) {
         err->append("snapshot: the config's changes were refused");
         return false;
+    }
+    // A varied world (docs/world-plan.md W9): a snapshot from before v4 comes
+    // from a world without substrates or sparks by activity, so it resumes
+    // with both off, unless its config (or an edit above) names them.
+    if (h.version < 4 && key_peek_str(config_, "world.model").eq("soup")) {
+        const Str g = key_peek_str(config_, "world.graph");
+        const bool map = g.eq("procedural") || g.eq("landscape"); // (substrates are read only there)
+        if (!config_.has("spark.activity"))
+            config_.set("spark.activity", "0");
+        if (map && !config_.has("substrate.enabled"))
+            config_.set("substrate.enabled", "false");
     }
     budget_notes_.clear(); // a snapshot's budgets were resolved when it ran: this only checks the fit
     if (!resolve_budgets(config_, threads ? threads : ThreadPool::hardware_threads(), &budget_notes_, err))

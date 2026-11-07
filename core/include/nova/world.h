@@ -218,6 +218,19 @@ class World {
     const LandParams& land_params() const { return lp_; }
     double world_width() const { return landscape_ ? ls_.width : 1.0; }
     u32 node_mass(u32 node) const { return landscape_ ? ls_.mass[node] : 0; }
+    // --- a varied world (docs/world-plan.md W1, W2) ---------------------------
+    // Substrates: on in procedural and landscape soup worlds with
+    // substrate.enabled (a ring has no map: every level 1x). Node n's level
+    // (0-4, landscape.h) of each type, the one its current life took from the
+    // fields at its site (kSubstrateOne, 1x, when off), and its multiplier.
+    bool substrates() const { return substrates_; }
+    const SubstrateParams& substrate_params() const { return sub_params_; }
+    u8 substrate_level(u32 node, u32 type) const {
+        return substrates_ ? sub_level_[static_cast<usize>(node) * kSubstrateTypes + type] : kSubstrateOne;
+    }
+    double substrate_mult(u32 node, u32 type) const {
+        return substrate_multiplier(substrate_level(node, type), sub_params_.floor_mult);
+    }
     bool edge_bridge(u32 e) const { return landscape_ && edge_bridge_[e]; }
     bool edge_shut(u32 e) const; // a bridge, shut this tick
     u32 edge_phase(u32 e) const { return landscape_ ? edge_phase_[e] : 0; }
@@ -473,6 +486,17 @@ class World {
     void read_spreads(Config& cfg);
     static bool resource_field(u32 f);
     void spread_resources();
+    // A varied world (docs/world-plan.md W2): substrates. sub_level_: each
+    // node's levels (node x kSubstrateTypes + type), taken by its current life
+    // (derived from the config, so not saved as state: hashed, and checked
+    // against a snapshot's). sub_at_: every site's levels from the fields as
+    // they stand at sub_at_tick_ (static unless world.drift moves them).
+    bool substrates_ = false;
+    SubstrateParams sub_params_;
+    Array<u8> sub_level_, sub_at_;
+    u64 sub_at_tick_ = ~0ull;
+    void read_substrates(Config& cfg);
+    void substrates_at(u64 tick);
     void refresh_ports();
     void bridges_update();
     // Phase 3: the world (graph structure derives from the config)

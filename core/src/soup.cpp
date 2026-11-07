@@ -385,6 +385,11 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     p->spark_max = key_u32(cfg, "spark.max_len", key_default_max(128 < soup_size ? 128 : soup_size, soup_size));
     if (p->spark_min > p->spark_max)
         cfg.fail("spark.min_len", "must not exceed spark.max_len");
+    // A varied world (docs/world-plan.md): sparks by activity (W5), and the
+    // substrate's multipliers (W1), which the world sets per node (1 here).
+    p->spark_activity = key_f64(cfg, "spark.activity");
+    p->p_speed = p->e_speed = p->gpu_speed = p->npu_speed = 1.0f;
+    p->mem_fast_speed = p->mem_slow_speed = p->disk_speed = p->archive_speed = 1.0f;
 
     p->heat_on = key_flag(cfg, "heat.enabled");
     p->cool = static_cast<float>(key_f64(cfg, "heat.cool"));
@@ -1328,6 +1333,24 @@ u32 Soup::resting_count() const {
     return n;
 }
 
+// A varied world (docs/world-plan.md W5): sparks follow node activity.
+double Soup::occupancy() const {
+    u64 held = p_->size - waste_; // every codon a body owns ...
+    if (p_->dormancy)             // ... but a resting dormant program's
+        for (usize k = 0; k < order_.size(); ++k)
+            if (dorm_[order_[k]].on)
+                held -= bodies_[order_[k]].mem;
+    return p_->size ? static_cast<double>(held) / p_->size : 0.0;
+}
+
+double Soup::spark_rate_now() const {
+    const double rate = p_->spark_rate;
+    if (p_->spark_activity <= 0 || rate <= 0) // spark.activity 0: by time alone, exactly as before
+        return rate;
+    const double room = 1.0 - occupancy();
+    return room > 0 ? rate * pow(room, p_->spark_activity) : 0.0;
+}
+
 // ---------------------------------------------------------------------------
 // CPU units (the millicore ledger)
 // ---------------------------------------------------------------------------
@@ -1597,7 +1620,8 @@ void UnitLedger::release(u32 body, u32 k) {
 // Each live body's capacity this tick: per_unit per held unit, scaled by the
 // unit's heat speed factor; and the copy-error multiplier from their mean heat.
 // Bodies born later in the tick, and units gained mid-tick, count from the next.
-void UnitLedger::prepare(const Array<u32>& order, const HeatCurve& curve, bool heat_on, u32 per_unit) {
+// (per_unit is the substrate's: the setting x its speed, docs/world-plan.md W1.)
+void UnitLedger::prepare(const Array<u32>& order, const HeatCurve& curve, bool heat_on, float per_unit) {
     for (usize k = 0; k < order.size(); ++k) {
         const u32 b = order[k];
         cap[b] = 0.0f;
@@ -1614,19 +1638,19 @@ void UnitLedger::prepare(const Array<u32>& order, const HeatCurve& curve, bool h
     for (usize k = 0; k < order.size(); ++k) {
         const u32 b = order[k];
         err[b] = (heat_on && count[b]) ? curve.err_mult(err[b] / static_cast<float>(count[b])) : 1.0f;
-        cap[b] *= static_cast<float>(per_unit);
+        cap[b] *= per_unit;
     }
 }
 
 // Each unit gains gain x its owner's utilisation (work done / nominal
 // capacity) and cools like everything else; past max it is freed, hot.
-u32 UnitLedger::heat_update(const HeatCurve& curve, float gain, float decay, u32 per_unit, float ambient) {
+u32 UnitLedger::heat_update(const HeatCurve& curve, float gain, float decay, float per_unit, float ambient) {
     u32 freed = 0;
     for (u32 u = 0; u < units(); ++u) {
         const u32 o = owner[u];
         float input = 0.0f;
         if (o != kNone) {
-            const float nominal = static_cast<float>(count[o]) * static_cast<float>(per_unit);
+            const float nominal = static_cast<float>(count[o]) * per_unit;
             input = nominal > 0 ? gain * static_cast<float>(done[o]) / nominal : 0.0f;
         }
         float h = heat[u] * decay + input;
@@ -1679,11 +1703,13 @@ u32 Soup::claim_npus(u32 body, u32 k) {
     return p_->npus ? npu_.claim(rng_, body, k) : 0;
 }
 
+// A varied world (docs/world-plan.md W1): a unit's work a tick is the
+// setting x the substrate's speed (its warps' work follows: warp_pack).
 void Soup::prepare_gpu() {
     if (p_->gpus)
-        gpu_.prepare(order_, p_->gpu, p_->heat_on, p_->gpu_elements);
+        gpu_.prepare(order_, p_->gpu, p_->heat_on, static_cast<float>(p_->gpu_elements) * p_->gpu_speed);
     if (p_->npus)
-        npu_.prepare(order_, p_->npu, p_->heat_on, p_->npu_macs);
+        npu_.prepare(order_, p_->npu, p_->heat_on, static_cast<float>(p_->npu_macs) * p_->npu_speed);
 }
 
 void Soup::accel_heat_update() {
@@ -1691,9 +1717,11 @@ void Soup::accel_heat_update() {
         return;
     const float decay = 1.0f - p_->cool;
     if (p_->gpus)
-        tally_.gpu_released += gpu_.heat_update(p_->gpu, p_->gpu_gain, decay, p_->gpu_elements, ambient_);
+        tally_.gpu_released += gpu_.heat_update(p_->gpu, p_->gpu_gain, decay,
+                                                static_cast<float>(p_->gpu_elements) * p_->gpu_speed, ambient_);
     if (p_->npus)
-        tally_.npu_released += npu_.heat_update(p_->npu, p_->npu_gain, decay, p_->npu_macs, ambient_);
+        tally_.npu_released += npu_.heat_update(p_->npu, p_->npu_gain, decay,
+                                                static_cast<float>(p_->npu_macs) * p_->npu_speed, ambient_);
 }
 
 void Soup::accel_wear() {
@@ -2180,7 +2208,7 @@ void Soup::tick_first(u64 tick) {
     if (!vent_at_.empty()) // Phase 10: fresh material before anything claims it
         vents();
 
-    double rate = p_->spark_rate;
+    const double rate = spark_rate_now(); // W5: fading as the node fills (spark.activity)
     u32 count = static_cast<u32>(rate);
     if (rng_.chance(rate - count))
         ++count;
@@ -2439,6 +2467,19 @@ void Soup::prepare_heat() {
         Body& B = bodies_[order_[k]];
         B.err = (p_->heat_on && B.units) ? p_->cpu.err_mult(B.err / B.units) : 1.0f;
     }
+    // A varied world (docs/world-plan.md W1): the substrate's P and E cores
+    // run their kind's speed x a tick's time (what the body's time comes from;
+    // heat and errors stay the units' own).
+    if (p_->p_speed != 1.0f || p_->e_speed != 1.0f) {
+        const bool e_on = ek();
+        for (usize k = 0; k < order_.size(); ++k) {
+            const u32 b = order_[k];
+            const float e = e_on ? espeed_[b] : 0.0f;
+            bodies_[b].speed = (bodies_[b].speed - e) * p_->p_speed + e * p_->e_speed;
+            if (e_on)
+                espeed_[b] = e * p_->e_speed;
+        }
+    }
 }
 
 void Soup::run_body(u32 b, u64 tick) {
@@ -2563,8 +2604,13 @@ void Soup::run_body(u32 b, u64 tick) {
     i64 te = ef > 0 ? static_cast<i64>(floor(static_cast<double>(n) * ef)) : 0;
     if (te > n)
         te = n;
-    const i64 cap = p_->threads ? static_cast<i64>(p_->tick_units) : 0x3FFFFFFFFFFFFFFFll;
-    share_time(k, n - te, te, cap, tick);
+    i64 cap = p_->threads ? static_cast<i64>(p_->tick_units) : 0x3FFFFFFFFFFFFFFFll;
+    i64 cap_e = cap;
+    if (p_->threads && (p_->p_speed != 1.0f || p_->e_speed != 1.0f)) { // W1: a core gives its kind's speed x a tick
+        cap = static_cast<i64>(p_->tick_units * p_->p_speed);
+        cap_e = static_cast<i64>(p_->tick_units * p_->e_speed);
+    }
+    share_time(k, n - te, te, cap, cap_e, tick);
     const usize off = static_cast<usize>(tick % k);
     const u32 slices = p_->threads && k > 1 ? p_->slices : 1;
     for (u32 sl = 0; sl < slices; ++sl) {
@@ -2624,18 +2670,34 @@ void Soup::run_body(u32 b, u64 tick) {
 // only once that kind is used up, so no thread waits while its body has time
 // of the other kind. Without E millicores and E-preferring threads: an equal
 // split, capped (Phase 9c-b1).
-void Soup::share_time(usize k, i64 tp, i64 te, i64 cap, u64 tick) {
+// A varied world (docs/world-plan.md W1): where the substrate's P and E cores
+// differ in speed, a core of P gives cap and one of E cap_e, and a thread
+// with part of a core's time of one kind has the rest of a core left for the
+// other (equal caps: exactly the rule above).
+void Soup::share_time(usize k, i64 tp, i64 te, i64 cap, i64 cap_e, u64 tick) {
     tq_.resize(k);
     tqe_.resize(k);
     tu_.resize(k);
     tue_.resize(k);
     for (usize i = 0; i < k; ++i)
         tq_[i] = tqe_[i] = tu_[i] = tue_[i] = 0;
+    // The time of kind e (E: true) thread i can still take: what's left of its core.
+    auto room = [&](usize i, bool e) -> i64 {
+        if (cap == cap_e)
+            return cap - tq_[i];
+        const double used = (cap > 0 ? static_cast<double>(tq_[i] - tqe_[i]) / static_cast<double>(cap) : 1.0) +
+                            (cap_e > 0 ? static_cast<double>(tqe_[i]) / static_cast<double>(cap_e) : 1.0);
+        return used < 1.0 ? static_cast<i64>((1.0 - used) * static_cast<double>(e ? cap_e : cap)) : 0;
+    };
     if (k == 1) { // most bodies: the rule below, worked out for one thread
         const bool pe = cpu_kind(scratch_[0]) == kKindE;
         const i64 tpref = pe ? te : tp, toth = pe ? tp : te;
-        const i64 a = tpref < cap ? tpref : cap;
-        const i64 o = toth < cap - a ? toth : cap - a;
+        const i64 cpref = pe ? cap_e : cap;
+        const i64 a = tpref < cpref ? tpref : cpref;
+        tq_[0] = a; // (what room() reads)
+        tqe_[0] = pe ? a : 0;
+        const i64 left = room(0, !pe);
+        const i64 o = toth < left ? toth : left;
         tq_[0] = a + o;
         tqe_[0] = pe ? a : o;
         return;
@@ -2651,7 +2713,7 @@ void Soup::share_time(usize k, i64 tp, i64 te, i64 cap, u64 tick) {
         for (usize j = 0; j < g; ++j) {
             const usize i = grp_[j];
             const i64 share = q + (((j + g - off) % g) < extra ? 1 : 0);
-            const i64 need = cap - tq_[i];
+            const i64 need = room(i, e);
             const i64 a = share < need ? share : need;
             tq_[i] += a;
             if (e)
@@ -2671,7 +2733,7 @@ void Soup::share_time(usize k, i64 tp, i64 te, i64 cap, u64 tick) {
     for (u32 x = 0; x < 2; ++x) { // its leftovers to the other kind's threads short of a core
         grp_.clear();
         for (usize i = 0; i < k; ++i)
-            if (cpu_kind(scratch_[i]) != x && tq_[i] < cap)
+            if (cpu_kind(scratch_[i]) != x && room(i, x == kKindE) > 0)
                 grp_.push(static_cast<u32>(i));
         hand_out(left[x], x == kKindE);
     }
@@ -2692,13 +2754,15 @@ void Soup::heat_update() {
         Body& B = bodies_[b];
         const u32 eu = ek_on ? eunits_[b] : 0;
         const u32 ew = ek_on ? ework_[b] : 0;
-        float nominal = static_cast<float>(B.units - eu) * static_cast<float>(p_->tick_units) / 1000.0f;
+        // (W1: a unit's nominal work is its kind's speed x a tick, so a fast
+        // core busy all tick heats as a busy core does)
+        float nominal = static_cast<float>(B.units - eu) * static_cast<float>(p_->tick_units) / 1000.0f * p_->p_speed;
         float work = static_cast<float>(B.work - (ew < B.work ? ew : B.work));
         if (p_->cost.timed && work > nominal) // Phase 9: a tick's overshoot heats the ticks that pay it off
             work = nominal;
         B.speed = nominal > 0 ? p_->cpu_gain * work / nominal : 0.0f;
         if (ek_on) {
-            const float enom = static_cast<float>(eu) * static_cast<float>(p_->tick_units) / 1000.0f;
+            const float enom = static_cast<float>(eu) * static_cast<float>(p_->tick_units) / 1000.0f * p_->e_speed;
             float ework = static_cast<float>(ew);
             if (ework > enom)
                 ework = enom;

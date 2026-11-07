@@ -310,6 +310,105 @@ void spread_total(const Array<double>& w, u64 total, u64 minimum, Array<u64>* ou
         ++(*out)[rem[k] & 0xFFFFFull];
 }
 
+// --- substrates (docs/world-plan.md W1, W2) ----------------------------------------
+
+const char* substrate_label(u32 type) {
+    static const char* const n[kSubstrateTypes] = {"P cores",     "E cores",     "GPU",       "NPU",
+                                                   "fast memory", "slow memory", "fast disk", "slow disk"};
+    return type < kSubstrateTypes ? n[type] : "?";
+}
+
+const char* substrate_column(u32 type) {
+    static const char* const n[kSubstrateTypes] = {"p_cores",  "e_cores",  "gpu",       "npu",
+                                                   "mem_fast", "mem_slow", "disk_fast", "disk_slow"};
+    return type < kSubstrateTypes ? n[type] : "?";
+}
+
+double substrate_multiplier(u32 level, double floor_mult) {
+    return level == 0 ? floor_mult : 0.5 * level; // the floor, then 0.5, 1, 1.5, 2
+}
+
+void substrate_counts(const SubstrateParams& s, u32 n, u32* counts) {
+    double sum = 0;
+    for (u32 l = 0; l < kSubstrateLevels; ++l)
+        sum += s.share[l] > 0 ? s.share[l] : 0;
+    u32 given = 0;
+    double frac[kSubstrateLevels];
+    for (u32 l = 0; l < kSubstrateLevels; ++l) {
+        const double exact = sum > 0 ? static_cast<double>(n) * (s.share[l] > 0 ? s.share[l] : 0) / sum
+                                     : (l == kSubstrateOne ? static_cast<double>(n) : 0.0);
+        counts[l] = static_cast<u32>(floor(exact));
+        frac[l] = exact - counts[l];
+        given += counts[l];
+    }
+    // The rest one each, largest remainder first (ties to the lower level).
+    while (given < n) {
+        u32 best = 0;
+        for (u32 l = 1; l < kSubstrateLevels; ++l)
+            if (frac[l] > frac[best])
+                best = l;
+        ++counts[best];
+        frac[best] = -1;
+        ++given;
+    }
+}
+
+void substrate_levels(u64 seed, const SubstrateParams& s, const Array<double>& x, const Array<double>& y,
+                      double time, Array<u8>* out) {
+    const usize n = x.size();
+    out->resize(n * kSubstrateTypes);
+    if (n == 0)
+        return;
+    NOVA_ASSERT(n <= 0xFFFFF); // node ids fit the rank keys' low 20 bits (world.nodes is at most 10^6)
+    u32 counts[kSubstrateLevels];
+    substrate_counts(s, static_cast<u32>(n), counts);
+    const double smooth = s.smooth < 0 ? 0 : (s.smooth > 1 ? 1 : s.smooth);
+    const double scale = s.scale > 0 ? s.scale : 3.0;
+    Array<u64> keys, sorted, rank;
+    keys.resize(n);
+    rank.resize(n);
+    for (u32 t = 0; t < kSubstrateTypes; ++t) {
+        // The type's field at each node, rank-normalised (as node_field), so
+        // its spread doesn't depend on the raw noise's.
+        if (smooth > 0) {
+            if (time < 0) {
+                Noise2 f;
+                f.init(seed, kFieldSubstrate + t);
+                for (usize i = 0; i < n; ++i)
+                    keys[i] = order_key(f.fbm(x[i], y[i], 4, scale));
+            } else {
+                Noise3 f;
+                f.init(seed, kFieldSubstrate + t);
+                for (usize i = 0; i < n; ++i)
+                    keys[i] = order_key(f.fbm(x[i], y[i], time, 4, scale));
+            }
+            sorted.assign(keys.data(), n);
+            sort_u64(sorted.data(), n);
+        }
+        // Mixed with an independent draw per node, as a distribution is
+        // (spread_weights): smooth x field + sqrt(1 - smooth^2) x its own.
+        Rng r(seed, Rng::kWorldNode, 0x7375627300000000ull + t); // "subs"
+        for (usize i = 0; i < n; ++i) {
+            double zf = 0;
+            if (smooth > 0) {
+                double u = n > 1 ? static_cast<double>(count_below(sorted, keys[i])) / static_cast<double>(n - 1) : 0.5;
+                const double edge = 0.5 / static_cast<double>(n);
+                u = u < edge ? edge : (u > 1 - edge ? 1 - edge : u);
+                zf = probit(u);
+            }
+            const double zr = normal(r);
+            const double zz = smooth * zf + sqrt(1 - smooth * smooth) * zr;
+            rank[i] = (order_key(zz) & ~0xFFFFFull) | i; // (ties by id)
+        }
+        // By rank: the lowest counts[0] nodes take the floor, and so on up.
+        sort_u64(rank.data(), n);
+        usize k = 0;
+        for (u32 l = 0; l < kSubstrateLevels; ++l)
+            for (u32 c = 0; c < counts[l] && k < n; ++c, ++k)
+                (*out)[(rank[k] & 0xFFFFFull) * kSubstrateTypes + t] = static_cast<u8>(l);
+    }
+}
+
 // --- the landscape -----------------------------------------------------------------------
 
 bool generate_landscape(u64 seed, const LandParams& p, Landscape* L, TextBuf* err) {

@@ -124,6 +124,13 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
 //   live, health, life, born          the lifecycle (Phase 4): a node now or
 //                                     fallow, health 0-100, lives after the
 //                                     first, the tick it last appeared
+//   sub_p_cores, sub_e_cores, sub_gpu, sub_npu, sub_mem_fast, sub_mem_slow,
+//   sub_disk_fast, sub_disk_slow      its substrate (docs/world-plan.md W2):
+//                                     each type's multiplier, the floor
+//                                     (substrate.floor), 0.5, 1, 1.5 or 2 (1
+//                                     without substrates)
+//   occupancy                         the share of its memory held by living
+//                                     bodies, resting dormant ones aside (W5)
 class StatsCsv {
   public:
     bool open(const char* path, u32 window, Model model = Model::demo); // writes the header

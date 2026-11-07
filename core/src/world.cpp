@@ -69,7 +69,8 @@ Knob knob_of(Str key, Model model) {
 bool is_structural(Str key) {
     const char* const prefixes[] = {"world.",  "isa.",    "cpu.",   "heat.", "hazard.", "contact.", "tierra.",
                                     "spark.", "seed.",   "mem.",   "detect.", "gpu.",  "npu.",     "edge.",
-                                    "vary.",  "disk.",   "salvage.", "signal.", "node."};
+                                    "vary.",  "disk.",   "salvage.", "signal.", "node.",
+                                    "substrate."}; // (a varied world, docs/world-plan.md W2)
     if (key.eq("seed"))
         return true;
     for (const char* p : prefixes)
@@ -201,6 +202,10 @@ bool World::init(Config& cfg) {
     }
     // Phase 3 node keys (soup model).
     double vary[kFieldCount] = {};
+    substrates_ = false; // (a varied world, W2: read below)
+    sub_level_.clear();
+    sub_at_.clear();
+    sub_at_tick_ = ~0ull;
     bool one_origin = false;
     u32 seed_node = kNone;
     dispersal_ = false;
@@ -223,6 +228,11 @@ bool World::init(Config& cfg) {
                     vary[f] = key_f64(cfg, kVaryKeys[f]);
         if (landscape_)
             read_spreads(cfg);
+        // A varied world (docs/world-plan.md W2): substrates need a map (a
+        // procedural or landscape world); in a ring every level is 1.
+        substrates_ = spatial_ && key_flag(cfg, "substrate.enabled");
+        if (substrates_)
+            read_substrates(cfg);
         one_origin = key_choice(cfg, "world.origins").eq("one");
         Str sn = key_str(cfg, "seed.node");
         if (!sn.eq("all")) {
@@ -522,6 +532,8 @@ void World::init_nodes(const double* vary, bool one_origin, u32 seed_node) {
     spark_factor_.resize(nodes_);
     if (landscape_)
         spread_resources();
+    if (substrates_) // W2: each node's levels, taken by derive_node
+        sub_level_.resize(static_cast<usize>(nodes_) * kSubstrateTypes);
     Array<double> z[kFieldCount];
     fields_at(0, z);
     for (u32 n = 0; n < nodes_; ++n)
@@ -540,6 +552,40 @@ void World::fields_at(u64 tick, Array<double>* z) {
         else
             node_field(seed_, f, node_x_, node_y_, &z[f]);
     }
+    substrates_at(tick); // W2: and the substrate fields, likewise
+}
+
+// --- a varied world: substrates (docs/world-plan.md W1, W2) --------------------
+
+void World::read_substrates(Config& cfg) {
+    SubstrateParams& s = sub_params_;
+    s = SubstrateParams{};
+    s.smooth = key_f64(cfg, "substrate.smooth");
+    s.scale = key_f64(cfg, "substrate.scale");
+    s.floor_mult = key_f64(cfg, "substrate.floor");
+    const char* const shares[kSubstrateLevels] = {"substrate.share_floor", "substrate.share_half", "substrate.share_one",
+                                                  "substrate.share_one_half", "substrate.share_two"};
+    double sum = 0;
+    for (u32 l = 0; l < kSubstrateLevels; ++l) {
+        s.share[l] = key_f64(cfg, shares[l]);
+        sum += s.share[l];
+    }
+    if (sum <= 0)
+        cfg.fail("substrate.share_one", "the five substrate shares can't all be 0");
+}
+
+// Every site's levels from the fields as they stand at `tick`: computed once
+// where the fields are static (a landscape, or no world.drift), else again
+// for each tick asked (a recovering site takes them as they are then).
+void World::substrates_at(u64 tick) {
+    if (!substrates_)
+        return;
+    const bool drifting = drift_ > 0;
+    if (!sub_at_.empty() && (!drifting || sub_at_tick_ == tick))
+        return;
+    substrate_levels(seed_, sub_params_, node_x_, node_y_, drifting ? static_cast<double>(tick) * drift_ : -1.0,
+                     &sub_at_);
+    sub_at_tick_ = tick;
 }
 
 void World::derive_node(u32 n, const Array<double>* z, bool first) {
@@ -547,6 +593,22 @@ void World::derive_node(u32 n, const Array<double>* z, bool first) {
     auto factor = [&](u32 f) { return z[f].size() ? 1.0 + vary_[f] * z[f][n] : 1.0; };
     SoupParams& p = node_params_[n];
     p = m;
+    // A varied world (docs/world-plan.md W1, W2): the site's substrate, from
+    // the fields at its site as they stand now (fields_at), and what each
+    // level makes its resources' speeds.
+    if (substrates_) {
+        u8* lv = sub_level_.data() + static_cast<usize>(n) * kSubstrateTypes;
+        memcpy(lv, sub_at_.data() + static_cast<usize>(n) * kSubstrateTypes, kSubstrateTypes);
+        auto speed = [&](u32 t) { return static_cast<float>(substrate_multiplier(lv[t], sub_params_.floor_mult)); };
+        p.p_speed = speed(kSubP);
+        p.e_speed = speed(kSubE);
+        p.gpu_speed = speed(kSubGpu);
+        p.npu_speed = speed(kSubNpu);
+        p.mem_fast_speed = speed(kSubMemFast);
+        p.mem_slow_speed = speed(kSubMemSlow);
+        p.disk_speed = speed(kSubDiskFast);
+        p.archive_speed = speed(kSubDiskSlow);
+    }
     if (z[kFieldSoupSize].size())
         p.size = scaled_u32(m.size, factor(kFieldSoupSize), 64 < m.size ? 64 : m.size, 1u << 24);
     if (z[kFieldMillicores].size())
@@ -2934,6 +2996,8 @@ u64 World::hash() const {
             h.bytes(fallow_since_.data(), fallow_since_.size() * sizeof(u64));
             h.bytes(life_.data(), life_.size() * sizeof(u32));
         }
+        if (substrates_) // a varied world (docs/world-plan.md W2): each node's substrate
+            h.bytes(sub_level_.data(), sub_level_.size());
         for (u32 n = 0; n < nodes_; ++n)
             soups_[n].hash_into(h);
         if (dispersal_) { // transit; the lineage tags are detector data, not hashed
@@ -3008,6 +3072,8 @@ void World::save_state(ByteWriter& w) const {
             w.put_u64(collapses_total_);
             w.put_u64(recoveries_total_);
         }
+        if (substrates_) // a varied world (v4, docs/world-plan.md W9): each node's substrate
+            w.put_bytes(sub_level_.data(), sub_level_.size());
         for (u32 n = 0; n < nodes_; ++n)
             soups_[n].save(w);
         if (dispersal_) { // transit, without the lineage tags
@@ -3125,6 +3191,22 @@ bool World::load_state(ByteReader& r, TextBuf* err, u32 version) {
                 edge_latency_.assign(pg_.latency.data(), pg_.latency.size());
                 edge_bandwidth_.assign(pg_.bandwidth.data(), pg_.bandwidth.size());
                 edge_dist_.assign(pg_.dist.data(), pg_.dist.size());
+            }
+        }
+        // A varied world (v4, docs/world-plan.md W9): the substrates derive
+        // from the config (and each node's life), so they must be the ones it
+        // gives. Snapshots before v4 have none (Run resumes them with
+        // substrates off unless told otherwise).
+        if (substrates_ && version >= 4) {
+            Array<u8> saved;
+            saved.resize(sub_level_.size());
+            if (r.remaining() < saved.size() || !r.get_bytes(saved.data(), saved.size())) {
+                err->append("snapshot: substrate section truncated");
+                return false;
+            }
+            if (memcmp(saved.data(), sub_level_.data(), saved.size()) != 0) {
+                err->append("snapshot: substrates do not match its config");
+                return false;
             }
         }
         // The edges' lengths, numbering and ports derive from the config's

@@ -2,7 +2,7 @@
 
 // Versioned binary snapshots (design.md 7.1 H).
 //
-// Format v3 (v2 and v1 are read too, see kSnapshotVersion), all integers little-endian:
+// Format v4 (v3, v2 and v1 are read too, see kSnapshotVersion), all integers little-endian:
 //   "NOVASNAP"   8-byte magic
 //   u32          format version (kSnapshotVersion)
 //   u32          flags (0)
@@ -27,7 +27,11 @@ namespace nova {
 // v3 (docs/dormancy-plan.md D7): the lifecycle section is kept only with wear
 // on (node.endurance > 0); before, every map world had one for its starvation
 // meter, which v2 and v1 snapshots still carry and Soup::load drops.
-inline constexpr u32 kSnapshotVersion = 3;
+// v4 (docs/world-plan.md W9; shared with the disasters): with substrates on,
+// each node's substrate levels after the lifecycle section (checked against
+// those the config gives). Snapshots before v4 resume with substrates and
+// sparks by activity off unless their config says otherwise (Run).
+inline constexpr u32 kSnapshotVersion = 4;
 inline constexpr u32 kSnapshotOldest = 1;
 
 void snapshot_write(const World& world, const Config& cfg, ByteWriter& out);

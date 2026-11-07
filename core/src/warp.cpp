@@ -510,7 +510,12 @@ bool Soup::warp_pack(u32 round) {
     if (n == 0 || warps_.size() == free_warps_.size())
         return false;
     const bool timed = p_->cost.timed != 0;
-    const u32 tick_time = timed ? static_cast<u32>(p_->tick_units < 4e9 ? p_->tick_units : 4e9) : 0;
+    // A warp's clock gives a tick of time a tick (Phase 9b), at the substrate's
+    // GPU speed (docs/world-plan.md W1; 1: as before). It reaches the kernel
+    // per warp (WW_TLEFT), as its work does (WW_QUOTA, from its units'
+    // capacity, which prepare_gpu already scaled).
+    const double clock = p_->tick_units * p_->gpu_speed;
+    const u32 tick_time = timed ? static_cast<u32>(clock < 4e9 ? clock : 4e9) : 0;
     if (round == 0) { // a new tick: step keys start again (a warp's yields end when it next runs)
         for (u32 w = 0; w < warps_.size(); ++w) {
             if (warps_[w].body == kNone)
@@ -568,6 +573,7 @@ bool Soup::warp_pack(u32 round) {
             // after its block ops, plus what carried over, less upkeep its
             // CPUs couldn't pay (at the serial rate), split equally among its
             // running warps (the remainder one each from a tick-rotated start).
+            // (The capacity holds the substrate's GPU speed, so `units` does.)
             double units = gpu_count(b) ? static_cast<double>(gpu_.cap[b]) / p_->gpu_elements : 0.0;
             if (units < 0)
                 units = 0;

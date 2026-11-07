@@ -215,6 +215,29 @@ NOVA_WHOLE("vent.radius", 256, 1, 1u << 24, 0, "Resources", "Vent radius", "vent
            "How far from its vent a codon lands, at most (nearer more often).")
 
 // ---------------------------------------------------------------------------
+// Substrates (docs/world-plan.md W1, W2): how well each resource performs
+// ---------------------------------------------------------------------------
+NOVA_FLAG("substrate.enabled", true, 0, "Substrates", "Substrates", "world.graph=procedural|landscape",
+          "Each node's P cores, E cores, GPU, NPU, fast and slow memory and fast and slow disk perform at one of "
+          "five levels (the floor, 0.5, 1, 1.5 or 2 times), from smooth noise fields (a ring: every level 1).")
+NOVA_NUMBER("substrate.smooth", 0.7, 0, 1, 0, "Substrates", "Smoothness", "substrate.enabled",
+            "0: each node's levels on their own; 1: following the noise fields, so neighbours share them.")
+NOVA_NUMBER("substrate.scale", 3, 0.1, 100, 0, "Substrates", "Feature scale", "substrate.enabled",
+            "Features of the substrate fields across the height (like land.scale): higher gives smaller regions.")
+NOVA_NUMBER("substrate.floor", 0.1, 0.01, 1, 0, "Substrates", "Floor", "substrate.enabled",
+            "The lowest level's multiplier: the resource is there but nearly useless.")
+NOVA_NUMBER("substrate.share_floor", 10, 0, 100, 0, "Substrates", "Share at the floor", "substrate.enabled",
+            "The share of nodes at the lowest level, for each type, by rank (relative to the other four shares).")
+NOVA_NUMBER("substrate.share_half", 20, 0, 100, 0, "Substrates", "Share at 0.5x", "substrate.enabled",
+            "The share of nodes at 0.5 times, for each type (relative to the other four shares).")
+NOVA_NUMBER("substrate.share_one", 40, 0, 100, 0, "Substrates", "Share at 1x", "substrate.enabled",
+            "The share of nodes at 1 times, for each type (relative to the other four shares).")
+NOVA_NUMBER("substrate.share_one_half", 20, 0, 100, 0, "Substrates", "Share at 1.5x", "substrate.enabled",
+            "The share of nodes at 1.5 times, for each type (relative to the other four shares).")
+NOVA_NUMBER("substrate.share_two", 10, 0, 100, 0, "Substrates", "Share at 2x", "substrate.enabled",
+            "The share of nodes at 2 times, for each type, by rank (relative to the other four shares).")
+
+// ---------------------------------------------------------------------------
 // Sparks, origins and the seeded genome
 // ---------------------------------------------------------------------------
 NOVA_NUMBER("spark.rate", 0, 0, 1000000, kKeyLog, "Sparks", "Spark rate", "",
@@ -228,6 +251,9 @@ NOVA_WHOLE("spark.max_len", 128, 1, 1u << 24, kKeyComputed | kKeyMaxComputed, "S
            "The longest run a spark animates (default 128, or the node's size if smaller; a live knob).")
 NOVA_CHOICE("spark.timing", "first", "first last", 0, "Sparks", "Spark timing", "",
             "Whether sparks fire before the bodies run each tick, or after them.")
+NOVA_NUMBER("spark.activity", 2, 0, 100, 0, "Sparks", "Sparks by activity", "",
+            "Sparks fade as a node fills: the rate x (1 - occupancy)^this, occupancy being the share of its memory "
+            "held by living bodies (0 = sparks follow time alone, as before).")
 NOVA_WHOLE("spark.gpu_grant", 8, 0, 10000000, kKeyComputed, "Sparks", "Spark GPU grant", "gpu.warps",
            "GPU units a spark draws (default 8 with warps, else 0).")
 NOVA_NUMBER("spark.gpu_born", 0.5, 0, 1, 0, "Sparks", "Born on the GPU", "gpu.warps",
