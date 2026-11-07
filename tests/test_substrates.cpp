@@ -696,7 +696,8 @@ void fallback_without_switches(TextBuf* out) {
         const char* e = strchr(p, '\n');
         const usize n = e ? static_cast<usize>(e - p + 1) : strlen(p);
         if (strncmp(p, "substrate.enabled", 17) != 0 && strncmp(p, "spark.activity", 14) != 0 &&
-            strncmp(p, "world.archive", 13) != 0 && strncmp(p, "disaster.enabled", 16) != 0)
+            strncmp(p, "world.archive", 13) != 0 && strncmp(p, "disaster.enabled", 16) != 0 &&
+            strncmp(p, "mem.fast_share", 14) != 0) // (and memory tiers: W3)
             out->append(Str(p, n));
         p += n;
     }
@@ -736,6 +737,7 @@ void test_old_snapshot() {
         CHECK(b.world().node_params(0).disk > 0 && b.world().node_params(0).archive == 0 &&
               b.config().get_str("world.archive", "").eq("0"));
         CHECK(!b.world().disasters() && b.config().get_str("disaster.enabled", "").eq("false"));
+        CHECK(b.world().node_params(0).fast_end == 0 && b.config().get_str("mem.fast_share", "").eq("0")); // W3
         b.run_until(80);
         CHECK_EQ_U64(b.world().hash(), want);
     }

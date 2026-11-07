@@ -98,6 +98,10 @@
 //                                     channel a tick) and their |amplitude|
 //   cores_offline, rebooting, storms, cores offline, nodes rebooting, storms
 //   episodes_active                   out and symptom episodes under way, now
+// then the memory tiers' (docs/world-plan.md W3; zeros with mem.fast_share 0):
+//   fast_held                         fast memory codons held, now
+//   fast_allocs, fast_alloc_fails     ALLOCs of fast memory (resource 7) that
+//                                     claimed a block; that found no room
 // and last, as always, the two floating-point columns:
 //   compress                          soup compressibility (compress.h), mean
 //                                     over nodes: ~1 random, lower = repetitive
@@ -113,14 +117,18 @@ void csv_field(TextBuf& out, Str s);
 
 // The soup model's stats columns (the list above), shared by stats.csv and the
 // viewer's charts (Phase 6) so both show exactly the same numbers.
-// The disasters' columns (docs/disasters-plan.md X7): 22 sums, then 4 gauges,
-// the last integer columns.
+// The disasters' columns (docs/disasters-plan.md X7): 22 sums, then 4 gauges.
 inline constexpr u32 kStatsDisasterSums = 22, kStatsDisasterColumns = kStatsDisasterSums + 4;
-inline constexpr u32 kStatsIntColumns = 123; // tick_first .. live_nodes, Phase 8's warp, Phase 9's action,
+// The memory tiers' (docs/world-plan.md W3), after them: a gauge, then 2 sums,
+// the last integer columns.
+inline constexpr u32 kStatsTierColumns = 3;
+inline constexpr u32 kStatsIntColumns = 126; // tick_first .. live_nodes, Phase 8's warp, Phase 9's action,
                                              // Phase 9c's thread, Phase 10's, dormancy's, the disk tiers',
-                                             // founders by origin's and the disasters' columns
+                                             // founders by origin's, the disasters' and the memory tiers' columns
 inline constexpr u32 kStatsColumns = kStatsIntColumns + 2; // then compress, ambient
-inline constexpr u32 kStatsDisasterFirst = kStatsIntColumns - kStatsDisasterColumns; // (97: surges)
+inline constexpr u32 kStatsDisasterFirst =
+    kStatsIntColumns - kStatsTierColumns - kStatsDisasterColumns; // (97: surges)
+inline constexpr u32 kStatsTierFirst = kStatsIntColumns - kStatsTierColumns; // (123: fast_held)
 const char* stats_column(u32 i);
 // Index of a column by name, or kStatsColumns if there is none.
 u32 stats_column_index(Str name);

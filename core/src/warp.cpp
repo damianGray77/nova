@@ -98,6 +98,7 @@ struct WarpVM {
     u32 gs_min = 0, gs_count = 0;
     u32 gs_wa[kMaxLanes] = {}, gs_wv[kMaxLanes] = {}, gs_ctl[12] = {};
     u32 g_seen = 0; // the lane being run's template codons read and places searched (Phase 9c)
+    u32 g_tseen = 0, g_tfast = 0; // memory tiers (W3): its search's time; its last template's fast codons
 
 #define INOUT(T) T&
 #define IMG(i) g_img[(i)]
@@ -550,6 +551,24 @@ bool Soup::warp_pack(u32 round) {
         }
     }
     const double serial = static_cast<double>(p_->warp_step_cost) + p_->warp_lane_cost;
+    // Memory tiers (docs/world-plan.md W3), timed tables: a lane's prices per
+    // tier on this node, for every record. Today's GPU prices -- a body's
+    // memory in the L2 (gpu_mem a load, a lane's add a store, gpu_scan a
+    // place searched) -- are the slow tier's; the fast tier's are those x
+    // gpu_l1 / gpu_mem (the lane's nearest cache). Each / its tier's speed.
+    u32 tier_fe = 0, tier_ps[6] = {};
+    if (timed && p_->fast_end > 0) {
+        tier_fe = p_->fast_end;
+        const double near_ratio = static_cast<double>(p_->cost.gpu_l1) / static_cast<double>(p_->cost.gpu_mem);
+        const double base[3] = {static_cast<double>(p_->cost.gpu_mem), static_cast<double>(p_->cost.gpu_alu),
+                                static_cast<double>(p_->cost.gpu_scan)};
+        auto ps = [](double v) { return v >= 4e9 ? 4000000000u : static_cast<u32>(v + 0.5); };
+        for (u32 k = 0; k < 3; ++k) {
+            tier_ps[2 * k] = ps(base[k] * near_ratio / p_->mem_fast_speed);
+            tier_ps[2 * k + 1] = ps(base[k] / p_->mem_slow_speed);
+        }
+    }
+    static_assert(WB_TSTORE == WB_TLOAD + 2 && WB_TSCAN == WB_TLOAD + 4, "the tier prices, in pairs");
     Array<u32>& run = scratch_; // this body's warps to run, then their places in its list
     Array<u32> places;
     for (usize k = 0; k < n; ++k) {
@@ -670,6 +689,11 @@ bool Soup::warp_pack(u32 round) {
             I[rec + WB_STAMP] = stamp - code;
         }
         I[rec + WB_NWARP] = nw;
+        if (tier_fe) { // memory tiers (W3; 0, as zeroed above: one tier)
+            I[rec + WB_FAST] = tier_fe;
+            for (u32 t = 0; t < 6; ++t)
+                I[rec + WB_TLOAD + t] = tier_ps[t];
+        }
         if (sorted) {
             I[rec + WB_SORT] = sort_at;
             for (u32 i = 0; i < nblk; ++i) {
@@ -845,7 +869,12 @@ void Soup::warp_unpack(bool all_on_gpu) {
             warps_[w].steps += steps;
             warps_[w].lane_instr += lins;
             wsteps_[w] += steps;
-            wtime_[w] += I[e + WW_TUSED]; // Phase 9b (classic: 0)
+            if (I[rec + WB_FAST]) { // memory tiers (W3): a tiered clock is held at its top, not wrapped
+                const u64 t = static_cast<u64>(wtime_[w]) + I[e + WW_TUSED];
+                wtime_[w] = t > 0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<u32>(t);
+            } else {
+                wtime_[w] += I[e + WW_TUSED]; // Phase 9b (classic: 0)
+            }
             tally_.warp_steps += steps;
             tally_.lane_instr += lins;
             wleft_[w] = quota > used ? quota - used : 0;

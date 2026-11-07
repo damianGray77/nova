@@ -110,7 +110,8 @@ void test_keys() {
         CHECK(p.disk == 4096 && p.archive == 1024 && p.archive_slow == 10.0);
         CHECK(p.archive_rot == p.disk_rot / 100 && near(p.archive_rot, 1e-10));
         CHECK(p.archive_decay == p.disk_decay / 100 && near(p.archive_decay, 1e-8));
-        CHECK(p.disk_speed == 1.0f && p.archive_speed == 1.0f && p.sel.res_n == 7);
+        // (res_n 8: the engine's defaults have memory tiers too, whose fast memory is resource 7: W3)
+        CHECK(p.disk_speed == 1.0f && p.archive_speed == 1.0f && p.sel.res_n == 8);
     }
     SoupParams q;
     CHECK(make_params(&q, "world.disk = 400\n", 16384) && q.archive == 100); // follows world.disk
@@ -776,7 +777,8 @@ void test_old_snapshot() {
                     "spark.rate = 0.25\naccel.gpu = cpu\naccel.npu = cpu\nwarp.device = cpu\n";
     TextBuf with;
     with.append(w);
-    with.append("world.archive = 0\nspark.activity = 0\ndisaster.enabled = false\n"); // (nor the disasters)
+    with.append("world.archive = 0\nspark.activity = 0\ndisaster.enabled = false\n" // (nor the disasters,
+                "mem.fast_share = 0\n");                                           // nor memory tiers: W3)
     Run a;
     CHECK(make_run(a, with.c_str(), 2));
     a.run_until(30);

@@ -54,10 +54,11 @@ bool load_dump(const char* path, Dump* d, TextBuf* err) {
         return false;
     }
     u32 head[5] = {};
-    bool ok = read_words(f, head, 5) && head[0] == 0x4452574Eu && head[1] == 1u && head[2] >= 1 && head[2] <= kMaxLanes;
+    // (version 2: the memory tiers' record words, docs/world-plan.md W3; a version 1 dump's records are laid out otherwise)
+    bool ok = read_words(f, head, 5) && head[0] == 0x4452574Eu && head[1] == 2u && head[2] >= 1 && head[2] <= kMaxLanes;
     if (!ok) {
         fclose(f);
-        err->append("not a warp round dump (version 1)");
+        err->append("not a warp round dump (version 2)");
         return false;
     }
     d->lanes = head[2];

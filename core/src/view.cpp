@@ -308,11 +308,13 @@ void ViewFrame::clear_new() {
 // dormancy's five (drifting and resting, 88 and 89, are gauges), the disk
 // tiers' archive stores and loads (91, 92; archive_held, 90, is a gauge), and
 // the foundings by origin (W7, 93-96), then the disasters' 22 sums (97-118;
-// their four gauges, 119-122, aren't).
+// their four gauges, 119-122, aren't), then the memory tiers' fast ALLOCs'
+// claims and failures (W3, 124-125; fast_held, 123, is a gauge).
 bool stats_column_is_sum(u32 i) {
     return (i >= 3 && i < 42) || (i >= 49 && i <= 51) || (i >= 60 && i <= 64) || (i >= 67 && i <= 72) ||
            (i >= 74 && i <= 82) || (i >= 83 && i <= 87) || (i >= 91 && i <= 92) || (i >= 93 && i <= 96) ||
-           (i >= kStatsDisasterFirst && i < kStatsDisasterFirst + kStatsDisasterSums); // the disasters' sums (97-118)
+           (i >= kStatsDisasterFirst && i < kStatsDisasterFirst + kStatsDisasterSums) || // the disasters' sums (97-118)
+           (i > kStatsTierFirst && i < kStatsTierFirst + kStatsTierColumns);           // W3's two sums (124-125)
 }
 
 void chart_row(const StatsRow& r, double* out) {

@@ -328,6 +328,13 @@ NOVA_NUMBER("mem.upkeep_exp", 4.0 / 3.0, 0.5, 4, 0, "Memory", "Upkeep exponent",
 NOVA_NUMBER("mem.decay", 0.0015625, -1, 1, kKeyLog | kKeyComputed, "Memory", "Decay", "",
             "The chance per waste codon per tick that it loses a set bit, fading toward INERT (default Ray's "
             "background rot rate with nova_v2, else 0; below 0 also means the default).")
+// memory tiers (docs/world-plan.md W3)
+NOVA_NUMBER("mem.fast_share", 0.125, 0, 1, 0, "Memory", "Fast memory share", "",
+            "The share of each node's memory, from its start, that is fast memory (whole pages; the rest is slow, "
+            "one address space): with a timed cost table every load, store, search and bulk move costs its tier's "
+            "measured price, and ALLOC's resource 7 claims fast memory only (0 = one tier, as before).")
+NOVA_NUMBER("mem.fast_volatility", 4, 0, 1000000, 0, "Memory", "Fast memory volatility", "mem.fast_share",
+            "A fast memory page's chance of a wipe, as a multiple of a slow page's (mem.volatility).")
 
 // ---------------------------------------------------------------------------
 // Disk

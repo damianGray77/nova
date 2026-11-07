@@ -61,6 +61,8 @@ static uint g_tid;
 static uint g_rec;
 static uint g_lidx; // this thread's lane in g_lanes
 static uint g_seen; // this lane's template codons read and places searched this step (Phase 9c)
+static uint g_tseen; // memory tiers (W3): ... their time, each at its tier
+static uint g_tfast; // ... and its last template's codons in fast memory
 #if W_LDS
 groupshared uint gs_img[W_LDS];
 groupshared uint gs_cst[256];

@@ -29,8 +29,10 @@
 //   STACK_GET(L, i) / STACK_SET(L, i, v)  the lane's stack (C++: L.stack; GPU:
 //                        the lane's stack in memory, since a local array
 //                        indexed at run time can't live in a barrier loop)
-//   GS_MIN(x, v) / GS_ADD(x, v) groupshared atomics on gs_min, gs_count
-//   gs_min, gs_count, gs_wa[], gs_wv[], gs_ctl[8]  groupshared words
+//   GS_MIN(x, v) / GS_ADD(x, v) / GS_MAX(x, v) groupshared atomics on gs_min, gs_count, gs_ctl
+//   gs_min, gs_count, gs_wa[], gs_wv[], gs_ctl[12]  groupshared words
+//   g_seen, g_tseen, g_tfast  the lane being run's search counts (thread-private:
+//                        Phase 9c; g_tseen and g_tfast for the memory tiers, W3)
 //   W_LOOP               [loop] (HLSL) / nothing
 //   W_TRACE(wr, l, step, ip, op, L)  after a lane's instruction: nothing on the
 //                        GPU; the C++ reference can log one lane (debugging)
@@ -91,6 +93,16 @@ uint w_mulhi(uint a, uint b) {
 // A uniform draw d mapped onto [0, n).
 uint w_below(uint d, uint n) {
     return w_mulhi(d, n);
+}
+
+// a + b, held at the top rather than wrapping (memory tiers' times, W3). One
+// return: FXC counts an early one's value as possibly uninitialized, and
+// this one steers the warp's clock (and so its barriers).
+uint w_sat_add(uint a, uint b) {
+    uint s = a + b;
+    if (s < a)
+        s = 0xFFFFFFFFu;
+    return s;
 }
 
 // Unsigned division and remainder, exact, never with the compilers' own / or
@@ -311,6 +323,43 @@ bool w_writable(uint b, uint a, uint key, uint step, uint lane) {
     return w_accepts(b, a, key, step, lane);
 }
 
+// --- memory tiers (docs/world-plan.md W3) ----------------------------------------
+// With WB_FAST > 0 a lane's reads, writes and searches cost their codons'
+// tier's prices (the record's WB_TLOAD, WB_TSTORE, WB_TSCAN: fast, then
+// slow). WB_FAST = 0: none of this runs, and every step is as before.
+
+// The price at word `at` (fast) or at + 1 (slow) for address a's tier (one
+// return, as w_sat_add).
+uint w_tprice(uint b, uint a, uint at) {
+    uint k = at + 1u;
+    if (a < IMG(b + WB_FAST))
+        k = at;
+    return IMG(b + k);
+}
+
+// The instructions whose step time is their lanes' memory traffic.
+bool w_tier_op(uint op) {
+    return op == OP_COPY || op == OP_READ || op == OP_WRITE || op == OP_T_MOVII;
+}
+
+// A lane's time for such a step: its load and its store, each at its codon's
+// tier, from its registers before the step (whether or not the access is
+// allowed, as a CPU's own part is charged either way).
+uint w_lane_mem(uint b, uint op, uint rh, uint wh, uint ax, uint bx) {
+    uint size = IMG(b + WB_SIZE);
+    uint t = 0u;
+    if (op == OP_COPY || op == OP_READ)
+        t += w_tprice(b, rh, WB_TLOAD);
+    if (op == OP_COPY || op == OP_WRITE)
+        t += w_tprice(b, wh, WB_TSTORE);
+    if (op == OP_T_MOVII) {
+        t += w_tprice(b, w_umod(bx, size), WB_TLOAD);
+        t += w_tprice(b, w_umod(ax, size), WB_TSTORE);
+    }
+    return t;
+}
+// --- end memory tiers ----------------------------------------------------------
+
 // --- templates --------------------------------------------------------------------
 
 uint w_bit(uint t0, uint t1, uint i) {
@@ -327,8 +376,10 @@ uint w_template(uint b, uint from, INOUT(uint) t0, INOUT(uint) t1) {
     uint maxt = CST(WC_TEMPLATE);
     uint w = 0u;
     uint op = 0u;
+    uint fe = IMG(b + WB_FAST); // memory tiers (W3): its codons in fast memory, for the search after it
     t0 = 0u;
     t1 = 0u;
+    g_tfast = 0u;
     W_LOOP while (n < maxt) {
         w = w_word(b, a);
         if (w == W_NONE)
@@ -344,6 +395,8 @@ uint w_template(uint b, uint from, INOUT(uint) t0, INOUT(uint) t1) {
             else
                 t1 |= 1u << (n - 32u);
         }
+        if (a < fe)
+            g_tfast++;
         n++;
         a = w_adv(b, a, 1u);
     }
@@ -394,6 +447,7 @@ uint w_search(uint b, uint a, uint t0, uint t1, uint n, int dir) {
     int st = 0;
     int f2 = hi - (int)n - (int)a - (int)n;
     int b2 = (int)a - (int)n + 1 - lo;
+    uint fe = IMG(b + WB_FAST); // memory tiers (W3): 0 = one tier
     if (f2 < fmax)
         fmax = f2;
     if (b2 < bmax)
@@ -403,11 +457,15 @@ uint w_search(uint b, uint a, uint t0, uint t1, uint n, int dir) {
     if (dir <= 0 && bmax > dmax)
         dmax = bmax;
     g_seen += n; // Phase 9c: the template's codons, read (each search's own clock: see w_run_warp)
+    if (fe != 0u) // W3: ... each at its tier (w_template counted its fast ones)
+        g_tseen = w_sat_add(g_tseen, g_tfast * IMG(b + WB_TSCAN) + (n - g_tfast) * IMG(b + WB_TSCAN + 1u));
     W_LOOP for (d = 1; d <= dmax; d++) {
         if (dir >= 0 && d <= fmax) {
             st = (int)a + (int)n + d;
             if (st + (int)n <= size) {
                 g_seen += 1u; // a place looked at
+                if (fe != 0u) // (W3: at its tier)
+                    g_tseen = w_sat_add(g_tseen, w_tprice(b, (uint)st, WB_TSCAN));
                 if (w_complement_at(b, (uint)st, t0, t1, n))
                     return w_adv(b, w_umod((uint)st + n - 1u, (uint)size), 1u);
             }
@@ -416,6 +474,8 @@ uint w_search(uint b, uint a, uint t0, uint t1, uint n, int dir) {
             st = (int)a - (int)n - d + 1;
             if (st >= 0) {
                 g_seen += 1u;
+                if (fe != 0u)
+                    g_tseen = w_sat_add(g_tseen, w_tprice(b, (uint)st, WB_TSCAN));
                 if (w_complement_at(b, (uint)st, t0, t1, n))
                     return w_adv(b, w_umod((uint)st + n - 1u, (uint)size), 1u);
             }
@@ -932,18 +992,23 @@ void w_run_warp(uint b, uint wi) {
     uint op = 0u;
     uint obid = 0u;
     uint g = 0u;
+    uint fast = 0u; // memory tiers (W3): the record's WB_FAST, 0 = one tier, every step as before
+    uint tmem = 0u; // ... 1: this step's time is its lanes' memory traffic
     bool mine = false;
     // Every value that steers the loop is decided by one thread and handed to
     // all through gs_ctl, with a barrier after each hand-over: the GPU's
     // compiler only lets barriers sit inside loops whose control it can see
-    // every thread agrees on. (In C++ these are plain assignments.)
+    // every thread agrees on. (In C++ these are plain assignments.) The
+    // tiers' switch steers the clock, so it comes the same way.
     ONCE_BEGIN
         gs_ctl[0] = IMG(wr + WW_QUOTA);
         gs_ctl[7] = IMG(wr + WW_TLEFT);
+        gs_ctl[11] = IMG(b + WB_FAST);
     ONCE_END
     SYNC
     quota = gs_ctl[0];
     tleft = gs_ctl[7];
+    fast = gs_ctl[11];
     LANES_LOAD(lane0)
     LANE_BEGIN(lane0)
         if (step == 0u)
@@ -956,6 +1021,7 @@ void w_run_warp(uint b, uint wi) {
             gs_min = W_NONE;
             gs_count = 0u;
             gs_ctl[8] = 0u; // the slowest lane's search, this step (Phase 9c)
+            gs_ctl[9] = 0u; // the slowest lane's memory traffic, this step (memory tiers, W3)
         ONCE_END
         SYNC
         LANE_BEGIN(lane0)
@@ -988,6 +1054,9 @@ void w_run_warp(uint b, uint wi) {
                 gs_ctl[2] = 1u;
             gs_ctl[3] = obid;
             gs_ctl[4] = e;
+            gs_ctl[10] = 0u; // W3: a read or write step in a tiered record
+            if (mine && fast != 0u && w_tier_op(op))
+                gs_ctl[10] = 1u;
         ONCE_END
         SYNC
         minip = gs_ctl[0];
@@ -995,6 +1064,7 @@ void w_run_warp(uint b, uint wi) {
         mine = gs_ctl[2] != 0u;
         obid = gs_ctl[3];
         e = gs_ctl[4];
+        tmem = gs_ctl[10];
         SYNC
         if (minip == W_NONE)
             break; // every lane halted or yielded
@@ -1006,8 +1076,20 @@ void w_run_warp(uint b, uint wi) {
         tstep = CST(WC_OPTIME + OP_COUNT);
         if (mine)
             tstep = CST(WC_OPTIME + op);
-        if (tused + tstep > tleft)
-            break; // its clock is out for this tick
+        // Memory tiers (W3): a step that reads or writes memory takes its
+        // slowest lane's time, each lane's codons at their tiers' prices
+        // (the lanes wait for each other, as for a search), known before it
+        // runs. (In slow memory at speed 1 that is the table's own time.)
+        if (tmem != 0u) {
+            LANE_BEGIN(lane0)
+                if (L.halted == 0u && L.yielded == 0u && L.ip == minip)
+                    GS_MAX(gs_ctl[9], w_lane_mem(b, op, L.rh, L.wh, L.ax, L.bx));
+            LANE_END
+            SYNC
+            tstep = gs_ctl[9];
+        }
+        if (tused + tstep > tleft || (fast != 0u && tused + tstep < tused))
+            break; // its clock is out for this tick (W3: or a tiered clock at its top)
         tused += tstep;
         if (e != W_NONE) {
             ONCE_BEGIN
@@ -1032,8 +1114,12 @@ void w_run_warp(uint b, uint wi) {
                 } else {
                     L.block = obid;
                     g_seen = 0u;
+                    g_tseen = 0u;
                     ok = w_exec(b, L, l, op, minip, key, step, nx, wto, wval);
-                    GS_MAX(gs_ctl[8], g_seen);
+                    if (fast != 0u) // W3: its search's time, each codon at its tier
+                        GS_MAX(gs_ctl[8], g_tseen);
+                    else
+                        GS_MAX(gs_ctl[8], g_seen);
                     // an execution flaw: one register comes out off by one
                     if (w_draw(key, step, l, WD_FLAW) < IMG(b + WB_FLAW_THR)) {
                         fd = w_draw(key, step, l, WD_FLAW_KIND);
@@ -1081,7 +1167,10 @@ void w_run_warp(uint b, uint wi) {
         SYNC
         // Phase 9c: lanes in lockstep wait for the slowest one's search (a
         // step that runs past the tick's end is carried into the next).
-        tused += tsearch * CST(WC_SCAN);
+        if (fast != 0u)
+            tused = w_sat_add(tused, tsearch); // W3: already a time, at each codon's tier
+        else
+            tused += tsearch * CST(WC_SCAN);
         used += CST(WC_STEP_COST) + CST(WC_LANE_COST) * g;
         steps++;
         lins += g;

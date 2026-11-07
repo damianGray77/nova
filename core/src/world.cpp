@@ -699,6 +699,10 @@ void World::derive_node(u32 n, const Array<double>* z, bool first) {
     }
     spark_factor_[n] = sf;
     p.spark_rate = m.spark_rate * sf;
+    // Memory tiers (docs/world-plan.md W3): the first mem.fast_share of this
+    // node's own soup is fast (its speeds, mem_fast_speed and mem_slow_speed,
+    // come from its substrate above).
+    p.fast_end = mem_fast_end(p.size, p.mem_fast_share);
     // Settings bounded by the soup size (checked against the mean).
     p.search_limit = min_of(p.search_limit, p.size);
     p.contact_range = min_of(p.contact_range, p.size);
@@ -1700,7 +1704,7 @@ void World::warp_second_task(void* ctx, u32 node) {
 }
 
 // set_warp_dump's file, little-endian 32-bit words: "NWRD" (0x4452574E), the
-// version (1), lanes a warp, the constants' count, the jobs' count, the
+// version (2: memory tiers' record words, W3; 1 before), lanes a warp, the constants' count, the jobs' count, the
 // constants; then per job its node, image words, records and lanes (Lane
 // count), the image, the record offsets, each record's words, and the lanes.
 bool World::warp_write_dump(const Array<u32>& cst) {
@@ -1711,7 +1715,7 @@ bool World::warp_write_dump(const Array<u32>& cst) {
     auto put = [&](const void* p, usize words) {
         ok = ok && (words == 0 || fwrite(p, 4, words, f) == words);
     };
-    const u32 head[5] = {0x4452574Eu, 1u, soup_params_.warp_lanes, static_cast<u32>(cst.size()),
+    const u32 head[5] = {0x4452574Eu, 2u, soup_params_.warp_lanes, static_cast<u32>(cst.size()),
                          static_cast<u32>(warp_jobs_.size())};
     put(head, 5);
     put(cst.data(), cst.size());

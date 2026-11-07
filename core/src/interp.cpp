@@ -46,6 +46,102 @@ struct Exec {
         a->warp = warp ? 1u : 0u;
     }
 
+    // --- memory tiers (docs/world-plan.md W3) ---------------------------------
+    // With a timed table and fast memory on the node (SoupParams::fast_end),
+    // every load, store, template scan and bulk move costs its codon's tier's
+    // price: the fast tier the table's own (the nearest cache's) / the node's
+    // fast-memory speed, the slow tier the table's x load_far / load (one
+    // cache level out) / its slow-memory speed. Those picoseconds gather in
+    // t_mem and are rounded once an instruction. Without tiers (or classic)
+    // every price goes into t_ps as before. tiers_setup() runs once the core's
+    // table (ct) is known.
+    bool tiered = false;
+    double tf[2] = {1.0, 1.0}; // per tier (0 fast, 1 slow): the factor on a table price
+    mutable double t_mem = 0;  // this instruction's tiered picoseconds (searches are const)
+    u32 moved_fast = 0;        // fast codons among the last bulk move (ENGULF, bites, INJECT)
+    void tiers_setup() {
+        tiered = p.cost.timed && p.fast_end > 0;
+        if (!tiered)
+            return;
+        const CostTable& t = costs();
+        tf[0] = 1.0 / p.mem_fast_speed;
+        tf[1] = static_cast<double>(t.load_far) / static_cast<double>(t.load) / p.mem_slow_speed;
+    }
+    bool fast(u32 a) const { return a < p.fast_end; }
+    // n codons of a table operation ps at address a's tier.
+    void charge(u64 ps, u32 a, u64 n = 1) const {
+        if (!tiered) {
+            t_ps += n * ps;
+            return;
+        }
+        t_mem += static_cast<double>(n * ps) * tf[fast(a) ? 0 : 1];
+    }
+    // nf fast and ns slow codons of ps.
+    void charge2(u64 ps, u64 nf, u64 ns) const {
+        if (!tiered) {
+            t_ps += (nf + ns) * ps;
+            return;
+        }
+        t_mem += static_cast<double>(nf * ps) * tf[0] + static_cast<double>(ns * ps) * tf[1];
+    }
+    // The fast codons of [start, start + len) (a block's range: no wrap).
+    u32 fast_in(u32 start, u32 len) const {
+        if (start >= p.fast_end)
+            return 0;
+        return min_of<u32>(len, p.fast_end - start);
+    }
+    void charge_range(u64 ps, u32 start, u32 len) const {
+        const u32 nf = tiered ? fast_in(start, len) : 0;
+        charge2(ps, nf, len - nf);
+    }
+    // Block k's (a body's) codons still owned, in fast memory.
+    u32 block_fast_owned(u32 k) const {
+        const Block& bl = s.blocks_[k];
+        if (bl.start >= p.fast_end)
+            return 0;
+        if (bl.start + bl.len <= p.fast_end)
+            return bl.owned;
+        u32 n = 0;
+        for (u32 a = bl.start; a < p.fast_end; ++a)
+            n += s.owner_[a] == k ? 1u : 0u;
+        return n;
+    }
+    u32 fast_owned(u32 body) const {
+        u32 n = 0;
+        for (u32 k = s.bodies_[body].blocks; k != kNone; k = s.blocks_[k].next)
+            n += block_fast_owned(k);
+        return n;
+    }
+    // This instruction's picoseconds beyond its own part: t_ps and t_mem, rounded.
+    u64 extra_ps() const { return t_ps + (tiered ? static_cast<u64>(t_mem + 0.5) : 0); }
+    // An instruction's own part. Those that read or write memory through a
+    // head (COPY, READ, WRITE, MOVII) at their codons' tiers, from the
+    // registers before they run, into t_mem (0 then stands for the part).
+    u64 own_part(Op op) const {
+        const CostTable& t = costs();
+        if (!tiered)
+            return t.op[static_cast<u32>(op)];
+        switch (op) {
+        case Op::copy:
+            charge(t.load, c.rh);
+            charge(t.store, c.wh);
+            return 0;
+        case Op::read:
+            charge(t.load, c.rh);
+            return 0;
+        case Op::write:
+            charge(t.store, c.wh);
+            return 0;
+        case Op::t_movii:
+            charge(t.load, c.bx % p.size);
+            charge(t.store, c.ax % p.size);
+            return 0;
+        default:
+            return t.op[static_cast<u32>(op)];
+        }
+    }
+    // --- end memory tiers -------------------------------------------------------
+
     // --- addresses -----------------------------------------------------------
 
     bool own(u32 a) const {
@@ -103,7 +199,7 @@ struct Exec {
 
     // The run of NOPs starting at `from` (at most max_template), as bits.
     u32 read_template(u32 from, u8* bits) const {
-        u32 n = 0;
+        u32 n = 0, nf = 0; // (nf: of them in fast memory, W3)
         u32 a = from;
         while (n < p.max_template) {
             if (!p.open_membrane && !own(a))
@@ -112,9 +208,10 @@ struct Exec {
             if (!is_nop(op))
                 break;
             bits[n++] = op == Op::nop1;
+            nf += fast(a) ? 1u : 0u;
             a = next_ip(a);
         }
-        t_ps += static_cast<u64>(n) * costs().load; // Phase 9: the template's codons, read
+        charge2(costs().load, nf, n - nf); // Phase 9: the template's codons, read (W3: each at its tier)
         return n;
     }
 
@@ -154,7 +251,7 @@ struct Exec {
             bmax = min_of<i64>(bmax, static_cast<i64>(a) - n + 1 - lo);
         }
         const i64 dmax = max_of<i64>(dir >= 0 ? fmax : 0, dir <= 0 ? bmax : 0);
-        u64 seen = 0; // Phase 9: places looked at, each a codon searched
+        u64 seen = 0, seen_f = 0; // Phase 9: places looked at, each a codon searched (W3: of them fast)
         for (i64 d = 1; d <= dmax; ++d) {
             if (dir >= 0 && d <= fmax) {
                 i64 st = static_cast<i64>(a) + n + d;
@@ -162,8 +259,9 @@ struct Exec {
                     st %= size;
                 if (st + n <= size || p.open_membrane) {
                     ++seen;
+                    seen_f += fast(static_cast<u32>(st)) ? 1 : 0;
                     if (complement_at(static_cast<u32>(st), bits, n)) {
-                        t_ps += seen * costs().scan;
+                        charge2(costs().scan, seen_f, seen - seen_f);
                         return next_addr(static_cast<u32>((st + n - 1) % size));
                     }
                 }
@@ -174,14 +272,15 @@ struct Exec {
                     st = ((st % size) + size) % size;
                 if (st >= 0) {
                     ++seen;
+                    seen_f += fast(static_cast<u32>(st)) ? 1 : 0;
                     if (complement_at(static_cast<u32>(st), bits, n)) {
-                        t_ps += seen * costs().scan;
+                        charge2(costs().scan, seen_f, seen - seen_f);
                         return next_addr(static_cast<u32>((st + n - 1) % size));
                     }
                 }
             }
         }
-        t_ps += seen * costs().scan;
+        charge2(costs().scan, seen_f, seen - seen_f);
         return kNone;
     }
 
@@ -313,7 +412,37 @@ struct Exec {
         u32 k = s.new_block(at, len, c.body);
         s.bodies_[c.body].latest = k;
         c.wh = at;
-        t_ps += static_cast<u64>(len) * costs().move; // Phase 9: its codons claimed
+        charge_range(costs().move, at, len); // Phase 9: its codons claimed (W3: at their tiers)
+        return at;
+    }
+
+    // Memory tiers (docs/world-plan.md W3): ALLOC's resource 7 claims fast
+    // memory only: the nearest free run inside [0, fast_end), outward from
+    // the block the CPU runs in, as alloc_memory finds one anywhere. kNone
+    // when there is no room of that size there (which proves nothing about
+    // slow memory, so it notes nothing).
+    u32 alloc_fast(u32 len) {
+        const u32 fe = p.fast_end;
+        if (len > fe || s.known_full(len))
+            return kNone;
+        u32 lo = c.ip, hi = c.ip + 1;
+        if (c.block != kNone) {
+            lo = s.blocks_[c.block].start;
+            hi = lo + s.blocks_[c.block].len;
+        }
+        const u32 f = hi < fe ? free_run_fwd(s.used_.data(), fe, hi, len) : kNone;
+        const u32 b = s.find_free_bwd(lo < fe ? lo : fe, len);
+        u32 at = kNone;
+        if (f != kNone && b != kNone)
+            at = (f - hi) <= (lo - (b + len)) ? f : b;
+        else
+            at = f != kNone ? f : b;
+        if (at == kNone)
+            return kNone;
+        u32 k = s.new_block(at, len, c.body);
+        s.bodies_[c.body].latest = k;
+        c.wh = at;
+        charge_range(costs().move, at, len);
         return at;
     }
 
@@ -345,7 +474,7 @@ struct Exec {
         t_ps += costs().call; // Phase 9: a world change
         if (k == kNone)
             return false;
-        t_ps += static_cast<u64>(s.blocks_[k].len) * costs().move; // her codons handed over
+        charge_range(costs().move, s.blocks_[k].start, s.blocks_[k].len); // her codons handed over (W3: tiers)
         // The detector compares the daughter with the block this CPU runs in
         // (read-only; see lineage.h).
         if (s.obs_)
@@ -407,7 +536,7 @@ struct Exec {
         t_ps += costs().call; // Phase 9: a world change
         if (k == kNone)
             return false;
-        t_ps += static_cast<u64>(s.blocks_[k].len) * costs().move; // her codons, packed as cargo
+        charge_range(costs().move, s.blocks_[k].start, s.blocks_[k].len); // her codons, packed as cargo (W3)
         const u32 nbr = dest - 1;
         if (P.down && P.down[P.edges[nbr]]) // a failed link (Phase 4)
             return false;
@@ -602,6 +731,13 @@ struct Exec {
             c.ax = off;
             return true;
         }
+        case 7: { // memory tiers (W3): fast memory only, one run of CX codons there
+            if (amount <= 0)
+                return true;
+            const bool got = alloc_fast(static_cast<u32>(amount)) != kNone;
+            ++(got ? s.tally_.fast_allocs : s.tally_.fast_alloc_fails);
+            return got;
+        }
         default:
             return false;
         }
@@ -611,15 +747,18 @@ struct Exec {
         i32 amount = static_cast<i32>(c.cx);
         t_ps += costs().call; // Phase 9: a world change
         switch (resource()) {
-        case 0: { // memory: the end of the latest block
+        case 0:   // memory: the end of the latest block
+        case 7: { // memory tiers (W3): fast memory is memory, one address space: the same
             u32 k = s.bodies_[c.body].latest;
             if (k == kNone)
                 return false;
             if (amount <= 0)
                 return true;
             Block& bl = s.blocks_[k];
-            t_ps += static_cast<u64>(amount < static_cast<i32>(bl.len) ? amount : static_cast<i32>(bl.len)) *
-                    costs().move; // its codons given up
+            { // its codons given up (W3: at their tiers)
+                const u32 m = amount < static_cast<i32>(bl.len) ? static_cast<u32>(amount) : bl.len;
+                charge_range(costs().move, bl.start + bl.len - m, m);
+            }
             if (static_cast<u32>(amount) >= bl.len) {
                 s.stamp_block(k, genome()); // left behind as my remnants (Phase 4)
                 s.bodies_[c.body].mem -= bl.owned;
@@ -775,7 +914,7 @@ struct Exec {
         const u64 blind = blind_wins ? 1 : 0;
         u32 best = kNone, best_match = 0, best_len = 0, best_dist = 0;
         u8 sb[64];
-        u64 seen = 0; // Phase 9: surfaces looked at
+        u64 seen = 0, seen_f = 0; // Phase 9: surfaces looked at (W3: of them in fast memory)
         for (usize i = 0; i < s.order_.size(); ++i) {
             u32 t = s.order_[i];
             if (t == c.body || !s.bodies_[t].alive || s.bodies_[t].blocks == kNone)
@@ -785,6 +924,7 @@ struct Exec {
             if (dist > p.contact_range)
                 continue;
             ++seen;
+            seen_f += fast(start) ? 1 : 0;
             u32 m = s.dormant(t) ? 0 : surface(t, sb); // a resting dormant program can't shield itself
             u32 len = n > m ? n : m;
             u32 match = 0;
@@ -802,7 +942,7 @@ struct Exec {
                 best_dist = dist;
             }
         }
-        t_ps += seen * costs().scan;
+        charge2(costs().scan, seen_f, seen - seen_f);
         *pmatch = best_match;
         *plen = best_len;
         return best;
@@ -810,6 +950,7 @@ struct Exec {
 
     void engulf_body(u32 prey) {
         u32 eater = c.body;
+        moved_fast = tiered ? fast_owned(prey) : 0; // W3: the prey's codons in fast memory, its moves' tier
         // The prey's code stays the prey's (Phase 4 salvage): stamped with its
         // genome length before its blocks become the eater's.
         if (!s.stamp_.empty()) {
@@ -885,6 +1026,7 @@ struct Exec {
         u32 count = c.cx < bl.len ? c.cx : bl.len;
         u32 dest = bl.start + c.ax % bl.len;
         u32 written = 0;
+        moved_fast = 0; // W3: the payload's codons written into fast memory
         // For the detector: written codons equal to the injector's own codon
         // at the same offset (read-only; see lineage.h).
         const u32 own = s.obs_ ? c.block : kNone;
@@ -897,6 +1039,7 @@ struct Exec {
                 s.mem_[dest] = copied(take(from));
                 note_write(dest);
                 ++written;
+                moved_fast += fast(dest) ? 1u : 0u;
                 if (own != kNone) {
                     const Block& P = s.blocks_[own];
                     const u32 j = dest - bl.start;
@@ -936,24 +1079,26 @@ struct Exec {
     // The nearest waste codon within contact range of ip (forward first at
     // each distance), or kNone; each place looked at is a scan.
     u32 nearest_waste(u32 ip) {
-        u64 seen = 0;
+        u64 seen = 0, seen_f = 0; // (W3: of them in fast memory)
         for (u32 d = 0; d <= p.contact_range; ++d) {
             if (ip + d < p.size) {
                 ++seen;
+                seen_f += fast(ip + d) ? 1 : 0;
                 if (s.owner_[ip + d] == kNone) {
-                    t_ps += seen * costs().scan;
+                    charge2(costs().scan, seen_f, seen - seen_f);
                     return ip + d;
                 }
             }
             if (d > 0 && ip >= d) {
                 ++seen;
+                seen_f += fast(ip - d) ? 1 : 0;
                 if (s.owner_[ip - d] == kNone) {
-                    t_ps += seen * costs().scan;
+                    charge2(costs().scan, seen_f, seen - seen_f);
                     return ip - d;
                 }
             }
         }
-        t_ps += seen * costs().scan;
+        charge2(costs().scan, seen_f, seen - seen_f);
         return kNone;
     }
 
@@ -1081,6 +1226,7 @@ struct Exec {
         const u32 k = s.new_block(lo, len, c.body);
         s.bodies_[c.body].latest = k;
         ++s.tally_.bites_waste;
+        moved_fast = tiered ? fast_in(lo, len) : 0; // W3
         return len;
     }
 
@@ -1127,6 +1273,7 @@ struct Exec {
                 piece = carve_block(k, a, !from_low);
             }
             const u32 got = s.blocks_[piece].owned;
+            moved_fast += tiered ? block_fast_owned(piece) : 0; // W3
             s.stamp_block(piece, g);
             give_block(piece, eater);
             left -= got;
@@ -1172,6 +1319,7 @@ struct Exec {
     // swallowed whole, or a piece of a bigger one. Returns codons taken.
     u32 bite_land(u32 target, u32 waste, u32 want, u32 ip) {
         u32 got = 0;
+        moved_fast = 0; // W3: set or summed by what lands
         if (target == kNone) {
             got = bite_waste(waste, want);
         } else if (s.bodies_[target].mem <= want) {
@@ -1214,7 +1362,7 @@ struct Exec {
             if (got == 0)
                 return cost;
             cost += static_cast<u32>(p.contact_per_codon * got);
-            t_ps += static_cast<u64>(got) * costs().move;
+            charge2(costs().move, moved_fast, got - moved_fast); // (W3: at their tiers)
             *ok = true;
             return cost;
         }
@@ -1239,7 +1387,7 @@ struct Exec {
         else
             moved = inject_into(target);
         cost += static_cast<u32>(p.contact_per_codon * moved);
-        t_ps += static_cast<u64>(moved) * costs().move;
+        charge2(costs().move, moved_fast, moved - moved_fast); // (W3: at their tiers)
         *ok = true;
         return cost;
     }
@@ -1342,7 +1490,7 @@ struct Exec {
             const u32 got = d <= p.contact_range ? bite_land(kNone, a.at, a.bite, ip) : 0;
             if (got == 0)
                 return 1; // claimed by another meanwhile (run_cpu counts it failed)
-            t_ps += static_cast<u64>(got) * costs().move;
+            charge2(costs().move, moved_fast, got - moved_fast); // (W3: at their tiers)
             *ok = true;
             return 1;
         }
@@ -1386,7 +1534,7 @@ struct Exec {
             engulf_body(t);
         else
             moved = inject_into(t);
-        t_ps += static_cast<u64>(moved) * costs().move;
+        charge2(costs().move, moved_fast, moved - moved_fast); // (W3: at their tiers)
         *ok = true;
         return 1;
     }
@@ -1399,13 +1547,25 @@ struct Exec {
     // its own tier's price (a range outside my disk, which will fail, at the
     // fast disk's, as before tiers).
     u64 disk_time() const {
-        const u64 t = costs().call;
+        u64 t = costs().call;
         if (!s.disk_on() || c.bx >= 3 || static_cast<i32>(c.cx) <= 0)
             return t;
         const u64 n = c.cx;
         const bool store = p.sel.disk[c.bx] == 1;
         const u64 access = store ? costs().disk_write : costs().disk_read;
         const u64 per = store ? costs().disk_write_codon : costs().disk_read_codon;
+        // Memory tiers (W3): its memory side, a bulk move per codon at each
+        // codon's tier (the read head for compare and store, the write head
+        // for load, advancing as COPY's), where the range lies in my disk.
+        // Without tiers it costs nothing, as before.
+        if (tiered && n <= s.disk_held(c.body)) {
+            u32 a = p.sel.disk[c.bx] == 2 ? c.wh : c.rh, nf = 0;
+            for (u64 i = 0; i < n; ++i, a = next_addr(a))
+                nf += fast(a) ? 1u : 0u;
+            const double side = static_cast<double>(nf * costs().move) * tf[0] +
+                                static_cast<double>((n - nf) * costs().move) * tf[1];
+            t += static_cast<u64>(side + 0.5);
+        }
         if (!s.disk_.tiered() && p.disk_speed == 1.0) // (exactly as before)
             return t + access + n * per;
         u32 na = 0;
@@ -2066,11 +2226,13 @@ struct Exec {
         // written over it).
         const Op op = resolving ? static_cast<Op>(resolving->op) : p.table.op[s.mem_[ip]];
         t_ps = 0;
+        t_mem = 0;                                         // memory tiers (W3)
+        const u64 own = p.cost.timed ? own_part(op) : 0;   // (W3: with its heads as they are before it runs)
         bool ok = exec_op(op, ip, &next, &cost);
         if (deferred) // Phase 9: it started an action; the CPU waits here, at it, until its end
             return 0;
         if (p.cost.timed) { // Phase 9: world time (the GPU verb adds its devices' own, 9b)
-            const u64 t = costs().op[static_cast<u32>(op)] + t_ps;
+            const u64 t = own + extra_ps();
             cost = t > 0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<u32>(t);
         }
 
@@ -2557,6 +2719,7 @@ i64 Soup::run_cpu(u32 ci, i64 quota, u8 kind) {
     Exec e{*this, *p_, cpus_[ci], bodies_[cpus_[ci].body].err, ci};
     if (kind == kKindE) // Phase 9c: on an E-core, at its costs
         e.ct = &p_->ecost;
+    e.tiers_setup(); // memory tiers (W3): this core's prices per tier
     i64 used = 0;
     const u64 ran_before = e.c.executed; // Phase 10: a body that runs isn't frozen
     // Phase 9: an action under way. Before its end the CPU waits out the tick
@@ -2789,6 +2952,7 @@ bool Soup::host_step(u32 w, const Action* resolving) {
     Exec e{*this, *p_, t, gerr, kNone, true};
     e.wslot = w;
     e.resolving = resolving;
+    e.tiers_setup(); // memory tiers (W3): the host's (a P-core's) prices per tier
     u32 next = e.next_ip(minip);
     u32 cost = 1;
     const Op op = resolving ? static_cast<Op>(resolving->op) : p_->table.op[mem_[minip]];
@@ -2842,7 +3006,7 @@ bool Soup::host_step(u32 w, const Action* resolving) {
             if (resolving) {
                 wuntil_[w] = tick_; // an action's end: its time was the wait
             } else {
-                const u64 ps = p_->cost.gpu_start + p_->cost.op[static_cast<u32>(op)] + e.t_ps;
+                const u64 ps = p_->cost.gpu_start + p_->cost.op[static_cast<u32>(op)] + e.extra_ps(); // (W3: t_mem too)
                 const double ticks = static_cast<double>(ps) / p_->tick_units;
                 u64 whole = static_cast<u64>(ticks);
                 if (static_cast<double>(whole) < ticks)

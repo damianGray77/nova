@@ -43,7 +43,16 @@
 #define WO_HALTS 3u
 #define WO_WRITES 4u
 #define WB_SORT 45u       // where the blocks' sorted index starts (0: none, look them up in order)
-#define WB_WARPS 46u      // per warp, WW_SIZE words
+// Memory tiers (docs/world-plan.md W3), the record's node's: codons [0, WB_FAST)
+// are fast memory (0: one tier, every step as before); then a lane's price
+// of each in the fast tier and the slow one, already divided by the node's
+// speeds: a load (COPY, READ, MOVII), a store (COPY, WRITE, MOVII), and a
+// place or template codon searched.
+#define WB_FAST 46u
+#define WB_TLOAD 47u      // 2 words: fast, slow
+#define WB_TSTORE 49u     // 2 words
+#define WB_TSCAN 51u      // 2 words
+#define WB_WARPS 53u      // per warp, WW_SIZE words
 #define WW_LANE0 0u       // its first lane in LANES
 #define WW_QUOTA 1u       // work it may do
 #define WW_INDEX 2u       // its place in the body's list (its key)

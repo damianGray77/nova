@@ -49,6 +49,8 @@ const char* const kColumns[kStatsColumns] = {
     "burnout_dormant", "burnout_graced", "burnout_deaths", "disk_failures", "disk_lost", "storms_formed", "strikes",
     "strike_codons", "episodes", "false_alarms", "spurious_faults", "static_flips", "sounds", "sound_amp",
     "cores_offline", "rebooting", "storms", "episodes_active",
+    // memory tiers (docs/world-plan.md W3): a gauge, then two sums
+    "fast_held", "fast_allocs", "fast_alloc_fails",
     // the two floating-point columns, last as always
     "compress",     "ambient"};
 // The first 39 tally fields fill columns 3-41; Phase 8's five go after
@@ -56,9 +58,10 @@ const char* const kColumns[kStatsColumns] = {
 // and its gauge, then Phase 10's nine, then dormancy's five and its gauges,
 // then the disk tiers' gauge and two, then the detector's foundings by origin
 // (not tallies: the detector's own counts), then the disasters' 22 tallies
-// and their four gauges.
+// and their four gauges, then the memory tiers' gauge and two.
 inline constexpr u32 kTallyEarly = 39, kTallyWarp = 5, kTallyAction = 4, kTallyThread = 2, kTallyLife = 9,
-                     kTallyDormant = 5, kTallyArchive = 2, kFoundedColumns = 4, kTallyDisaster = kStatsDisasterSums;
+                     kTallyDormant = 5, kTallyArchive = 2, kFoundedColumns = 4, kTallyDisaster = kStatsDisasterSums,
+                     kTallyTier = kStatsTierColumns - 1;
 // The origins of those columns, in order (soup.h).
 const u8 kFoundedOrigin[kFoundedColumns] = {kOriginSpark, kOriginDaughter, kOriginArrival, kOriginWake};
 
@@ -70,7 +73,7 @@ u64 total_founded(const World& w, u8 origin) {
     return n;
 }
 static_assert(sizeof(SoupTally) / sizeof(u64) == kTallyEarly + kTallyWarp + kTallyAction + kTallyThread + kTallyLife +
-                                                     kTallyDormant + kTallyArchive + kTallyDisaster,
+                                                     kTallyDormant + kTallyArchive + kTallyDisaster + kTallyTier,
               "a SoupTally field was added: update kColumns");
 
 } // namespace
@@ -107,7 +110,7 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
     const u64 links = total_links(w, LinkKind::all), inject = total_links(w, LinkKind::inject),
               gpu = total_links(w, LinkKind::gpu);
     u64 gpu_held = 0, npu_held = 0, max_depth = 0, lineages = 0, top = 0, top_genos = 0, colonised = 0,
-        disk_held = 0, warps = 0, gpu_bodies = 0, e_held = 0, archive_held = 0;
+        disk_held = 0, warps = 0, gpu_bodies = 0, e_held = 0, archive_held = 0, fast_held = 0;
     double comp = 0, ambient = 0;
     for (u32 n = 0; n < w.node_count(); ++n) {
         const Soup& s = w.node_soup(n);
@@ -121,6 +124,7 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
         ambient += s.ambient();
         disk_held += s.params().disk - s.free_disk();
         archive_held += s.params().archive - s.free_archive(); // disk tiers (W4)
+        fast_held += s.fast_held();                            // memory tiers (W3)
         e_held += s.e_held(); // Phase 9c
         gpu_held += s.params().gpus - s.free_gpus();
         for (usize i = 0; i < s.offline().size(); ++i) // (disasters X4: burnt GPU units are no one's)
@@ -145,7 +149,8 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
                         disk_held,       w.live_nodes()};
     const usize nt = sizeof tail / sizeof tail[0];
     static_assert(3 + kTallyEarly + sizeof tail / sizeof tail[0] + kTallyWarp + 2 + kTallyAction + kTallyThread + 1 +
-                          kTallyLife + kTallyDormant + 2 + 1 + kTallyArchive + kFoundedColumns + kStatsDisasterColumns ==
+                          kTallyLife + kTallyDormant + 2 + 1 + kTallyArchive + kFoundedColumns + kStatsDisasterColumns +
+                          kStatsTierColumns ==
                       kStatsIntColumns,
                   "stats row shape");
     for (usize i = 0; i < nt; ++i)
@@ -191,6 +196,13 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
     v[xz + kTallyDisaster + 1] = w.rebooting_count();
     v[xz + kTallyDisaster + 2] = w.storm_count();
     v[xz + kTallyDisaster + 3] = w.episode_count();
+    // Memory tiers (W3): fast memory held now, then the fast ALLOCs' claims and failures.
+    const usize mz = xz + kStatsDisasterColumns;
+    static_assert(3 + 39 + 18 + 5 + 2 + 4 + 2 + 1 + 9 + 5 + 2 + 1 + 2 + 4 + 26 == kStatsTierFirst, "memory tiers' first column");
+    v[mz] = fast_held;
+    for (usize i = 0; i < kTallyTier; ++i)
+        v[mz + 1 + i] = t[kTallyEarly + kTallyWarp + kTallyAction + kTallyThread + kTallyLife + kTallyDormant +
+                          kTallyArchive + kTallyDisaster + i];
     marks->links = links;
     marks->inject = inject;
     marks->gpu = gpu;

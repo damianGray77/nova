@@ -228,6 +228,12 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     // below with the others; the world sets them per node: W1)
     p->volatility = key_f64(cfg, "mem.volatility");
     p->wipe_pages = key_u32(cfg, "mem.wipe_pages");
+    // Memory tiers (docs/world-plan.md W3): the first mem.fast_share of each
+    // node's soup is fast memory (the world sets each node's fast_end from its
+    // own size); 0 = one tier, everything as before.
+    p->mem_fast_share = key_f64(cfg, "mem.fast_share");
+    p->fast_volatility = key_f64(cfg, "mem.fast_volatility");
+    p->fast_end = mem_fast_end(soup_size, p->mem_fast_share);
     // Remnants and salvage (Phase 4, Damian): 0 = off, every read as before.
     p->salvage_ratio = key_f64(cfg, "salvage.ratio");
     // The signal channel (Phase 4): 0 channels = EMIT and LISTEN fail.
@@ -359,9 +365,11 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     m.res_n = static_cast<u8>(p->e_share > 0 ? 6 : (p->npus ? 5 : 4)); // Phase 9c: 5 is E millicores
     if (p->archive) // disk tiers (W4): 6 is the archive (without one, the maps and draws are as before)
         m.res_n = 7;
+    if (p->mem_fast_share > 0) // memory tiers (W3): 7 is fast memory (without tiers, as before)
+        m.res_n = 8;
     identity_map(m.sense, kSenseReadingsMax);
     identity_map(m.disk, 3);
-    identity_map(m.res, 7);
+    identity_map(m.res, 8);
     identity_map(m.head, 2);
     identity_map(m.divide, 4);
     identity_map(m.gpu, kGpuOps);
@@ -462,6 +470,19 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
         }
     }
     return cfg.ok();
+}
+
+// Memory tiers (docs/world-plan.md W3): whole pages, so a page is all of one
+// tier (volatility and heat are per page).
+u32 mem_fast_end(u32 size, double share) {
+    if (!(share > 0) || size < kPage)
+        return 0;
+    if (share >= 1)
+        return size;
+    u64 pages = static_cast<u64>(static_cast<double>(size) * share) >> kPageBits;
+    if (pages == 0)
+        pages = 1;
+    return static_cast<u32>(pages << kPageBits);
 }
 
 // ---------------------------------------------------------------------------
@@ -1406,6 +1427,18 @@ double Soup::occupancy() const {
             if (dorm_[order_[k]].on)
                 held -= bodies_[order_[k]].mem;
     return p_->size ? static_cast<double>(held) / p_->size : 0.0;
+}
+
+// Memory tiers (docs/world-plan.md W3): fast codons owned by anyone, from the
+// bitmap (fast_end is whole pages, so whole words but at share 1).
+u32 Soup::fast_held() const {
+    const u32 fe = min_of(p_->fast_end, p_->size);
+    u32 n = 0;
+    for (u32 i = 0; i < (fe >> 6); ++i)
+        n += static_cast<u32>(__popcnt64(used_[i]));
+    for (u32 a = fe & ~63u; a < fe; ++a)
+        n += owner_[a] != kNone ? 1u : 0u;
+    return n;
 }
 
 double Soup::spark_rate_now() const {
@@ -2577,14 +2610,23 @@ void Soup::sweep_actions() {
 void Soup::volatility() {
     const u32 pages = static_cast<u32>(page_heat_.size());
     const double rate = p_->volatility * hazard_mult_;
+    // Memory tiers (docs/world-plan.md W3): a fast page is wiped
+    // mem.fast_volatility times as often. The process runs over the pages
+    // weighted by their chance: the first fp pages (fast) fv each, the rest
+    // 1. Without tiers fp is 0, and every draw and page is as before.
+    const u32 fp = min_of<u32>((p_->fast_end + kPage - 1) >> kPageBits, pages);
+    const double fv = p_->fast_volatility, fw = static_cast<double>(fp) * fv;
+    const double span = fw + static_cast<double>(pages - fp);
     double pos = -log(1.0 - rng_.unit()) / rate;
-    if (pos >= pages)
+    if (pos >= span)
         return;
     wiped_pg_.resize(pages);
     wiped_pg_.fill(0);
     wiped_bodies_.clear();
-    while (pos < pages) {
-        const u32 pg = static_cast<u32>(pos);
+    while (pos < span) {
+        u32 pg = pos < fw ? static_cast<u32>(pos / fv) : fp + static_cast<u32>(pos - fw);
+        if (pg >= pages) // (rounding at the very end)
+            pg = pages - 1;
         const u32 len = 1 + static_cast<u32>(rng_.below(p_->wipe_pages));
         const u32 start = pg << kPageBits;
         const u32 end = static_cast<u32>(min_of<u64>(static_cast<u64>(pg + len) << kPageBits, p_->size));
@@ -3865,6 +3907,9 @@ bool Soup::check(TextBuf* why) const {
         why->append_char(')');
         return false;
     };
+    // Memory tiers (W3): the boundary lies within the soup, on a page (but at share 1).
+    if (p_->fast_end > n || (p_->fast_end % kPage && p_->fast_end != n))
+        return fail("fast memory's end is off the soup or off a page", p_->fast_end);
     // Memory: waste count, bitmap, block ownership counts.
     u32 waste = 0;
     for (u32 a = 0; a < n; ++a) {

@@ -567,11 +567,13 @@ void outputs() {
                        "actions_failed,actions_defended,threads_started,e_work,e_held,vent_codons,decayed,bites_waste,bites_body,codons_bitten,threads_ended,died_halted,died_frozen,died_worn,dormant_started,dormant_woke,dormant_expired,dormant_eaten,dormant_hops,drifting,resting,"
                        "archive_held,archive_stores,archive_loads,"
                        "founded_spark,founded_daughter,founded_arrival,founded_wake,"
-                       // the disasters' (docs/disasters-plan.md X7), the last integer columns
+                       // the disasters' (docs/disasters-plan.md X7)
                        "surges,surge_nodes,surge_deaths,crashes,crash_deaths,crash_restarts,burnouts,cores_burnt,"
                        "burnout_dormant,burnout_graced,burnout_deaths,disk_failures,disk_lost,storms_formed,strikes,"
                        "strike_codons,episodes,false_alarms,spurious_faults,static_flips,sounds,sound_amp,"
-                       "cores_offline,rebooting,storms,episodes_active,compress,ambient\n") !=
+                       "cores_offline,rebooting,storms,episodes_active,"
+                       // the memory tiers' (docs/world-plan.md W3), the last integer columns
+                       "fast_held,fast_allocs,fast_alloc_fails,compress,ambient\n") !=
           nullptr);
     CHECK(read_file(nodes, &bytes));
     bytes.push(0);

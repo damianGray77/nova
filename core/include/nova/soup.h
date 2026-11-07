@@ -93,17 +93,19 @@ inline constexpr u32 kOriginCount = 5;
 struct SelectorMap {
     u8 sense[kSenseReadingsMax]; // SENSE: BX -> reading (6.5 list; 8-10 GPU, 11-13 NPU, 14 degree,
                                  // 15-16 disk, 17 node health, 18-19 async accelerator)
-    u8 res[7];    // ALLOC and RELEASE: BX -> resource (0 memory, 1 CPU, 2 GPU, 3 disk, 4 NPU,
-                  // 5 E millicores: Phase 9c; 1 is then P millicores; 6 archive: docs/world-plan.md W4)
+    u8 res[8];    // ALLOC and RELEASE: BX -> resource (0 memory, 1 CPU, 2 GPU, 3 disk, 4 NPU,
+                  // 5 E millicores: Phase 9c; 1 is then P millicores; 6 archive: docs/world-plan.md W4;
+                  // 7 fast memory: W3)
     u8 head[2];   // SETH and GETH: BX -> head (0 read, 1 write)
     u8 divide[4]; // DIVIDE: BX -> destination (0 here, k neighbour edge k)
     u8 gpu[kGpuOps]; // the accelerator verb, BX 0-15 -> GPU op (0 compare ... 15 mul)
     u8 npu[kNpuOps]; // BX 16-19 -> NPU op (0 dot, 1 matvec, 2 matmul, 3 argmax)
     u8 disk[3];   // DISK: BX -> op (0 compare, 1 store, 2 load) (Phase 4)
     u8 sense_n;   // readings SENSE has: up to the highest enabled one (8, 11, 14, 15, 17, 18, 20, 22, 24)
-    u8 res_n;     // resources ALLOC knows: 4, 5 with an NPU, 6 with E millicores, 7 with an archive
+    u8 res_n;     // resources ALLOC knows: 4, 5 with an NPU, 6 with E millicores, 7 with an archive,
+                  // 8 with memory tiers (W3)
     u8 shuffled;  // 0 nearest, 1 shuffled
-    u8 pad;
+    // (W3 took the pad byte for res[7]; nothing hashes or saves this struct)
 };
 
 struct SoupParams {
@@ -191,6 +193,19 @@ struct SoupParams {
     // volatility (Phase 4): wipes of whole pages into random codons
     double volatility;    // mem.volatility: chance per page per tick that a wipe starts there
     u32 wipe_pages;       // mem.wipe_pages: a wipe covers 1..this many pages
+    // --- memory tiers (docs/world-plan.md W3) ---------------------------------
+    // Codons [0, fast_end) of the soup are fast memory, the rest slow: one
+    // address space. With a timed cost table every load, store, template scan
+    // and bulk move costs its codon's tier's price (interp.cpp, Exec::tiers_setup;
+    // the warp kernel per record, warp_isa.inc), each tier's divided by its
+    // substrate speed (mem_fast_speed, mem_slow_speed below). ALLOC's
+    // resource 7 claims fast memory only; fast pages are wiped
+    // fast_volatility times as often. fast_end = 0: one tier, as before.
+    // The viewer may mark [0, fast_end) in the memory strip.
+    double mem_fast_share;   // mem.fast_share
+    double fast_volatility;  // mem.fast_volatility: a fast page's wipe chance over a slow one's
+    u32 fast_end;            // the node's first slow codon: mem_fast_end(size, mem_fast_share)
+    // --- end memory tiers -------------------------------------------------------
     // remnants and salvage (Phase 4, Damian): 0 = off
     double salvage_ratio; // salvage.ratio K: free salvage up to K x my genome length
     // the signal channel (Phase 4): 0 channels = EMIT and LISTEN fail
@@ -257,7 +272,7 @@ struct SoupParams {
     // The tiers' speeds divide their costs, so they are doubles: the floor
     // (0.1) as a float is 0.100000001, and a cost divided by it would come
     // out a hair under ten times and truncate one short (6 -> 59, not 60).
-    double mem_fast_speed, mem_slow_speed; // the memory tiers (W3, not built yet): their costs / these
+    double mem_fast_speed, mem_slow_speed; // the memory tiers (W3): each tier's memory costs / these
     double disk_speed, archive_speed;      // the disk tiers (W4): each tier's DISK access and per-codon costs / these
     // Disasters (docs/disasters-plan.md; disaster.cpp): disaster.enabled. The
     // node then keeps a list of offline cores (burnout, X4), hashed and saved.
@@ -275,6 +290,11 @@ static_assert(__is_trivially_copyable(SoupParams), "SoupParams must stay plain d
 // Reads every soup key from cfg (marking them used). On a bad value returns
 // false with the reason in cfg.value_error().
 bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p);
+// Memory tiers (docs/world-plan.md W3): the first slow codon of a soup of
+// `size` codons with mem.fast_share `share`: size x share, in whole 64-codon
+// pages (at least one, where the soup has a page and share > 0), all of it
+// at share 1; 0 at share 0 (no tiers).
+u32 mem_fast_end(u32 size, double share);
 // Turns a list of Op names into codons using table t (first codon per Op).
 bool genome_from_names(const CodonTable& t, Str names, Array<u8>* out, TextBuf* err);
 // "nearest", or "shuffled sense=... res=... head=... divide=..." (each map
@@ -610,6 +630,9 @@ struct SoupTally {
     u64 static_flips;     // memory bit flips from a storm's static
     u64 sounds;           // disaster sounds emitted, one per node and channel a tick (world)
     u64 sound_amp;        // their total |amplitude|, rounded (world)
+    // --- Memory tiers (docs/world-plan.md W3)
+    u64 fast_allocs;      // ALLOCs of fast memory (resource 7) that claimed a block
+    u64 fast_alloc_fails; // ... that found no room of that size there
 };
 
 class Lineages; // lineage.h: the replicator detector, a pure observer
@@ -920,6 +943,10 @@ class Soup {
     // reserve. Nobody dies directly. Returns the codons lost.
     u32 fail_disk_tier(bool archive);
     // --- end disk tiers -------------------------------------------------------
+    // Memory tiers (docs/world-plan.md W3): the first slow codon (0: one
+    // tier), and the fast codons held by bodies (living and resting).
+    u32 fast_end() const { return p_->fast_end; }
+    u32 fast_held() const;
     // Salvage (Phase 4): a body's genome length (its first block), and the
     // stamp on memory codon a (0 without the rule).
     u32 genome_len(u32 b) const {

@@ -47,6 +47,7 @@ void suite_keys();
 void suite_substrates(); // a varied world (docs/world-plan.md W1, W2, W5)
 void suite_tiers();      // disk tiers (docs/world-plan.md W4)
 void suite_disasters();  // docs/disasters-plan.md
+void suite_memtiers();   // memory tiers (docs/world-plan.md W3)
 void suite_analysis(); // learning from the runs (docs/analysis-plan.md)
 
 namespace {
@@ -99,6 +100,7 @@ const Suite kSuites[] = {
     {"substrates", suite_substrates},
     {"tiers", suite_tiers},
     {"disasters", suite_disasters},
+    {"memtiers", suite_memtiers},
     {"analysis", suite_analysis},
 };
 
@@ -144,7 +146,8 @@ const char* const kLegacyDefaults ="accel.mode = instant\n"
                                     "substrate.enabled = false\n"
                                     "spark.activity = 0\n"
                                     "world.archive = 0\n"
-                                    "disaster.enabled = false\n"; // docs/disasters-plan.md: suite disasters tests them
+                                    "disaster.enabled = false\n" // docs/disasters-plan.md: suite disasters tests them
+                                    "mem.fast_share = 0\n";      // memory tiers (W3): suite memtiers tests them
 
 int main(int argc, char** argv) {
     nova::Config::ParseError pe;

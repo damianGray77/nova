@@ -9,7 +9,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 - **Families:** a key with a `<placeholder>` stands for one setting per member listed.
 - **Needs:** the switch the setting depends on; it does nothing while that is off.
 
-348 settings, 83 of them from 14 families; 11 hidden (tests and demos).
+350 settings, 83 of them from 14 families; 11 hidden (tests and demos).
 
 ## Contents
 
@@ -198,6 +198,8 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `mem.upkeep` | number | 2 | 0 to 1000000000 | **Upkeep**. Instructions per owned codon per tick, at 64 codons: holding memory costs time (0 = free). |
 | `mem.upkeep_exp` | number | 1.3333333333333333 | 0.5 to 4 | **Upkeep exponent**. How upkeep grows with size: 1 linear, 4/3 square-cube. Needs `mem.upkeep`. |
 | `mem.decay` | number, log | 0.0015625 (computed) | -1 to 1 | **Decay**. The chance per waste codon per tick that it loses a set bit, fading toward INERT (default Ray's background rot rate with nova_v2, else 0; below 0 also means the default). |
+| `mem.fast_share` | number | 0.125 | 0 to 1 | **Fast memory share**. The share of each node's memory, from its start, that is fast memory (whole pages; the rest is slow, one address space): with a timed cost table every load, store, search and bulk move costs its tier's measured price, and ALLOC's resource 7 claims fast memory only (0 = one tier, as before). |
+| `mem.fast_volatility` | number | 4 | 0 to 1000000 | **Fast memory volatility**. A fast memory page's chance of a wipe, as a multiple of a slow page's (mem.volatility). Needs `mem.fast_share`. |
 
 ## Disk
 

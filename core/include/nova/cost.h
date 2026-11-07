@@ -43,6 +43,10 @@ struct CostTable {
     u32 share; // a cache line passed between cores: the signal channel
     u32 disk_read, disk_write;             // a random disk access
     u32 disk_read_codon, disk_write_codon; // a codon read or written in sequence
+    // Memory tiers (docs/world-plan.md W3): a load from 1 MB, one cache level
+    // out from `load` -- the slow tier's load; its other operations are scaled
+    // by load_far / load (interp.cpp, Exec::tiers_setup).
+    u32 load_far;
     // Each instruction's own part (the rest is added as it runs); classic: 1.
     u32 op[kOpCount];
     // Phase 9b, the devices, picoseconds:
@@ -57,7 +61,7 @@ struct CostTable {
     // that can't run the code); classic: 0.
     u32 gpu_op[kOpCount + 1];
 };
-inline constexpr u32 kCostCpuOps = 15; // alu .. disk_write_codon
+inline constexpr u32 kCostCpuOps = 16; // alu .. disk_write_codon, load_far (W3)
 inline constexpr u32 kCostDevOps = 13; // gpu_alu .. gpu_scan
 
 // Built-in tables by name ("classic", "home_v1"); false for an unknown name.

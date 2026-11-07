@@ -198,8 +198,8 @@ const char* const kOldDiskLog = "nova-replay 2\n"
 const char* const kDiskWorld = "seed = 11\nworld.model = soup\nworld.graph = procedural\nworld.nodes = 12\n"
                                "world.soup_size = 2048\nworld.millicores = 600\nworld.disk = 512\nspark.initial = 20\n"
                                "spark.rate = 0.5\naccel.gpu = cpu\naccel.npu = cpu\nwarp.device = cpu\n";
-const char* const kNewFeaturesOff =
-    "spark.activity = 0\nsubstrate.enabled = false\nworld.archive = 0\ndisaster.enabled = false\n";
+const char* const kNewFeaturesOff = "spark.activity = 0\nsubstrate.enabled = false\nworld.archive = 0\n"
+                                    "disaster.enabled = false\nmem.fast_share = 0\n"; // (memory tiers: W3)
 
 // The logged config a parsed log gives to replay, as a Config.
 bool replayed_config(Str text, Config* out) {

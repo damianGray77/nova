@@ -172,6 +172,8 @@ void test_chart_log() {
     CHECK(fw == 96 && stats_column_index("founded_spark") == 93 && stats_column_index("resting") == 89);
     CHECK(stats_column_index("archive_held") == 90 && !stats_column_is_sum(90) && stats_column_is_sum(91) &&
           stats_column_is_sum(92) && stats_column_is_sum(93)); // (the disk tiers' gauge and sums, then W7's)
+    CHECK(stats_column_index("fast_held") == 123 && !stats_column_is_sum(123) && stats_column_is_sum(124) &&
+          stats_column_is_sum(125) && !stats_column_is_sum(122)); // (memory tiers, W3: a gauge and two sums)
     r.v[fw] = 8;
     r.compress = 0.5;
     double out[kStatsColumns];
@@ -205,11 +207,13 @@ void test_stats_header() {
                          "threads_started,e_work,e_held,vent_codons,decayed,bites_waste,bites_body,codons_bitten,threads_ended,died_halted,died_frozen,died_worn,dormant_started,dormant_woke,dormant_expired,dormant_eaten,dormant_hops,drifting,resting,"
                          "archive_held,archive_stores,archive_loads,"
                          "founded_spark,founded_daughter,founded_arrival,founded_wake,"
-                         // the disasters' (docs/disasters-plan.md X7), the last integer columns
+                         // the disasters' (docs/disasters-plan.md X7)
                          "surges,surge_nodes,surge_deaths,crashes,crash_deaths,crash_restarts,burnouts,cores_burnt,"
                          "burnout_dormant,burnout_graced,burnout_deaths,disk_failures,disk_lost,storms_formed,strikes,"
                          "strike_codons,episodes,false_alarms,spurious_faults,static_flips,sounds,sound_amp,"
-                         "cores_offline,rebooting,storms,episodes_active,compress,ambient\n";
+                         "cores_offline,rebooting,storms,episodes_active,"
+                         // the memory tiers' (docs/world-plan.md W3), the last integer columns
+                         "fast_held,fast_allocs,fast_alloc_fails,compress,ambient\n";
     CHECK(bytes.size() > strlen(header) && memcmp(bytes.data(), header, strlen(header)) == 0);
     remove(path);
 }

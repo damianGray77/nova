@@ -41,6 +41,7 @@ add_executable(nova_tests
     test_substrates.cpp
     test_tiers.cpp
     test_disasters.cpp
+    test_memtiers.cpp # memory tiers (docs/world-plan.md W3)
     # Learning from the runs (docs/analysis-plan.md).
     test_analysis.cpp
 )
@@ -60,6 +61,7 @@ endif()
 set(NOVA_SUITES containers str rng config pool world gate snapshot stats replay genebank
     isa interp tierra soup heat contact rules tables detect gpu npu dispersal leak edges disk salvage signals lifecycle async devices
     view viewer landscape budget warp costs ecology keys substrates tiers disasters
+    memtiers # memory tiers (docs/world-plan.md W3)
     analysis) # learning from the runs (docs/analysis-plan.md)
 foreach(suite IN LISTS NOVA_SUITES)
     add_test(NAME ${suite} COMMAND nova_tests ${suite})

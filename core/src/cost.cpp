@@ -93,7 +93,14 @@ const u32 kHomeV1[] = {
     12300000, // disk_write (a random 4 KB write, 12.3 us)
     241,      // disk_read_codon  (4.1 GB/s in sequence)
     200,      // disk_write_codon (5.0 GB/s)
+    3600,     // load_far (memory tiers, docs/world-plan.md W3): a load from 1 MB, 3.6 ns, as the
+              // same runs measured it (design.md 6.15: 1.0 ns at 64 KB, 3.6 ns at 1 MB, ...)
 };
+
+// Memory tiers (W3): the E-core's load from 1 MB wasn't recorded, so it is
+// its own nearest-cache load scaled as the P-core's is (872 x 3600 / 755 =
+// 4157.9): scaled, not measured.
+const u32 kHomeV1ELoadFar = 4158;
 
 const u64 kHomeV1Dev[] = {
     // Phase 9b: the RTX 5080 (a lane on its own clock, medians of 5) and the
@@ -177,6 +184,7 @@ bool builtin_costs_e(Str name, CostTable* out) {
         static_assert(sizeof kHomeV1E / sizeof kHomeV1E[0] == 10, "home_v1's E-core: alu .. call");
         for (u32 i = 0; i < 10; ++i)
             f[i] = kHomeV1E[i];
+        out->load_far = kHomeV1ELoadFar; // memory tiers (W3)
         recipes(out);
     }
     return true;
@@ -193,14 +201,16 @@ void describe_costs(const CostTable& t, TextBuf& out) {
     out.append(": world time from the machine's own operations\n\nthe operations:\n");
     const char* const names[] = {"alu (an add)", "mul",        "div",       "load",           "store",
                                  "jump",         "scan",       "move",      "draw",           "call",
-                                 "share",        "disk_read",  "disk_write", "disk_read_codon", "disk_write_codon"};
+                                 "share",        "disk_read",  "disk_write", "disk_read_codon", "disk_write_codon",
+                                 "load_far (1 MB)"};
+    static_assert(sizeof names / sizeof names[0] == kCostCpuOps, "a name for each CPU operation");
     CostTable e;
     if (!builtin_costs_e(Str(t.name), &e))
         e = t;
     const u32* f = &t.alu;
     const u32* fe = &e.alu;
-    for (u32 i = 0; i < kCostCpuOps; ++i)
-        put(out, names[i], f[i], t.alu, i < 10 ? fe[i] : 0);
+    for (u32 i = 0; i < kCostCpuOps; ++i) // (alu .. call and load_far have an E-core's own)
+        put(out, names[i], f[i], t.alu, i < 10 || i == kCostCpuOps - 1 ? fe[i] : 0);
     const char* const dnames[] = {"gpu_alu",   "gpu_mul",   "gpu_div",   "gpu_l1",    "gpu_mem",
                                   "gpu_vram",  "gpu_thr",   "gpu_start", "gpu_share", "npu_start",
                                   "npu_share", "npu_mac",   "gpu_scan"};
