@@ -894,7 +894,7 @@ void test_strike_marker() {
 }
 
 // W3: the fast region in the memory strip, drawn from the frame's accessor
-// (0 until the memory tiers are merged: view_fast_end).
+// (view_fast_end returns the actual per-node boundary).
 void test_fast_region() {
     Viewer* v = new Viewer;
     Canvas* c = new Canvas;
@@ -921,10 +921,24 @@ void test_fast_region() {
         if (pass)
             CHECK(png_ok(*c, "nova_test_viewer_fast.png"));
     }
-    // The live accessor says "no fast region" until the tiers are wired.
+    // The live accessor reports no region with tiers off, and the real boundary with them on.
     Run run;
     CHECK(make_run(run, kSoupWorldProc, 1));
     CHECK(view_fast_end(run.world().node_soup(0)) == 0);
+    TextBuf cfg;
+    cfg.append(kSoupWorldProc);
+    cfg.append("mem.fast_share = 0.125\n");
+    Run tiered;
+    CHECK(make_run(tiered, cfg.c_str(), 1));
+    const Soup& soup = tiered.world().node_soup(0);
+    CHECK(view_fast_end(soup) == soup.fast_end() && soup.fast_end() > 0);
+    ViewFrame live;
+    ViewRequest request;
+    request.node = 0;
+    ViewSession session;
+    session.attach(&tiered, 10);
+    session.build(request, &live);
+    CHECK(live.fast_end == soup.fast_end());
     delete c;
     delete v;
 }

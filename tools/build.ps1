@@ -8,9 +8,10 @@
 
       tools\build.ps1
 #>
+param([string]$BuildDirectory = 'build-release')
 $ErrorActionPreference = 'Stop'
 $repo  = Split-Path -Parent $PSScriptRoot
-$build = Join-Path $repo 'build-release'
+$build = Join-Path $repo $BuildDirectory
 
 function Fail($msg, $code) {
     Write-Host "build: FAIL - $msg" -ForegroundColor Red

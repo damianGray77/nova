@@ -388,8 +388,8 @@ void ViewFrame::clear_new() {
 // the foundings by origin (W7, 93-96), then the disasters' 22 sums (97-118;
 // their four gauges, 119-122, aren't), then the memory tiers' fast ALLOCs'
 // claims and failures (W3, 124-125; fast_held, 123, is a gauge).
-// their four gauges, 119-122, aren't), then the live novelty meter's
-// novel_success (125; novelty and novel_share, 123 and 124, are the window's).
+// Profiles (126-135) are gauges. The live novelty meter's novel_success
+// (138) is a sum; novelty and novel_share (136-137) describe the window.
 bool stats_column_is_sum(u32 i) {
     return (i >= 3 && i < 42) || (i >= 49 && i <= 51) || (i >= 60 && i <= 64) || (i >= 67 && i <= 72) ||
            (i >= 74 && i <= 82) || (i >= 83 && i <= 87) || (i >= 91 && i <= 92) || (i >= 93 && i <= 96) ||
@@ -1206,14 +1206,8 @@ void ViewSession::build(const ViewRequest& q, ViewFrame* f) {
     }
 }
 
-// The memory tiers (docs/world-plan.md W3) are another build's (memtiers):
-// until they are merged there is no fast region. At the merge, give the soup's
-// boundary here -- codons [0, fast_end) are fast memory: SoupParams' boundary
-// field (e.g. s.params().fast_end), or mem.fast_share x the soup's size.
-u32 view_fast_end(const Soup& s) {
-    (void)s;
-    return 0;
-}
+// Memory tiers (W3): use each node's actual, page-aligned boundary.
+u32 view_fast_end(const Soup& s) { return s.fast_end(); }
 
 // --- the archive -----------------------------------------------------------
 

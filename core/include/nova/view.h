@@ -348,7 +348,7 @@ struct ViewRequest {
 
 // The memory tiers' boundary (docs/world-plan.md W3) for the inspector's
 // strip: codons [0, fast_end) of the node's soup are fast memory, 0 = no fast
-// region. The tiers are another build's; until they are merged there is none.
+// region. The accessor uses the node's page-aligned memory-tier boundary.
 u32 view_fast_end(const Soup& s);
 
 inline constexpr u32 kMaxKnobs = 8;

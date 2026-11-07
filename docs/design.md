@@ -1519,6 +1519,176 @@ Code: `Soup::go_dormant`, `rest_tick`, `depart_dormant`, `can_wake`, `wake`, `la
 
 Every other suite runs with dormancy off (the legacy defaults) and keeps its hashes.
 
+### 6.18 Settings registry and configuration page [built 2026-11-07]
+
+Every setting has one entry in `core/src/keys.inc`: name, kind, default,
+range, group, label, help and dependencies. The engine reads it through
+`key_*`; computed defaults are supplied at the call site. `nova keys --md`
+generates `docs/keys.md`. The completed build has 359 settings. Tests check
+the table, the generated document and the absence of raw config reads.
+
+`nova view` opens the setup page. It offers switches, number fields and
+sliders, choices and text, with search, changed-only filtering, reset,
+Load and Save as. Dependencies disable controls without losing their
+values. The check calls the engine's configuration-reading path and returns
+before building a world or opening devices. It reports problems by setting,
+effective values, land and resource summaries, and RAM and disk estimates.
+The page and the budget fit check share `world_footprint`, including archive
+space. Budget estimates still have the salvage issue in section 10.
+
+A run's settings are fixed from its start (Damian). Start writes every
+setting to `run.cfg` and starts in the window or headlessly. Live and archived
+runs expose read-only settings and Copy to a new run. Old replay logs still
+apply recorded knob changes; new runs reject them. No new SENSE was added.
+
+### 6.19 Lineage tracker by descent [built 2026-11-07]
+
+DIVIDE links use descent rather than equal-length likeness (Damian).
+At least `detect.similarity` of the daughter's own length must match codons
+written by her parent. Comparisons try the same offset, shifts up to
+`detect.shift` (8), then up to eight rotations keyed by four codons. Parent
+reads wrap, so partial and repeated copies can inherit the lineage. The
+existing minimum of four matching codons prevents one-codon false links;
+its approval remains open in section 10. INJECT's comparison is unchanged.
+
+Going dormant removes a live lineage member exactly once. Waking rejoins
+through arrival, preventing the former count leak. The origin observer
+records spark, daughter, arrival, wake or unknown, and exposes
+`founded_spark`, `founded_daughter`, `founded_arrival`, `founded_wake` and
+`lineages.csv`'s `founder_origin`. It does not change hashes; origins of
+bodies already alive at snapshot resume are unknown.
+
+In the recorded 20,000-tick comparison all 8,650 old-rule DIVIDE links were
+retained. Of the newly caught links, 80% were full-length offset copies,
+18% partial copies and 2% longer copies. Spark origins were 74.8% of the
+1,756 founders, wakes 14.0%, daughters 11.2%, arrivals 0.1%. These are early
+run measurements, not a claim about the mature population.
+
+### 6.20 Substrates, sparks by activity and multipliers [built 2026-11-07]
+
+Each node has eight substrate types: P cores, E cores, GPU, NPU, fast and
+slow memory, fast and slow disk (Damian). Each takes level 0, 0.5, 1, 1.5 or
+2, with exact rank shares 10/20/40/20/10%; zero uses `substrate.floor`, 0.1.
+Levels scale performance, not capacity, heat or error rates. Independent
+seeded landscape fields blend the levels. Recovery derives the site's
+substrate again; drifting land carries its substrate.
+
+The integrated defaults are `substrate.smooth = 1` and `substrate.scale =
+1.5`, following Damian's request for smooth transitions. On the measured
+1,000-node map, 542 substrates occur; path neighbours differ in 1.75 of
+eight types, 19% of the difference between random pairs. A 2x P substrate
+ran 2,000 test instructions against 1,000 at 1x and 100 at the floor.
+
+Sparks follow activity (Damian): the rate is the former rate times
+`(1 - occupancy)^spark.activity`, with power 2. Occupancy counts memory
+held by living bodies, excluding waste and dormant bodies. At rate 0.8,
+empty, half-full and 99%-full nodes get 0.8, 0.2 and 0.00008 sparks per tick.
+Initial sparks are unchanged. In the recorded 200-node, 600-tick comparison,
+sparks fell about 82% and mean occupancy fell from 0.74 to 0.57.
+
+W6 doubles `landscape.cfg` to 1,000 nodes averaging 32,768 memory codons,
+4,000 millicores, 8,192 disk, 2,048 archive, 800 GPU and 400 NPU units.
+The slower pace is accepted (Damian); the other presets keep their sizes.
+Short Release checks are in `docs/results/final-integration.md`.
+
+### 6.21 Disk and memory tiers [built 2026-11-07]
+
+The archival disk defaults to a quarter of the fast disk, with one hundredth
+its rot rate and ten times its access cost. ALLOC selector 6 claims archive;
+selector 3 claims fast disk. A body's extents retain claim order and tier.
+RELEASE, DIVIDE, ENGULF, death, dispersal and dormancy preserve tier identity;
+dormancy spends fast reserves first. A mixed DISK operation pays the slowest
+access plus each codon's own transfer cost, divided by substrate speeds.
+The measured eight-codon archive load took 97 ticks. A disk failure picks
+one tier in proportion to capacity; tests found 1,008 archive failures in
+4,000 draws with a 768:256 split, and the other tier remained intact.
+
+The first `mem.fast_share` (one eighth) of a soup is fast memory, rounded
+to whole pages. CPU memory prices use the measured nearest-cache 755 ps
+and 1 MB 3.6 ns loads; GPU lanes use 18.8 ns and 145.7 ns. Loads, stores,
+searches and bulk moves price each touched codon by its tier and substrate
+speed. Instruction fetch stays free. Fast-only ALLOC uses selector 7 and
+fails when there is no fitting fast block. Fast pages have
+`mem.fast_volatility` (4) times the slow wipe chance. No new SENSE (Damian).
+
+Zero archive and zero fast share preserve legacy selector maps and random
+draws. Snapshot v4 carries the simulation state; pre-v4 snapshots and
+pre-v3 replay logs receive explicit old defaults. The observer switches
+are disabled for old files. Stats add archive and fast holdings and activity
+before `compress` and `ambient`, which remain the final two columns.
+The memory strip uses each node's actual fast boundary.
+
+### 6.22 Natural disasters [built 2026-11-07]
+
+Five disasters run at the barrier in fixed order, from keyed streams:
+power surges collapse a connected region; OS crashes delete some programs
+and restart the rest through a reboot; burnouts remove selected cores until
+repair and send holders dormant where possible; disk failures erase one
+tier; moving storms cause lightning that randomises memory. Repairs occur
+before strikes. Pending episodes, reboot times, offline cores, storms and
+their stream counters are hashed and snapshotted.
+
+Symptoms change existing quantities rather than adding senses (Damian).
+Brownouts add heat and noise, instability causes instruction faults, fever
+heats the doomed cores, disk decay increases rot, and storms add static
+under and ahead of them. Strength rises quadratically over the lead time.
+False alarms (default 25%) rise and fade without striking. Sounds use the
+existing signal field with bands and patterns by kind; they propagate with
+the usual attenuation and latency. Quiet channels and false alarms remain
+possible. Disk warnings currently affect both tiers, with the tier drawn
+at failure; that design question is still open.
+
+There are 66 disaster settings, 22 stats sums and four gauges. Per-node
+output records symptom ticks, strikes and offline cores. The viewer marks
+strikes by kind. The earlier combined 48-node test saw one surge, six
+crashes, eight burnouts, eight disk failures and 23 strikes over 300 ticks;
+its 210 events matched across thread counts and shuffled dispatch. The
+completed combined test also enables memory tiers, profiles and novelty.
+
+### 6.23 Analysis [built 2026-11-07]
+
+Machine learning observes outside the world (Damian). The hand-written
+`core/src/learn` library provides linear algebra, PCA, k-means, n-grams,
+alignment, neighbour joining and Gaussian processes, with no STL or new
+dependency. `nova analyse` reads run files; output goes to its analysis
+folder or an explicit output directory.
+
+Novelty uses a smoothed four-codon model. A fresh genotype is scored before
+learning; repeated saves do not teach it twice. The default novel threshold
+is three bits per codon. Offline reports distinguish innovation, novel
+share and successful novelty by the lineage gate. The live observer feeds
+the same model from genebank saves; stats record `novelty`, `novel_share`
+and `novel_success`, and the viewer links new kinds of life to genomes.
+Live success means gated by observation time; offline analysis can see a
+lineage's later success. A snapshot resume starts fresh observer history.
+
+Behavior profiles follow four bodies per node for 50 ticks every 1,000,
+using an observer stream. They record executed-code bitmaps, op and action
+counts, holdings, lineage and origin, disk kinds and tiers, and heard
+LISTEN values followed by branches. The live census uses fixed action
+rules. `analyse roles` scales features, fits k-means with k selected by
+silhouette, and reports named clusters, census and working-code complexity.
+Names summarize actions rather than proving a role. `analyse groups`
+compares grouped arrivals, neighbouring kin and listening then branching
+against chance baselines. Planted effects and shuffled controls test them.
+
+`analyse tree` uses shifted and rotated alignment plus neighbour joining,
+reports parent-link agreement and likely orphan ancestors, and caps input
+at 2,000 genomes by default. The map of life hashes three-codon runs into
+1,024 counts and fits PCA on a reference window. Coordinates stay fixed
+while its time slider moves; live populations size the points. The viewer
+can render maps and animation frames headlessly. These measures do not
+establish causal communication or evolutionary progress.
+
+`nova search` starts with a Latin hypercube, then uses a Matérn Gaussian
+process and expected improvement to select settings. Trials run in fixed
+batches, with seeds and thread limits; completed trials are reusable. Scores
+cover lineage lifespan and depth, genotypes and evenness, successful
+novelty, persistence and speed. Speed affects selection only when weighted.
+Outputs include summary and Pareto CSVs, best configurations and fitted
+setting influence. Full-size, longer confirmation remains necessary before
+treating a short-world winner as an ecological improvement.
+
 ## 7. Technical direction [decided via 7.1]
 
 - C++ (or Rust) core; Python only for analysis. *Superseded by 7.1 A and B: C++20, no STL, no third-party, no Python.*
@@ -1707,6 +1877,16 @@ The original steps above predate today's decisions. Principles carried over: bui
 **Phase 10 — Vents, decay, bites and death** (Damian, 2026-11-06; plan in `docs/phase10-plan.md`, revision 1 approved). Material from vents instead of packaged organisms, dead matter decaying to an inert codon, ENGULF as a bite equally good on raw material and on programs, halted and frozen programs dead, and every feature of the world on by default.
 - *Built 2026-11-06* (6.16) in four steps: decay, INERT and the two deaths (10a); vents and slower sparks (10b); bites (10c); the defaults and seeing it (10d). With everything on, the first replicator came at tick 31, and GPU life makes a tick about six times dearer to simulate.
 
+**Varied world, disasters, configuration and analysis — built 2026-11-07.**
+Sections 6.18–6.23 complete the approved world, disasters, configuration and
+analysis build. New engine features are on by default; legacy test fallback
+values keep old pinned hashes. The combined gate checks 1, 4 and 20 threads,
+shuffled dispatch, observers off/on and snapshot resume. The memory suite
+also checks the hardware warp kernel against its CPU reference. Results and
+Release measurements are in `docs/results/final-integration.md`. The next
+experiment is a longer run on the larger landscape, followed by tuning;
+this build does not start it automatically.
+
 **Milestones (updated):**
 - first self-replicator from random code;
 - first GPU-using lineage;
@@ -1723,6 +1903,17 @@ The original steps above predate today's decisions. Principles carried over: bui
 **Timescales:** the abiogenesis wait is the big unknown until Phase 1a's benchmark. Set the Phase 1b compute budget from that measurement rather than in advance.
 
 ## 10. Open questions
+
+From the 2026-11-07 build, still for Damian: the budget estimate assumes
+`salvage.ratio = 0` although the default is 4 (a nominal 20 GB disk can use
+about 36 GB); whether disk-failure warnings should identify the tier at the
+episode's start; approval of the tracker's four-codon descent floor; and
+the NPU's cost and roughly 710-tick latency, parked for tuning. Old logs
+continue replaying their recorded knob changes. Sampling and novelty are
+observers, so their histories restart at snapshots even though the world
+continues exactly. The analysis roles and maps are measurements to interpret,
+not proof of increasing complexity or cooperation.
+
 Diversity/complexity/novelty metrics; spark settings and other starting parameter values (tuned in the abiogenesis test). *From Phase 4 (6.10):* the `signaller` milestone may need a stricter reading before it means communication; and starvation's settings (with the ebbing meter it collapses busy nodes every few thousand ticks at the suggested values) stay as they are until a solid 12-hour run, then get tuned with the rest (Damian, 2026-11-06). *From Phase 5 (6.11):* making the devices pay off: send the NPU only batches big enough to beat its 3.4 ms round trip (routing never changes a result), pack codons four to a word for the GPU, run the CPU reference's share in parallel across nodes, and choose `accel.latency` against the tick time. The Intel integrated GPU is not used yet. *From Phase 6 (6.12):* `detect.genebank_threshold = 2` saves about 10 genotypes a tick in `configs/world.cfg`, so `genebank.txt` would reach gigabytes in a 12-hour run; the threshold gets tuned with the rest before the long runs. *From Phase 7 (6.13):* a disk in files is written whole at start-up (about 26 s for 20 GB); starting it lazily (pages read as their seeded contents until first written) would make big disks start at once. `kRamPerCodon` (20) is a ceiling measured on 16,384-codon soups; a long run should confirm where full populations of big soups land. Landscape settings want tuning with the rest (`nova land` makes that quick). *From Phase 8 (6.14):* the GPU pays off only when warps do much more work a tick than today's (long lane-parallel loops in many bodies). Lanes now stay on the GPU and the GPU and the CPU share rounds (built 2026-11-06). The next profile-driven steps for that day, none of which can change a result:
 - bring back the lanes of warps waiting on a host instruction with the round's own readback, not in a second trip (3.8 ms a round);
 - move only the parts of body records that changed (50 MB each way a round at 1,000 nodes);

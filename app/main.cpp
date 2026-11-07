@@ -269,7 +269,7 @@ int usage() {
                     "  nova keys [--md <path>]            (every setting: kind, default, range, help;\n"
                     "                                      --md writes the reference, docs/keys.md)\n"
                     // Learning from the runs (docs/analysis-plan.md): analyse_cmd.cpp.
-                    "  nova analyse novelty | tree | scores <run directory> [options]\n"
+                    "  nova analyse novelty | roles | groups | tree | scores <run directory> [options]\n"
                     "                                     (reads a run's files; nova analyse alone for the options)\n"
                     "  nova search <search file> [--dry-run]  (the settings search: trials, scores, a model)\n"
                     "  (threads 0 = all hardware threads)\n");

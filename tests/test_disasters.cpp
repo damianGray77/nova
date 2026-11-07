@@ -1073,7 +1073,8 @@ const char* const kEverythingLand =
     "seed.genome = ZERO ROTB SENSE ALLOC NOP1 COPY DJNZ NOP0 ZERO INC ROTB SENSE DIVIDE\nseed.at = 600\n"
     "seed.millicores = 200\nhazard.copy = 0.005\nhazard.flaw = 0.001\nhazard.rot = 0.00005\n"
     // the varied world (off in the test runner's legacy defaults)
-    "substrate.enabled = true\nspark.activity = 2\n"
+    "substrate.enabled = true\nspark.activity = 2\nmem.fast_share = 0.125\n"
+    "profile.enabled = true\nprofile.every = 25\nprofile.ticks = 20\nnovelty.enabled = true\n"
     // the detector, linking by descent (X12)
     "detect.enabled = true\ndetect.shift = 8\n"
     // every disaster, frequent, with symptoms and sounds
@@ -1103,6 +1104,7 @@ void test_everything_merged() {
         const World& w = run.world();
         if (v == 0) {
             CHECK(w.substrates() && w.disasters() && w.lifecycle() && w.node_params(0).spark_activity == 2.0);
+            CHECK(w.node_soup(0).fast_end() > 0 && w.node_profiles(0) && run.novelty());
             Array<u64> keys;
             for (u32 n = 0; n < w.node_count(); ++n) {
                 u64 key = 0;
@@ -1168,6 +1170,17 @@ void test_everything_merged() {
     CHECK_EQ_U64(hashes[1], hashes[0]);
     CHECK_EQ_U64(hashes[2], hashes[0]);
     CHECK_EQ_U64(hashes[3], hashes[0]);
+    {
+        Run unobserved;
+        Config::ParseError pe;
+        TextBuf err;
+        CHECK(unobserved.config().parse(kEverythingLand, &pe));
+        unobserved.config().set("profile.enabled", "false");
+        unobserved.config().set("novelty.enabled", "false");
+        CHECK(unobserved.init(4, &err));
+        unobserved.run_until(ticks);
+        CHECK_EQ_U64(unobserved.world().hash(), hashes[0]);
+    }
     bool same_events = true;
     for (u32 v = 1; v < 4; ++v)
         same_events = same_events && ev_tick[v].size() == ev_tick[0].size() &&

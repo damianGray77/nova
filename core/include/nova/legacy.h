@@ -32,7 +32,9 @@ inline constexpr const char* kLegacyFormatDefaults = //
     "substrate.enabled = false\n"                    // substrates (W2)
     "world.archive = 0\n"                            // the archive, the disk tiers' second tier (W4)
     "disaster.enabled = false\n"                     // the disasters (docs/disasters-plan.md X1-X11)
-    "mem.fast_share = 0\n";                          // memory tiers (docs/world-plan.md W3)
+    "mem.fast_share = 0\n"                           // memory tiers (docs/world-plan.md W3)
+    "profile.enabled = false\n"                     // observers start disabled for old files
+    "novelty.enabled = false\n";
 
 // Sets each line of kLegacyFormatDefaults that cfg doesn't name, where the
 // world will read it, so no unused entry is added: every line is a soup
