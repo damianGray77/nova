@@ -289,19 +289,36 @@ uint w_skip(uint b, uint a, uint n) {
     return a;
 }
 
+// The stamp of codon word w, marked CW_STAMPED: found by halving in its
+// record's list (the packer lists every marked word, in word order).
+uint w_stamp_of(uint b, uint w) {
+    uint s = IMG(b + WB_STAMP);
+    uint lo = 0u;
+    uint hi = IMG(s);
+    uint mid = 0u;
+    while (hi - lo > 1u) {
+        mid = (lo + hi) >> 1u;
+        if (IMG(s + 1u + 2u * mid) <= w)
+            lo = mid;
+        else
+            hi = mid;
+    }
+    return IMG(s + 2u + 2u * lo);
+}
+
 // A codon taken through a head (word w), with the salvage rule: a codon
-// stamped with a genome length above the limit may come out garbled.
+// stamped with a genome length above the limit may come out garbled. (The
+// packer marks exactly those, CW_STAMPED: a stamp of 0, or at or below the
+// limit, comes through intact without a draw.)
 uint w_take(uint b, uint w, uint key, uint step, uint lane) {
-    uint v = IMG(w) & CW_CODON;
-    uint delta = IMG(b + WB_STAMP);
+    uint cw = IMG(w);
+    uint v = cw & CW_CODON;
     uint st = 0u;
     uint lim = 0u;
-    if (delta == 0u)
+    if ((cw & CW_STAMPED) == 0u)
         return v;
-    st = IMG(w + delta);
+    st = w_stamp_of(b, w);
     lim = IMG(b + WB_SALV_LIM);
-    if (st == 0u || st <= lim)
-        return v;
     if (w_mulhi(w_draw(key, step, lane, WD_SALV), st) < lim)
         return v; // through intact with chance lim / st
     ATOMIC_ADD(b + WB_OUT + WO_GARBLED, 1u);
@@ -1066,10 +1083,8 @@ bool w_exec(uint b, INOUT(LANE_T) L, uint lane, uint op, uint ip, uint key, uint
 void w_store(uint b, uint a, uint v) {
     uint e = w_range(b, a);
     uint w = w_word_at(e, a);
-    uint delta = IMG(b + WB_STAMP);
-    IMG(w) = (IMG(w) & ~CW_CODON) | (v & CW_CODON) | CW_WRITTEN;
-    if (delta != 0u)
-        IMG(w + delta) = 0u; // written: now the body's own code
+    // Written: now the body's own code, no longer stamped (CW_STAMPED cleared).
+    IMG(w) = (IMG(w) & ~(CW_CODON | CW_STAMPED)) | (v & CW_CODON) | CW_WRITTEN;
     ATOMIC_ADD(w_page(e, a) + WP_WRITE, 1u);
     ATOMIC_ADD(b + WB_OUT + WO_WRITES, 1u);
 }

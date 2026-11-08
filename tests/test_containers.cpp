@@ -109,6 +109,26 @@ void test_sort() {
     u64 big[4] = {~0ull, 0, ~0ull - 1, 1};
     sort_u64(big, 4);
     CHECK(big[0] == 0 && big[1] == 1 && big[2] == ~0ull - 1 && big[3] == ~0ull);
+
+    // Every path (insertion, heap, radix with its skipped bytes) gives the
+    // heapsort's order exactly: sizes around each switch, full-width keys,
+    // keys that share their high bytes (the radix skips those passes), and
+    // keys like the warp table's (a flag, a kind and an entry).
+    const usize sizes[] = {2, 31, 32, 33, 500, 1023, 1024, 1025, 70000};
+    for (usize s : sizes)
+        for (u32 shape = 0; shape < 3; ++shape) {
+            Array<u64> a, b;
+            for (usize i = 0; i < s; ++i) {
+                const u64 k = shape == 0 ? r.next()
+                              : shape == 1 ? (0x1234500000000000ull | r.below(1u << 20))
+                                           : ((r.below(2) << 59) | (r.below(5) << 56) | (r.below(1u << 24)));
+                a.push(k);
+                b.push(k);
+            }
+            sort_u64(a.data(), a.size());
+            sort_u64_heap(b.data(), b.size());
+            CHECK(memcmp(a.data(), b.data(), s * sizeof(u64)) == 0);
+        }
 }
 
 void test_hashmap() {

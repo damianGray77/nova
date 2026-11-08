@@ -1715,9 +1715,11 @@ struct WarpBatch {
     u32 njobs = 0;
     u64 img_words = 0, nrec = 0, sent = 0;
     double in_s = 0, t_exec = 0;
+    double prep_s = 0, post_s = 0; // (profiling) submit before the copy in, and after it
     Array<u32> table, at;
     Array<u64> img_at, send_at;
     Array<u64> keys;      // the table's order (submit)
+    Array<u8> kinds;      // ... each entry's kind, or 0xFF for a long one
     Array<u32> ents, runs; // the table's entries in job order; its dispatches (kind, first, count)
     Array<u64> rbase; // the lane heap's layout when this round was sent (its gathered lanes are found by it)
     // timestamps: before the upload, after it, after the kernel, after the download
@@ -2085,6 +2087,7 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
     WarpBatch& B = m->batch[batch];
     Queue& Q = *B.q;
     const u32 wl = m->lanes;
+    const double t_sub = clock_seconds();
     if (B.rb_map) { // the last round's results, read in place, are done with
         D3D12_RANGE none = {0, 0};
         B.rb->Unmap(0, &none);
@@ -2190,8 +2193,17 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
         for (u32 j = 0; j < njobs; ++j)
             for (u32 r = 0; r < jobs[j].nrec && jobs[j].rec_chain; ++r)
                 cmax = jobs[j].rec_chain[r] > cmax ? jobs[j].rec_chain[r] : cmax;
-    B.keys.clear(); // (long ? 0 : 1) << 59 | kind << 56 | (~chain if long) << 24 | entry
+    // The order is the keys' (long ? 0 : 1) << 59 | kind << 56 | (~chain if
+    // long) << 24 | entry, ascending. Most records aren't long, and their
+    // keys are already in entry order within their kind, so only the long
+    // ones are sorted; the short ones go by kind in entry order (a counting
+    // pass). The same order a sort of every key gives (2026-11-08: sorting
+    // all of a mature round's 160,000 took 2.5 ms on one thread, before both
+    // the GPU and the CPU threads could start).
+    B.keys.clear();
     B.ents.resize(nrec * 4);
+    B.kinds.resize(nrec);
+    u64 per_kind[9] = {}; // short records of each kind (kinds 0-7, ntier at most 7)
     for (u32 j = 0, e = 0; j < njobs; ++j)
         for (u32 r = 0; r < jobs[j].nrec; ++r, ++e) {
             const u32 size = warp_job_rec_words(jobs[j], r);
@@ -2200,14 +2212,29 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
                 ++kind;
             const u32 chain = jobs[j].rec_chain ? jobs[j].rec_chain[r] : 0;
             const bool lng = cmax && static_cast<u64>(chain) * 4 > cmax;
-            B.keys.push((lng ? 0ull : 1ull) << 59 | static_cast<u64>(kind) << 56 |
-                        (lng ? static_cast<u64>(0xFFFFFFFFu - chain) : 0ull) << 24 | e);
+            if (lng)
+                B.keys.push(static_cast<u64>(kind) << 56 | static_cast<u64>(0xFFFFFFFFu - chain) << 24 | e);
+            else
+                ++per_kind[kind];
+            B.kinds[e] = static_cast<u8>(lng ? 0xFF : kind);
             B.ents[4 * e + 0] = static_cast<u32>(B.img_at[j]);
             B.ents[4 * e + 1] = jobs[j].recs[r];
             B.ents[4 * e + 2] = static_cast<u32>(m->rbase[jobs[j].node]);
             B.ents[4 * e + 3] = size;
         }
-    sort_u64(B.keys.data(), B.keys.size());
+    sort_u64(B.keys.data(), B.keys.size()); // (the long ones: by kind, longest chain first, then entry)
+    const usize nlong = B.keys.size();
+    u64 kind_at[9] = {}; // where each kind's short records start, after the long ones
+    for (u32 k = 0, at = static_cast<u32>(nlong); k < 9; ++k) {
+        kind_at[k] = at;
+        at += static_cast<u32>(per_kind[k]);
+    }
+    B.keys.resize(nrec);
+    for (u64 e = 0; e < nrec; ++e) {
+        const u8 k = B.kinds[e];
+        if (k != 0xFF)
+            B.keys[kind_at[k]++] = 1ull << 59 | static_cast<u64>(k) << 56 | e;
+    }
     B.table.resize(nrec * 4);
     B.runs.clear(); // (kind, first entry, count) a dispatch
     for (usize i = 0; i < B.keys.size(); ++i) {
@@ -2253,6 +2280,7 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
         return false;
     }
     const double t_in = clock_seconds();
+    B.prep_s = t_in - t_sub;
     unsigned char* up = nullptr;
     D3D12_RANGE none = {0, 0};
     if (FAILED(B.up->Map(0, &none, reinterpret_cast<void**>(&up)))) {
@@ -2347,6 +2375,7 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
     B.t_exec = clock_seconds();
     if (!Q.exec(err))
         return false;
+    B.post_s = clock_seconds() - t_in - B.in_s;
     B.busy = true;
     return true;
 }
@@ -2440,6 +2469,8 @@ bool WarpGpu::finish(TextBuf* err, ThreadPool* pool, u32 batch, bool copy_back) 
     stats_.bytes_up += B.img_words * 4 + lane_bytes;
     stats_.bytes_down += B.img_words * 4;
     stats_.ms_in += B.in_s * 1000.0;
+    stats_.ms_prep += B.prep_s * 1000.0;
+    stats_.ms_post += B.post_s * 1000.0;
     stats_.ms_gpu += gpu_s * 1000.0;
     stats_.ms_out += (clock_seconds() - t_out) * 1000.0;
     return true;

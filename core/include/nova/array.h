@@ -153,9 +153,65 @@ template <class T> class Array {
     usize cap_ = 0;
 };
 
-// In-place heapsort of u64 keys: O(n log n), no allocation, and -- because the
-// keys are plain integers -- the result is fully determined by the input.
+// Sorts u64 keys ascending. Because the keys are plain integers, the result is
+// fully determined by the input, whichever way it is sorted: insertion sort for
+// a few, heapsort (no allocation) up to a thousand or so, and above that an
+// LSD radix sort, a byte a pass, skipping bytes every key shares (2026-11-08:
+// a mature world's heapsorts of 10^5 keys a tick, on one thread, were
+// milliseconds each; a radix pass is a few hundred microseconds).
+inline void sort_u64_heap(u64* a, usize n);
 inline void sort_u64(u64* a, usize n) {
+    if (n < 2)
+        return;
+    if (n <= 32) {
+        for (usize i = 1; i < n; ++i) {
+            const u64 x = a[i];
+            usize p = i;
+            for (; p > 0 && a[p - 1] > x; --p)
+                a[p] = a[p - 1];
+            a[p] = x;
+        }
+        return;
+    }
+    u64* tmp = n >= 1024 ? static_cast<u64*>(malloc(n * sizeof(u64))) : nullptr;
+    if (!tmp) {
+        sort_u64_heap(a, n);
+        return;
+    }
+    usize count[8][256];
+    memset(count, 0, sizeof count);
+    for (usize i = 0; i < n; ++i) {
+        const u64 x = a[i];
+        for (u32 d = 0; d < 8; ++d)
+            ++count[d][(x >> (8 * d)) & 255];
+    }
+    u64* src = a;
+    u64* dst = tmp;
+    for (u32 d = 0; d < 8; ++d) {
+        usize* c = count[d];
+        if (c[(src[0] >> (8 * d)) & 255] == n)
+            continue; // every key has this byte: the pass would change nothing
+        usize sum = 0;
+        for (u32 b = 0; b < 256; ++b) {
+            const usize k = c[b];
+            c[b] = sum;
+            sum += k;
+        }
+        for (usize i = 0; i < n; ++i) {
+            const u64 x = src[i];
+            dst[c[(x >> (8 * d)) & 255]++] = x;
+        }
+        u64* t = src;
+        src = dst;
+        dst = t;
+    }
+    if (src != a)
+        memcpy(a, src, n * sizeof(u64));
+    free(tmp);
+}
+
+// The in-place heapsort: O(n log n), no allocation.
+inline void sort_u64_heap(u64* a, usize n) {
     if (n < 2)
         return;
     auto sift_down = [a](usize root, usize end) {

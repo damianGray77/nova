@@ -753,14 +753,24 @@ bool Soup::warp_pack(u32 round) {
         }
     }
     static_assert(WB_TSTORE == WB_TLOAD + 2 && WB_TSCAN == WB_TLOAD + 4, "the tier prices, in pairs");
-    Array<u32>& run = scratch_; // this body's warps to run, then their places in its list
-    Array<u32> places;
+    // Two passes (2026-11-08 profiling). The first finds the bodies to pack,
+    // in schedule order, with their warps to run; the second packs them in
+    // groups of kWalk, each group's block lists first walked side by side
+    // (and each block's first codons fetched), so the cache misses of walking
+    // them overlap: a mature world's bodies hold some 23 blocks each, one
+    // list up to thousands, and walking each list in turn was over a third
+    // of packing. The records, their order and every draw are as before.
+    wpk_.clear();
+    wpk_run_.clear();
+    wpk_place_.clear();
+    wpk_off_.clear();
     for (usize k = 0; k < n; ++k) {
         const u32 b = order_[(sched_start_ + k) % n];
         if (warp_count_[b] == 0 || !bodies_[b].alive) // (the small array first: most bodies have no warp)
             continue;
-        run.clear();
-        places.clear();
+        const usize first = wpk_run_.size();
+        Array<u32>& run = wpk_run_; // this body's warps to run (from `first`), and their places in its list
+        Array<u32>& places = wpk_place_;
         u32 place = 0;
         for (u32 w = warp_head_[b]; w != kNone; w = warps_[w].next, ++place) {
             // Round 0: any lane not halted (yields end as it starts); later
@@ -771,6 +781,7 @@ bool Soup::warp_pack(u32 round) {
                 places.push(place);
             }
         }
+        const usize nrun = run.size() - first;
         if (round == 0) {
             // The body's warp work this tick: what its GPU units have left
             // after its block ops, plus what carried over, less upkeep its
@@ -782,20 +793,53 @@ bool Soup::warp_pack(u32 round) {
                 units = 0;
             const double work = units * p_->warp_capacity + warp_carry_[b] - warp_upkeep_[b] * serial;
             warp_upkeep_[b] = 0.0;
-            if (run.empty()) {
+            if (nrun == 0) {
                 warp_carry_[b] = work < 0 ? static_cast<float>(work) : 0.0f;
                 continue;
             }
             const double whole = work > 0 ? floor(work < 4e9 ? work : 4e9) : 0.0;
             warp_carry_[b] = static_cast<float>(work - whole);
             const u64 total = static_cast<u64>(whole);
-            const u64 kk = run.size();
+            const u64 kk = nrun;
             const u64 q = total / kk, extra = total % kk, off = tick_ % kk;
-            for (usize i = 0; i < run.size(); ++i)
-                wleft_[run[i]] = static_cast<u32>(q + (((i + kk - off) % kk) < extra ? 1 : 0));
+            for (usize i = 0; i < nrun; ++i)
+                wleft_[run[first + i]] = static_cast<u32>(q + (((i + kk - off) % kk) < extra ? 1 : 0));
         }
-        if (run.empty())
+        if (nrun == 0)
             continue;
+        wpk_.push(b);
+        wpk_off_.push(static_cast<u32>(first));
+    }
+    wpk_off_.push(static_cast<u32>(wpk_run_.size()));
+    constexpr usize kWalk = 16;
+    const usize npk = wpk_.size();
+    for (usize pi = 0; pi < npk; ++pi) {
+        if (pi % kWalk == 0) { // the next group's lists, a step along each at a time
+            // (Its units, which SENSE's heat means walk, were tried too: no gain.)
+            const usize g1 = pi + kWalk < npk ? pi + kWalk : npk;
+            u32 cur[kWalk];
+            for (usize i = pi; i < g1; ++i)
+                cur[i - pi] = bodies_[wpk_[i]].blocks;
+            for (bool any = true; any;) {
+                any = false;
+                for (usize i = 0; i < g1 - pi; ++i) {
+                    const u32 kb = cur[i];
+                    if (kb == kNone)
+                        continue;
+                    const Block& bl = blocks_[kb];
+                    _mm_prefetch(reinterpret_cast<const char*>(mem_.data() + bl.start), _MM_HINT_T0);
+                    _mm_prefetch(reinterpret_cast<const char*>(owner_.data() + bl.start), _MM_HINT_T0);
+                    if (stamps)
+                        _mm_prefetch(reinterpret_cast<const char*>(stamp_.data() + bl.start), _MM_HINT_T0);
+                    cur[i] = bl.next;
+                    any = true;
+                }
+            }
+        }
+        const u32 b = wpk_[pi];
+        const u32* run = wpk_run_.data() + wpk_off_[pi]; // its warps to run, and their places
+        const u32* places = wpk_place_.data() + wpk_off_[pi];
+        const usize nrun = wpk_off_[pi + 1] - wpk_off_[pi];
 
         // The record.
         u32 nblk = 0, codons = 0, pages = 0, lo = 0xFFFFFFFFu, hi = 0;
@@ -948,12 +992,11 @@ bool Soup::warp_pack(u32 round) {
 #endif
         }
         const u32 rec = static_cast<u32>(wimg_.size());
-        const u32 nw = static_cast<u32>(run.size());
+        const u32 nw = static_cast<u32>(nrun);
         const u32 blk = rec + WB_WARPS + nw * WW_SIZE;
         const u32 code = blk + nblk * WK_SIZE;
         const u32 page = code + codons;
-        const u32 stamp = page + pages * WP_SIZE;
-        const u32 sort_at = stamp + (stamps ? codons : 0);
+        const u32 sort_at = page + pages * WP_SIZE;
         wimg_.resize_unfilled(static_cast<usize>(sort_at) + (sorted ? 1 + 2 * npairs : 0));
         u32* I = wimg_.data();
         // Only the header and the warp entries start as zeros: everything
@@ -972,11 +1015,15 @@ bool Soup::warp_pack(u32 round) {
         I[rec + WB_KEY] = static_cast<u32>(z ^ (z >> 32));
         I[rec + WB_COPY_THR] = prob_threshold(p_->copy_rate * hazard_mult_ * gerr);
         I[rec + WB_FLAW_THR] = prob_threshold(p_->flaw_rate * hazard_mult_ * gerr);
+        // Salvage: a codon stamped above the limit is marked CW_STAMPED and its
+        // stamp listed after the record (WB_STAMP; 0 while none is).
+        u32 salv_lim = 0xFFFFFFFFu;
         if (stamps) {
             const double lim = p_->salvage_ratio * genome_len(b);
-            I[rec + WB_SALV_LIM] = lim >= 4e9 ? 4000000000u : static_cast<u32>(lim);
-            I[rec + WB_STAMP] = stamp - code;
+            salv_lim = lim >= 4e9 ? 4000000000u : static_cast<u32>(lim);
+            I[rec + WB_SALV_LIM] = salv_lim;
         }
+        wstamps_.clear();
         I[rec + WB_NWARP] = nw;
         if (tier_fe) { // memory tiers (W3; 0, as zeroed above: one tier)
             I[rec + WB_FAST] = tier_fe;
@@ -1028,26 +1075,41 @@ bool Soup::warp_pack(u32 round) {
             const u8* mem = mem_.data() + bl.start;
             const u32* own = owner_.data() + bl.start;
             u32* word = I + cw;
-            u32 other = 0;
-            for (u32 i = 0; i < bl.len; ++i) {
-                word[i] = static_cast<u32>(mem[i]) | mine_here;
-                other |= own[i] ^ kb;
+            u32 other = 0, marked = 0;
+            if (stamps) {
+                const u32* st = stamp_.data() + bl.start;
+                for (u32 i = 0; i < bl.len; ++i) {
+                    const u32 mark = st[i] > salv_lim ? CW_STAMPED : 0u;
+                    word[i] = static_cast<u32>(mem[i]) | mine_here | mark;
+                    marked |= mark;
+                    other |= own[i] ^ kb;
+                }
+            } else {
+                for (u32 i = 0; i < bl.len; ++i) {
+                    word[i] = static_cast<u32>(mem[i]) | mine_here;
+                    other |= own[i] ^ kb;
+                }
             }
             for (u32 i = 0; other && i < bl.len; ++i) {
                 const u32 o = own[i];
                 if (o == kb)
                     continue;
+                const u32 mark = word[i] & CW_STAMPED;
                 if (o != kNone && blocks_[o].body == b) {
                     u32 place_of = 0; // another of the body's blocks: its place in the table
                     for (u32 t = B.blocks; t != o; t = blocks_[t].next)
                         ++place_of;
-                    word[i] = static_cast<u32>(mem[i]) | CW_MINE | (place_of << CW_OWNER_SHIFT);
+                    word[i] = static_cast<u32>(mem[i]) | CW_MINE | (place_of << CW_OWNER_SHIFT) | mark;
                 } else {
-                    word[i] = static_cast<u32>(mem[i]) | (0xFFFFu << CW_OWNER_SHIFT);
+                    word[i] = static_cast<u32>(mem[i]) | (0xFFFFu << CW_OWNER_SHIFT) | mark;
                 }
             }
-            if (stamps && bl.len)
-                memcpy(I + cw + (stamp - code), stamp_.data() + bl.start, static_cast<usize>(bl.len) * 4);
+            if (marked) // (in word order: the kernel halves the list)
+                for (u32 i = 0; i < bl.len; ++i)
+                    if (word[i] & CW_STAMPED) {
+                        wstamps_.push(cw + i);
+                        wstamps_.push(stamp_[bl.start + i]);
+                    }
             cw += bl.len;
             if (bl.len) {
                 const u32 first = bl.start >> kPageBits, last = (bl.start + bl.len - 1) >> kPageBits;
@@ -1062,6 +1124,12 @@ bool Soup::warp_pack(u32 round) {
                     I[pe + WP_WRITE] = 0;
                 }
             }
+        }
+        if (!wstamps_.empty()) { // the stamp list, after the rest of the record
+            const u32 at = static_cast<u32>(wimg_.size());
+            wimg_.push(static_cast<u32>(wstamps_.size() / 2));
+            wimg_.append(wstamps_.data(), wstamps_.size());
+            wimg_[rec + WB_STAMP] = at;
         }
         wrec_.push(rec);
         wbody_.push(b);

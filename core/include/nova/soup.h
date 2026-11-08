@@ -1342,6 +1342,10 @@ class Soup {
     Array<u8> wagain_;          // per warp slot: its host instruction was done, run it again this tick
     bool host_stalled_ = false; // host_step's last instruction was a DIVIDE waiting on gestation (transient)
     Array<u64> wkeys_;          // scratch: a body's blocks by start
+    Array<u32> wstamps_;        // scratch: a record's stamp list, (codon word, stamp) pairs
+    // scratch (warp_pack's two passes): the bodies to pack, their warps to run
+    // and those warps' places in their lists (from wpk_off_[i] to wpk_off_[i + 1])
+    Array<u32> wpk_, wpk_run_, wpk_place_, wpk_off_;
     Array<u32> wlens_;
     // scratch (warp_pack's block index): its (start, place) pairs, and for
     // overlapping blocks the sweep's ends, each block's end, its open blocks

@@ -54,11 +54,11 @@ bool load_dump(const char* path, Dump* d, TextBuf* err) {
         return false;
     }
     u32 head[5] = {};
-    // (version 3: the block index's pair count; earlier dumps' records are laid out otherwise)
-    bool ok = read_words(f, head, 5) && head[0] == 0x4452574Eu && head[1] == 3u && head[2] >= 1 && head[2] <= kMaxLanes;
+    // (version 4: salvage stamps as a list per record; earlier dumps' records are laid out otherwise)
+    bool ok = read_words(f, head, 5) && head[0] == 0x4452574Eu && head[1] == 4u && head[2] >= 1 && head[2] <= kMaxLanes;
     if (!ok) {
         fclose(f);
-        err->append("not a warp round dump (version 3: dump the round again)");
+        err->append("not a warp round dump (version 4: dump the round again)");
         return false;
     }
     d->lanes = head[2];

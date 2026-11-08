@@ -1310,9 +1310,10 @@ int cmd_resume(const Args& a) {
             printf("nova: lanes back a round: %.0f warps gathered with the round, %.0f fetched in %.2f fetches "
                    "(%.3f ms)\n",
                    ws.lanes_gathered / r, ws.lanes_fetched / r, ws.fetches / r, ws.ms_fetch / r);
-            printf("nova: a GPU round's host side, wall ms: %.3f into the upload buffer, %.3f submitted to back, %.3f "
-                   "out of readback; %.1f MB up and %.1f MB down\n",
-                   ws.ms_in / r, ws.ms_gpu / r, ws.ms_out / r, ws.bytes_up / r / 1048576.0, ws.bytes_down / r / 1048576.0);
+            printf("nova: a GPU round's host side, wall ms: %.3f the records' table, %.3f into the upload buffer, %.3f "
+                   "recording the commands, %.3f submitted to back, %.3f out of readback; %.1f MB up and %.1f MB down\n",
+                   ws.ms_prep / r, ws.ms_in / r, ws.ms_post / r, ws.ms_gpu / r, ws.ms_out / r,
+                   ws.bytes_up / r / 1048576.0, ws.bytes_down / r / 1048576.0);
         }
     }
     write_node_hashes(a, w);

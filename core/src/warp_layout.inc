@@ -34,7 +34,8 @@
 #define WB_COPY_THR 6u    // copy error: a draw below this
 #define WB_FLAW_THR 7u    // flaw: a draw below this
 #define WB_SALV_LIM 8u    // salvage: codons stamped above this may come out garbled
-#define WB_STAMP 9u       // stamp word = codon word + this (0: no stamps)
+#define WB_STAMP 9u       // the record's stamp list: its count, then (codon word, stamp) pairs in word
+                          // order, for the codons marked CW_STAMPED (0: none)
 #define WB_NWARP 10u      // warps to run
 #define WB_SENSE_OK 11u   // bit r: SENSE reading r is available
 #define WB_SENSE 12u      // 28 words: the readings, taken before the GPU phase
@@ -85,6 +86,9 @@
 #define WP_SIZE 4u
 // codon word
 #define CW_CODON 63u
+#define CW_STAMPED 64u    // salvage: stamped with a genome length above the record's limit (its stamp
+                          // is in the record's stamp list); a write clears it (2026-11-08: the list
+                          // replaced a stamp word beside every codon, some 40% of a mature round)
 #define CW_MINE 128u      // owned by this body
 #define CW_OWNER_SHIFT 8u // bits 8-23: the owning block's place in the block table
 #define CW_WRITTEN 0x1000000u // written by a lane this round

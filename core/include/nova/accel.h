@@ -177,6 +177,8 @@ struct WarpGpuStats {
     u64 fetches = 0;                       // ... how many round trips
     u64 lanes_gathered = 0;                // warps' lanes that came back with their round (no round trip)
     double ms_in = 0;   // copying the round into the upload buffer (CPU)
+    double ms_prep = 0; // submit before that: the records' table, sorted (CPU, one thread)
+    double ms_post = 0; // ... and after it: recording and sending the commands
     double ms_gpu = 0;  // the device: upload, kernel, download
     double ms_out = 0;  // copying the results out of the readback buffer (CPU)
     // the device's own clock (timestamps), when it has one
