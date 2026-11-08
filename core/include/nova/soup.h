@@ -165,6 +165,17 @@ struct SoupParams {
     double copy_rate; // per codon copied (COPY, movii, INJECT)
     double flaw_rate; // per instruction executed
     double rot_rate;  // per codon per tick
+    // rays (docs/lifehistory-plan.md R): cosmic rot, storm static and lightning
+    // as rays from outside allocated space, absorbed by what they pass
+    bool rays;               // hazard.rays (off: independent flips, as before)
+    double ray_cosmic;       // hazard.ray_cosmic: a cosmic ray's energy
+    double ray_static;       // disaster.static_energy: a static ray's
+    double ray_strike;       // disaster.strike_energy: a strike's, per codon of its drawn size
+    double ray_flip;         // hazard.ray_flip: chance per codon passed of a bit flip
+    double ray_flip_nop;     // hazard.ray_flip_nop: ... per NOP passed
+    double ray_absorb;       // hazard.ray_absorb: energy lost per living codon passed
+    double ray_absorb_waste; // hazard.ray_absorb_waste: ... per codon of dead matter
+    double ray_absorb_nop;   // hazard.ray_absorb_nop: ... per NOP
     // contact (ENGULF / INJECT, 6.4 #6-7)
     u32 contact_range;      // max distance from the attacker's IP to a surface
     u32 contact_base;       // instructions charged per attempt, success or not
@@ -873,8 +884,35 @@ class Soup {
     // Returns the codons that were held there; *archive: which tier.
     u32 fail_disk(Rng& r, bool* archive);
     // X6: lightning: `len` codons from `at` (clipped at the end) become
-    // random; ownership stays. Returns the codons struck.
+    // random; ownership stays. Returns the codons struck. With hazard.rays it
+    // is a ray (below) heading up or down at random (drawn from r), with
+    // len x disaster.strike_energy x hazard.ray_absorb of energy, that
+    // randomises every codon it passes.
     u32 strike(u32 at, u32 len, Rng& r);
+    // --- Rays (docs/lifehistory-plan.md R) ---------------------------------
+    // One ray drawn at `at`, heading up the soup (fwd) or down, with `energy`.
+    // R1: it starts outside allocated space -- if `at` is in a block, at the
+    // last unallocated codon behind it, or at that end of the soup if there
+    // is none. Each codon it passes, it flips one bit of with chance
+    // hazard.ray_flip (hazard.ray_flip_nop for NOPs), x the page's error
+    // multiplier with `heat` (R4), or with `wipe` randomises outright; then
+    // it loses hazard.ray_absorb_nop for a NOP, hazard.ray_absorb_waste for
+    // dead matter (waste or INERT), else hazard.ray_absorb, and stops when
+    // its energy is spent or at the end of the soup. Draws from r.
+    struct RayRun {
+        u32 lo, n;   // the codons it passed: [lo, lo + n)
+        u32 changed; // ... of which it flipped (or randomised)
+    };
+    RayRun ray(u32 at, bool fwd, double energy, bool heat, bool wipe, Rng& r);
+    // R2: rays arriving over the soup as a Poisson process at `rate` per
+    // codon, each heading up or down at random, all drawn from r. Returns the
+    // codons they flipped.
+    u64 ray_shower(double rate, double energy, bool heat, Rng& r);
+    // R2: the rate of rays of `energy` that, through unshielded living code,
+    // flips as many codons as independent flips at `flip_rate` per codon do:
+    // flip_rate / (hazard.ray_flip x the codons such a ray passes). 0 when no
+    // ray could flip anything.
+    double ray_rate(double flip_rate, double energy) const;
     // X10: this tick's symptoms, set by the world before the tick; fevered
     // units (GPU ones | kOfflineGpu) with their extra heat a tick.
     void set_weather(const Weather& w) { weather_ = w; }

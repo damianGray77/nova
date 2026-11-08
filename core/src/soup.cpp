@@ -439,6 +439,16 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     // that rate instead (mem.decay).
     const double rot_scale = key_f64(cfg, "hazard.rot_scale", key_default(p->mem_decay > 0 ? 0.01 : 1.0));
     p->rot_rate = key_f64(cfg, "hazard.rot", key_default(rot0 * rot_scale < 1 ? rot0 * rot_scale : 1.0));
+    // Rays (docs/lifehistory-plan.md R): off keeps the independent flips.
+    p->rays = key_flag(cfg, "hazard.rays");
+    p->ray_cosmic = key_f64(cfg, "hazard.ray_cosmic");
+    p->ray_static = key_f64(cfg, "disaster.static_energy");
+    p->ray_strike = key_f64(cfg, "disaster.strike_energy");
+    p->ray_flip = key_f64(cfg, "hazard.ray_flip");
+    p->ray_flip_nop = key_f64(cfg, "hazard.ray_flip_nop");
+    p->ray_absorb = key_f64(cfg, "hazard.ray_absorb");
+    p->ray_absorb_waste = key_f64(cfg, "hazard.ray_absorb_waste");
+    p->ray_absorb_nop = key_f64(cfg, "hazard.ray_absorb_nop");
 
     p->contact_range = key_u32(cfg, "contact.range", key_max(soup_size));
     p->contact_base = key_u32(cfg, "contact.cost_base");
@@ -3202,9 +3212,84 @@ void Soup::vents() {
     }
 }
 
+// docs/lifehistory-plan.md R1 (see soup.h).
+Soup::RayRun Soup::ray(u32 at, bool fwd, double energy, bool heat, bool wipe, Rng& r) {
+    const u32 n = p_->size;
+    RayRun out{0, 0, 0};
+    if (at >= n || !(energy > 0))
+        return out;
+    u32 a = at;
+    if (fwd)
+        while (a > 0 && owner_[a] != kNone)
+            --a;
+    else
+        while (a + 1 < n && owner_[a] != kNone)
+            ++a;
+    const u32 from = a;
+    const CodonTable& t = p_->table;
+    double e = energy;
+    for (;;) {
+        const Op op = t.op[mem_[a]];
+        const bool nop = is_nop(op);
+        if (wipe) {
+            mem_[a] = static_cast<u8>(r.next() & 63);
+            if (!stamp_.empty())
+                stamp_[a] = 0;
+            ++out.changed;
+        } else {
+            double c = nop ? p_->ray_flip_nop : p_->ray_flip;
+            if (heat)
+                c *= p_->mem.err_mult(page_heat_[a >> kPageBits]);
+            if (c > 0 && r.unit() < c) {
+                mem_[a] ^= static_cast<u8>(1u << r.below(6));
+                ++out.changed;
+            }
+        }
+        ++out.n;
+        e -= nop ? p_->ray_absorb_nop
+                 : owner_[a] == kNone || op == Op::inert ? p_->ray_absorb_waste : p_->ray_absorb;
+        if (!(e > 0))
+            break;
+        if (fwd) {
+            if (++a >= n)
+                break;
+        } else {
+            if (a == 0)
+                break;
+            --a;
+        }
+    }
+    out.lo = fwd ? from : from + 1 - out.n;
+    return out;
+}
+
+double Soup::ray_rate(double flip_rate, double energy) const {
+    const double per = p_->ray_flip * ceil(energy / p_->ray_absorb);
+    return flip_rate > 0 && per > 0 ? flip_rate / per : 0.0;
+}
+
+u64 Soup::ray_shower(double rate, double energy, bool heat, Rng& r) {
+    if (!(rate > 0))
+        return 0;
+    u64 flips = 0;
+    const double n = static_cast<double>(p_->size);
+    double pos = -log(1.0 - r.unit()) / rate;
+    while (pos < n) {
+        const bool fwd = r.below(2) == 0;
+        flips += ray(static_cast<u32>(pos), fwd, energy, heat, false, r).changed;
+        pos += -log(1.0 - r.unit()) / rate;
+    }
+    return flips;
+}
+
 void Soup::bit_rot() {
     if (p_->rot_rate <= 0)
         return;
+    if (p_->rays) { // docs/lifehistory-plan.md R2
+        tally_.rot_flips += ray_shower(ray_rate(p_->rot_rate * hazard_mult_, p_->ray_cosmic), p_->ray_cosmic,
+                                       p_->heat_on, rng_);
+        return;
+    }
     const double top = p_->heat_on ? p_->mem.err_max : 1.0;
     const double rate = p_->rot_rate * top * hazard_mult_;
     double pos = -log(1.0 - rng_.unit()) / rate;

@@ -9,7 +9,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 - **Families:** a key with a `<placeholder>` stands for one setting per member listed.
 - **Needs:** the switch the setting depends on; it does nothing while that is off.
 
-363 settings, 83 of them from 14 families; 11 hidden (tests and demos).
+372 settings, 83 of them from 14 families; 11 hidden (tests and demos).
 
 ## Contents
 
@@ -281,6 +281,13 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `hazard.flaw` | number, log | 0.0001 | 0 to 1 | **Flaws**. The chance per instruction executed of a flaw (Ray's baseline: about 1 in 10,000). |
 | `hazard.rot_scale` | number | 0.01 (computed) | 0 to 1000000 | **Cosmic ray scale**. Bit rot (cosmic rays) as a share of Ray's background rate (default 0.01 with decay on, else 1). |
 | `hazard.rot` | number, log | 1.5625e-05 (computed) | 0 to 1 | **Bit rot**. The chance per codon per tick of a random bit flip, living or dead (default Ray's background rate x hazard.rot_scale). |
+| `hazard.rays` | switch | false | true or false | **Rays**. Cosmic rays, storm static and lightning travel as rays: each starts outside allocated space and loses energy to each codon it passes, NOPs most, dead matter next, living code least (off: independent flips, as before). |
+| `hazard.ray_cosmic` | number | 512 | 0.001 to 1000000000 | **Cosmic ray energy**. A cosmic ray's energy (with hazard.ray_absorb = 1: the living codons it passes); they arrive so that unshielded code takes hazard.rot's flips. Needs `hazard.rays`. |
+| `hazard.ray_flip` | number | 0.03125 | 0 to 1 | **Ray flip chance**. The chance a ray flips one bit of each codon it passes (cosmic rays: x the page's error multiplier) ... Needs `hazard.rays`. |
+| `hazard.ray_flip_nop` | number | 0.0078125 | 0 to 1 | **Ray flip chance, NOPs**. ... and of each NOP: NOPs resist, without being immune. Needs `hazard.rays`. |
+| `hazard.ray_absorb` | number | 1 | 1e-06 to 1000000000 | **Ray absorption, living**. The energy a ray loses to each codon of living code it passes (the least) ... Needs `hazard.rays`. |
+| `hazard.ray_absorb_waste` | number | 2 | 1e-06 to 1000000000 | **Ray absorption, dead**. ... to each codon of dead matter, waste and INERT (more) ... Needs `hazard.rays`. |
+| `hazard.ray_absorb_nop` | number | 8 | 1e-06 to 1000000000 | **Ray absorption, NOPs**. ... and to each NOP, living or dead (the most), so NOP padding shields. Needs `hazard.rays`. |
 | `mem.volatility` | number, log | 1e-05 | 0 to 1 | **Volatility**. The chance per memory page per tick that a wipe starts there, turning whole pages to random codons. |
 | `mem.wipe_pages` | whole | 4 | 1 to 262144 | **Wipe size**. A wipe covers 1 to this many pages. Needs `mem.volatility`. |
 
@@ -387,6 +394,8 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `disaster.fever` | number | 2 | 0 to 1000000 | **Burnout fever**. A burnout's warning: extra heat a tick on the cores about to burn, at the peak. Needs `disaster.symptoms`. |
 | `disaster.disk_rot` | number, log | 0.0002 | 0 to 1 | **Failing disk rot**. A disk failure's warning: extra disk rot per codon per tick on its node, at the peak. Needs `disaster.symptoms`. |
 | `disaster.static` | number, log | 0.0001 | 0 to 1 | **Storm static**. A storm's warning: bit flips per memory codon per tick under it, building on the node it moves to next. Needs `disaster.symptoms`. |
+| `disaster.static_energy` | number | 32 | 0.001 to 1000000000 | **Static energy**. With hazard.rays, static arrives as rays of this energy (low: a few NOPs stop one), so that unshielded code takes disaster.static's flips. Needs `hazard.rays`. |
+| `disaster.strike_energy` | number | 1 | 1e-06 to 1000000 | **Strike energy**. With hazard.rays, a strike is a ray that randomises each codon it passes, with its drawn size x this x hazard.ray_absorb of energy: unshielded code loses the drawn size, and NOP padding shortens it. Needs `hazard.rays`. |
 | `disaster.sounds` | switch | true | true or false | **Sounds**. Each disaster has a voice in the signal field, on its own band of channels (silent without signals). Needs `disaster.enabled`. |
 | `disaster.surge_band` | whole | 13 | 0 to 255 | **Surge band**. A surge's first channel (3 wide): its hum and its bang. Needs `disaster.sounds`. |
 | `disaster.surge_loud` | number | 256 | 0 to 1000000000 | **Surge hum**. The hum's amplitude at its peak, from every node of the region. Needs `disaster.sounds`. |

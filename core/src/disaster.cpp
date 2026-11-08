@@ -313,6 +313,16 @@ u32 Soup::strike(u32 at, u32 len, Rng& r) {
     const u32 n = p_->size;
     if (at >= n || len == 0)
         return 0;
+    if (p_->rays) { // docs/lifehistory-plan.md R2: a ray that randomises what it passes
+        const bool fwd = r.below(2) == 0;
+        const double e = static_cast<double>(len) * p_->ray_strike * p_->ray_absorb;
+        const RayRun h = ray(at, fwd, e, false, true, r);
+        if (obs_ && h.n)
+            obs_->on_wipe(h.lo, h.n);
+        ++tally_.strikes;
+        tally_.strike_codons += h.n;
+        return h.n;
+    }
     if (len > n - at)
         len = n - at;
     for (u32 a = at; a < at + len; ++a) {
@@ -334,7 +344,10 @@ u32 Soup::strike(u32 at, u32 len, Rng& r) {
 void Soup::weather_hazards() {
     if (weather_.disk_rot > 0 && disk_on())
         tally_.disk_rot += disk_.rot(rng_, weather_.disk_rot);
-    if (weather_.static_rot > 0) {
+    if (weather_.static_rot > 0 && p_->rays) // docs/lifehistory-plan.md R2: static as low-energy rays
+        tally_.static_flips +=
+            ray_shower(ray_rate(weather_.static_rot, p_->ray_static), p_->ray_static, false, rng_);
+    else if (weather_.static_rot > 0) {
         const double rate = weather_.static_rot, n = static_cast<double>(p_->size);
         double pos = -log(1.0 - rng_.unit()) / rate;
         while (pos < n) {

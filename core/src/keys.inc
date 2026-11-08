@@ -485,6 +485,24 @@ NOVA_NUMBER("hazard.rot_scale", 0.01, 0, 1000000, kKeyComputed, "Hazards", "Cosm
 NOVA_NUMBER("hazard.rot", 1.5625e-5, 0, 1, kKeyLog | kKeyComputed, "Hazards", "Bit rot", "",
             "The chance per codon per tick of a random bit flip, living or dead (default Ray's background rate x "
             "hazard.rot_scale).")
+// Rays (docs/lifehistory-plan.md R)
+NOVA_FLAG("hazard.rays", false, 0, "Hazards", "Rays", "",
+          "Cosmic rays, storm static and lightning travel as rays: each starts outside allocated space and loses "
+          "energy to each codon it passes, NOPs most, dead matter next, living code least (off: independent flips, "
+          "as before).")
+NOVA_NUMBER("hazard.ray_cosmic", 512, 0.001, 1e9, 0, "Hazards", "Cosmic ray energy", "hazard.rays",
+            "A cosmic ray's energy (with hazard.ray_absorb = 1: the living codons it passes); they arrive so that "
+            "unshielded code takes hazard.rot's flips.")
+NOVA_NUMBER("hazard.ray_flip", 0.03125, 0, 1, 0, "Hazards", "Ray flip chance", "hazard.rays",
+            "The chance a ray flips one bit of each codon it passes (cosmic rays: x the page's error multiplier) ...")
+NOVA_NUMBER("hazard.ray_flip_nop", 0.0078125, 0, 1, 0, "Hazards", "Ray flip chance, NOPs", "hazard.rays",
+            "... and of each NOP: NOPs resist, without being immune.")
+NOVA_NUMBER("hazard.ray_absorb", 1, 0.000001, 1e9, 0, "Hazards", "Ray absorption, living", "hazard.rays",
+            "The energy a ray loses to each codon of living code it passes (the least) ...")
+NOVA_NUMBER("hazard.ray_absorb_waste", 2, 0.000001, 1e9, 0, "Hazards", "Ray absorption, dead", "hazard.rays",
+            "... to each codon of dead matter, waste and INERT (more) ...")
+NOVA_NUMBER("hazard.ray_absorb_nop", 8, 0.000001, 1e9, 0, "Hazards", "Ray absorption, NOPs", "hazard.rays",
+            "... and to each NOP, living or dead (the most), so NOP padding shields.")
 NOVA_NUMBER("mem.volatility", 0.00001, 0, 1, kKeyLog, "Hazards", "Volatility", "",
             "The chance per memory page per tick that a wipe starts there, turning whole pages to random codons.")
 NOVA_WHOLE("mem.wipe_pages", 4, 1, 1u << 18, 0, "Hazards", "Wipe size", "mem.volatility",
@@ -674,6 +692,12 @@ NOVA_NUMBER("disaster.disk_rot", 2e-4, 0, 1, kKeyLog, "Disasters", "Failing disk
             "A disk failure's warning: extra disk rot per codon per tick on its node, at the peak.")
 NOVA_NUMBER("disaster.static", 1e-4, 0, 1, kKeyLog, "Disasters", "Storm static", "disaster.symptoms",
             "A storm's warning: bit flips per memory codon per tick under it, building on the node it moves to next.")
+NOVA_NUMBER("disaster.static_energy", 32, 0.001, 1e9, 0, "Disasters", "Static energy", "hazard.rays",
+            "With hazard.rays, static arrives as rays of this energy (low: a few NOPs stop one), so that unshielded "
+            "code takes disaster.static's flips.")
+NOVA_NUMBER("disaster.strike_energy", 1, 0.000001, 1e6, 0, "Disasters", "Strike energy", "hazard.rays",
+            "With hazard.rays, a strike is a ray that randomises each codon it passes, with its drawn size x this x "
+            "hazard.ray_absorb of energy: unshielded code loses the drawn size, and NOP padding shortens it.")
 // X11: sounds
 NOVA_FLAG("disaster.sounds", true, 0, "Disasters", "Sounds", "disaster.enabled",
           "Each disaster has a voice in the signal field, on its own band of channels (silent without signals).")
