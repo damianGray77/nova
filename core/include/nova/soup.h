@@ -204,6 +204,11 @@ struct SoupParams {
     // volatility (Phase 4): wipes of whole pages into random codons
     double volatility;    // mem.volatility: chance per page per tick that a wipe starts there
     u32 wipe_pages;       // mem.wipe_pages: a wipe covers 1..this many pages
+    // wipe warnings (docs/lifehistory-plan.md W): a wipe lands wipe_warning
+    // ticks after it's drawn, its pages heating and flickering first
+    u32 wipe_warning;         // mem.wipe_warning: ticks (0: at once, as before)
+    double wipe_false_alarms; // mem.wipe_false_alarms: the share of warnings that fade without a wipe
+    double wipe_flicker;      // mem.wipe_flicker: bit flips per doomed codon per tick on the wipe's eve
     // --- memory tiers (docs/world-plan.md W3) ---------------------------------
     // Codons [0, fast_end) of the soup are fast memory, the rest slow: one
     // address space. With a timed cost table every load, store, template scan
@@ -647,7 +652,26 @@ struct SoupTally {
     // --- Memory tiers (docs/world-plan.md W3)
     u64 fast_allocs;      // ALLOCs of fast memory (resource 7) that claimed a block
     u64 fast_alloc_fails; // ... that found no room of that size there
+    // --- Life history (docs/lifehistory-plan.md W, V)
+    u64 wipe_warnings;     // wipes drawn with a warning (mem.wipe_warning), false alarms included
+    u64 wipe_false_alarms; // ... of which false alarms: they faded without a wipe
+    u64 wipe_flickers;     // bit flips on the pages of wipes to come (their symptom)
+    u64 sleeps;           // voluntary sleeps begun (YIELD with BX 1 or 2 and CX > 0)
+    u64 sleep_woke;        // ... that woke at the end of their timer
+    u64 sleep_expired;     // ... that died asleep, their reserves spent
 };
+
+// docs/lifehistory-plan.md W2-W5: a volatility wipe drawn and not yet landed
+// (world state: hashed and saved, snapshot v5).
+struct PendingWipe {
+    u64 drawn;   // the tick it was drawn
+    u64 lands;   // the tick it lands, or a false alarm fades
+    u32 page;    // its first page
+    u32 pages;   // pages it covers
+    u32 false_alarm; // 1: it fades without a wipe
+    u32 pad;
+};
+static_assert(sizeof(PendingWipe) == 32, "PendingWipe is hashed and saved as raw bytes");
 
 class Lineages; // lineage.h: the replicator detector, a pure observer
 class Profiles; // profile.h: behaviour profiles (docs/analysis-plan.md A3), a pure observer too
@@ -876,6 +900,8 @@ class Soup {
     u32 repair(u64 tick);
     u32 offline_count() const { return static_cast<u32>(offline_.size()); }
     const Array<OfflineCore>& offline() const { return offline_; }
+    // docs/lifehistory-plan.md W: wipes drawn and not yet landed (false alarms too).
+    const Array<PendingWipe>& pending_wipes() const { return pending_wipes_; }
     // X5, amended by the disk tiers (docs/world-plan.md W4): one tier is lost,
     // chosen by size -- the archive with chance archive / (disk + archive),
     // drawn from `r` (the disaster's own stream) only where the node has both
@@ -1213,6 +1239,10 @@ class Soup {
     void cpu_wear();
     void accel_wear();
     void volatility(); // Phase 4
+    // One wipe of `pages` pages from page `pg`, landing now (volatility's).
+    void land_wipe(u32 pg, u32 pages);
+    // docs/lifehistory-plan.md W2: the pending wipes' symptoms this tick.
+    void wipe_symptoms();
 
     const SoupParams* p_ = nullptr;
     u64 seed_ = 0;
@@ -1278,6 +1308,9 @@ class Soup {
     Array<u32> disk_addr_; // scratch: a DISK op's addresses
     Array<u8> wiped_pg_;   // scratch: pages wiped this tick
     Array<u32> wiped_bodies_;
+    // docs/lifehistory-plan.md W5: wipes drawn and not yet landed, in the
+    // order drawn (world state with mem.wipe_warning > 0; else always empty)
+    Array<PendingWipe> pending_wipes_;
 
     // dispersal: this tick's departures (taken by the world at the barrier)
     DispersalPorts ports_;

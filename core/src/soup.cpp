@@ -229,6 +229,9 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     // below with the others; the world sets them per node: W1)
     p->volatility = key_f64(cfg, "mem.volatility");
     p->wipe_pages = key_u32(cfg, "mem.wipe_pages");
+    p->wipe_warning = key_u32(cfg, "mem.wipe_warning"); // docs/lifehistory-plan.md W
+    p->wipe_false_alarms = key_f64(cfg, "mem.wipe_false_alarms");
+    p->wipe_flicker = key_f64(cfg, "mem.wipe_flicker");
     // Memory tiers (docs/world-plan.md W3): the first mem.fast_share of each
     // node's soup is fast memory (the world sets each node's fast_end from its
     // own size); 0 = one tier, everything as before.
@@ -731,6 +734,7 @@ void Soup::init(const SoupParams* p, u64 seed, u32 node, u32 life, const Ruins* 
     dorm_tag_.clear();
     origin_.clear();
     offline_.clear(); // disasters: every core online, nothing brewing
+    pending_wipes_.clear(); // docs/lifehistory-plan.md W: no wipe coming
     weather_ = Weather{};
     clear_fever();
     if (p->vent_spacing > 0) {
@@ -2574,7 +2578,7 @@ void Soup::tick_second_parts() {
     // unchanged.
     if (p_->disk && p_->disk_rot > 0) // (W4: the fast disk, [0, fast): without an archive, all of it)
         tally_.disk_rot += disk_.rot_range(rng_, p_->disk_rot, 0, disk_.fast);
-    if (p_->volatility > 0)
+    if (p_->volatility > 0 || !pending_wipes_.empty()) // (W: warned wipes land even if volatility is now 0)
         volatility();
     // Phase 10, after every earlier draw so worlds without it are unchanged.
     if (p_->mem_decay > 0)
@@ -2660,44 +2664,70 @@ void Soup::sweep_actions() {
 // the body still holds that memory, now garbage, and can repair it from disk.
 // A body all of whose owned memory was wiped this tick has its CPUs halted,
 // so it dies in the sweep: a whole-body hit is death.
+//
+// Wipe warnings (docs/lifehistory-plan.md W2-W3): with mem.wipe_warning > 0 a
+// wipe drawn now lands that many ticks later, and a share
+// mem.wipe_false_alarms of them (drawn now) fade then instead; until then its
+// pages heat and flicker (wipe_symptoms). The wipes due land first, in the
+// order drawn, then this tick's are drawn. With no warning nothing is
+// pending, and every draw is as before.
 void Soup::volatility() {
     const u32 pages = static_cast<u32>(page_heat_.size());
-    const double rate = p_->volatility * hazard_mult_;
-    // Memory tiers (docs/world-plan.md W3): a fast page is wiped
-    // mem.fast_volatility times as often. The process runs over the pages
-    // weighted by their chance: the first fp pages (fast) fv each, the rest
-    // 1. Without tiers fp is 0, and every draw and page is as before.
-    const u32 fp = min_of<u32>((p_->fast_end + kPage - 1) >> kPageBits, pages);
-    const double fv = p_->fast_volatility, fw = static_cast<double>(fp) * fv;
-    const double span = fw + static_cast<double>(pages - fp);
-    double pos = -log(1.0 - rng_.unit()) / rate;
-    if (pos >= span)
-        return;
-    wiped_pg_.resize(pages);
-    wiped_pg_.fill(0);
-    wiped_bodies_.clear();
-    while (pos < span) {
-        u32 pg = pos < fw ? static_cast<u32>(pos / fv) : fp + static_cast<u32>(pos - fw);
-        if (pg >= pages) // (rounding at the very end)
-            pg = pages - 1;
-        const u32 len = 1 + static_cast<u32>(rng_.below(p_->wipe_pages));
-        const u32 start = pg << kPageBits;
-        const u32 end = static_cast<u32>(min_of<u64>(static_cast<u64>(pg + len) << kPageBits, p_->size));
-        for (u32 a = start; a < end; ++a) {
-            mem_[a] = static_cast<u8>(rng_.next() & 63);
-            if (!stamp_.empty())
-                stamp_[a] = 0; // random codons are nobody's code
-            if (owner_[a] != kNone)
-                wiped_bodies_.push(blocks_[owner_[a]].body);
+    bool landed = false;
+    auto begin = [&] {
+        if (landed)
+            return;
+        wiped_pg_.resize(pages);
+        wiped_pg_.fill(0);
+        wiped_bodies_.clear();
+        landed = true;
+    };
+    if (!pending_wipes_.empty()) {
+        usize w = 0;
+        for (usize i = 0; i < pending_wipes_.size(); ++i) {
+            const PendingWipe x = pending_wipes_[i];
+            if (x.lands > tick_) {
+                pending_wipes_[w++] = x;
+                continue;
+            }
+            if (!x.false_alarm) {
+                begin();
+                land_wipe(x.page, x.pages);
+            }
         }
-        for (u32 q = pg; q < pages && (q << kPageBits) < end; ++q)
-            wiped_pg_[q] = 1;
-        if (obs_)
-            obs_->on_wipe(start, end - start);
-        ++tally_.wipes;
-        tally_.wiped += end - start;
-        pos += -log(1.0 - rng_.unit()) / rate;
+        pending_wipes_.resize(w);
     }
+    const double rate = p_->volatility * hazard_mult_;
+    if (rate > 0) {
+        // Memory tiers (docs/world-plan.md W3): a fast page is wiped
+        // mem.fast_volatility times as often. The process runs over the pages
+        // weighted by their chance: the first fp pages (fast) fv each, the rest
+        // 1. Without tiers fp is 0, and every draw and page is as before.
+        const u32 fp = min_of<u32>((p_->fast_end + kPage - 1) >> kPageBits, pages);
+        const double fv = p_->fast_volatility, fw = static_cast<double>(fp) * fv;
+        const double span = fw + static_cast<double>(pages - fp);
+        double pos = -log(1.0 - rng_.unit()) / rate;
+        while (pos < span) {
+            u32 pg = pos < fw ? static_cast<u32>(pos / fv) : fp + static_cast<u32>(pos - fw);
+            if (pg >= pages) // (rounding at the very end)
+                pg = pages - 1;
+            const u32 len = 1 + static_cast<u32>(rng_.below(p_->wipe_pages));
+            if (p_->wipe_warning > 0) {
+                const u32 fa = rng_.chance(p_->wipe_false_alarms) ? 1u : 0u;
+                pending_wipes_.push(PendingWipe{tick_, tick_ + p_->wipe_warning, pg, len, fa, 0});
+                ++tally_.wipe_warnings;
+                tally_.wipe_false_alarms += fa;
+            } else {
+                begin();
+                land_wipe(pg, len);
+            }
+            pos += -log(1.0 - rng_.unit()) / rate;
+        }
+    }
+    if (!pending_wipes_.empty())
+        wipe_symptoms();
+    if (!landed)
+        return;
     // Whole-body hits, each body once, in slot order.
     Array<u64> ids;
     for (usize i = 0; i < wiped_bodies_.size(); ++i)
@@ -2724,6 +2754,63 @@ void Soup::volatility() {
         if (p_->warps) // and its warps end (Phase 8)
             kill_warps(b);
         ++tally_.wipe_deaths;
+    }
+}
+
+void Soup::land_wipe(u32 pg, u32 len) {
+    const u32 pages = static_cast<u32>(page_heat_.size());
+    const u32 start = pg << kPageBits;
+    const u32 end = static_cast<u32>(min_of<u64>(static_cast<u64>(pg + len) << kPageBits, p_->size));
+    if (start >= end)
+        return;
+    for (u32 a = start; a < end; ++a) {
+        mem_[a] = static_cast<u8>(rng_.next() & 63);
+        if (!stamp_.empty())
+            stamp_[a] = 0; // random codons are nobody's code
+        if (owner_[a] != kNone)
+            wiped_bodies_.push(blocks_[owner_[a]].body);
+    }
+    for (u32 q = pg; q < pages && (q << kPageBits) < end; ++q)
+        wiped_pg_[q] = 1;
+    if (obs_)
+        obs_->on_wipe(start, end - start);
+    ++tally_.wipes;
+    tally_.wiped += end - start;
+}
+
+// docs/lifehistory-plan.md W2: each pending wipe's pages, f = (tick - drawn) /
+// mem.wipe_warning of the way to it: their heat raised to at least f x the
+// memory curve's hot mark (with heat on: SENSE reads it, and the error
+// multiplier rises with it), and bit flips at f x mem.wipe_flicker per codon
+// (a Poisson process over the wipe's codons, from the node's stream). False
+// alarms show the same; nothing else does, so a symptom is a strong hint.
+void Soup::wipe_symptoms() {
+    const double W = static_cast<double>(p_->wipe_warning);
+    if (!(W > 0))
+        return;
+    const u32 pages = static_cast<u32>(page_heat_.size());
+    for (usize i = 0; i < pending_wipes_.size(); ++i) {
+        const PendingWipe& x = pending_wipes_[i];
+        const double f = static_cast<double>(tick_ - x.drawn) / W;
+        const u32 start = x.page << kPageBits;
+        const u32 end = static_cast<u32>(min_of<u64>(static_cast<u64>(x.page + x.pages) << kPageBits, p_->size));
+        if (!(f > 0) || start >= end)
+            continue;
+        if (p_->heat_on) {
+            const float h = static_cast<float>(f) * p_->mem.hot;
+            for (u32 q = x.page; q < pages && (q << kPageBits) < end; ++q)
+                if (page_heat_[q] < h)
+                    page_heat_[q] = h;
+        }
+        const double rate = f * p_->wipe_flicker;
+        if (!(rate > 0))
+            continue;
+        double pos = static_cast<double>(start) - log(1.0 - rng_.unit()) / rate;
+        while (pos < static_cast<double>(end)) {
+            mem_[static_cast<u32>(pos)] ^= static_cast<u8>(1u << rng_.below(6));
+            ++tally_.wipe_flickers;
+            pos += -log(1.0 - rng_.unit()) / rate;
+        }
     }
 }
 
@@ -3503,6 +3590,10 @@ void Soup::hash_into(Hasher& h) const {
         h.word(offline_.size());
         h.bytes(offline_.data(), offline_.size() * sizeof(OfflineCore));
     }
+    if (p_->wipe_warning > 0) { // docs/lifehistory-plan.md W5: the wipes to come
+        h.word(pending_wipes_.size());
+        h.bytes(pending_wipes_.data(), pending_wipes_.size() * sizeof(PendingWipe));
+    }
 }
 
 bool Soup::pages_pending() const {
@@ -3590,6 +3681,7 @@ void Soup::debug_dump(const char* prefix) const {
     }
     out("dorm", dorm_.data(), dorm_.size() * sizeof(Dormant));
     out("offline", offline_.data(), offline_.size() * sizeof(OfflineCore));
+    out("pending_wipes", pending_wipes_.data(), pending_wipes_.size() * sizeof(PendingWipe));
     out("page_fetch", page_fetch_.data(), page_fetch_.size() * sizeof(u32));
     out("page_write", page_write_.data(), page_write_.size() * sizeof(u32));
     out("x_used", used_.data(), used_.size() * sizeof(u64));
@@ -3840,6 +3932,8 @@ void Soup::save(ByteWriter& w) const {
     }
     if (p_->disasters) // disasters X9 (v4): the cores offline for repair
         put_array(w, offline_);
+    if (p_->wipe_warning > 0) // docs/lifehistory-plan.md W5 (v5): the wipes to come
+        put_array(w, pending_wipes_);
 }
 
 bool Soup::load(ByteReader& r, TextBuf* err, u32 version) {
@@ -4027,6 +4121,21 @@ bool Soup::load(ByteReader& r, TextBuf* err, u32 version) {
             const u32 u = offline_[i].unit & ~kOfflineGpu;
             if ((offline_[i].unit & kOfflineGpu) ? u >= p_->gpus : u >= m) {
                 err->append("snapshot: an offline core out of range");
+                return false;
+            }
+        }
+    }
+    // docs/lifehistory-plan.md W5: the wipes to come (v5; none before).
+    pending_wipes_.clear();
+    if (p_->wipe_warning > 0 && version >= 5) {
+        if (!get_array(r, &pending_wipes_, r.remaining() / sizeof(PendingWipe))) {
+            err->append("snapshot: pending wipes truncated");
+            return false;
+        }
+        for (usize i = 0; i < pending_wipes_.size(); ++i) {
+            const PendingWipe& x = pending_wipes_[i];
+            if (x.page >= page_heat_.size() || x.pages == 0 || x.drawn > x.lands || x.false_alarm > 1) {
+                err->append("snapshot: a pending wipe out of range");
                 return false;
             }
         }

@@ -9,7 +9,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 - **Families:** a key with a `<placeholder>` stands for one setting per member listed.
 - **Needs:** the switch the setting depends on; it does nothing while that is off.
 
-372 settings, 83 of them from 14 families; 11 hidden (tests and demos).
+375 settings, 83 of them from 14 families; 11 hidden (tests and demos).
 
 ## Contents
 
@@ -290,6 +290,9 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `hazard.ray_absorb_nop` | number | 8 | 1e-06 to 1000000000 | **Ray absorption, NOPs**. ... and to each NOP, living or dead (the most), so NOP padding shields. Needs `hazard.rays`. |
 | `mem.volatility` | number, log | 1e-05 | 0 to 1 | **Volatility**. The chance per memory page per tick that a wipe starts there, turning whole pages to random codons. |
 | `mem.wipe_pages` | whole | 4 | 1 to 262144 | **Wipe size**. A wipe covers 1 to this many pages. Needs `mem.volatility`. |
+| `mem.wipe_warning` | whole | 0 | 0 to 1000000000 | **Wipe warning**. A wipe lands this many ticks after it's drawn, its pages heating toward hot and flickering more and more until then (0 = at once, with no warning, as before). Needs `mem.volatility`. |
+| `mem.wipe_false_alarms` | number | 0.25 | 0 to 1 | **Wipe false alarms**. The share of warnings that fade with no wipe, as disasters' false alarms do. Needs `mem.wipe_warning`. |
+| `mem.wipe_flicker` | number, log | 0.001 | 0 to 1 | **Wipe flicker**. Bit flips per codon per tick on a doomed page just before its wipe, rising from 0 when it's drawn. Needs `mem.wipe_warning`. |
 
 ## Costs
 

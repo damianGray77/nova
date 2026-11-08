@@ -57,6 +57,8 @@ const char* const kColumns[kStatsColumns] = {
     "role_copier", "role_idle", "work_len", "action_kinds_x100",
     // the live novelty meter (docs/analysis-plan.md A2): two in fixed point (x kNoveltyFixed), then a sum
     "novelty", "novel_share", "novel_success",
+    // life history (docs/lifehistory-plan.md W, V7): six sums
+    "wipe_warnings", "wipe_false_alarms", "wipe_flickers", "sleeps", "sleep_woke", "sleep_expired",
     // the two floating-point columns, last as always
     "compress",     "ambient"};
 // The first 39 tally fields fill columns 3-41; Phase 8's five go after
@@ -67,7 +69,7 @@ const char* const kColumns[kStatsColumns] = {
 // and their four gauges, then the memory tiers' gauge and two.
 inline constexpr u32 kTallyEarly = 39, kTallyWarp = 5, kTallyAction = 4, kTallyThread = 2, kTallyLife = 9,
                      kTallyDormant = 5, kTallyArchive = 2, kFoundedColumns = 4, kTallyDisaster = kStatsDisasterSums,
-                     kTallyTier = kStatsTierColumns - 1;
+                     kTallyTier = kStatsTierColumns - 1, kTallyLifeHistory = kStatsLifeColumns;
 // The origins of those columns, in order (soup.h).
 const u8 kFoundedOrigin[kFoundedColumns] = {kOriginSpark, kOriginDaughter, kOriginArrival, kOriginWake};
 
@@ -79,7 +81,8 @@ u64 total_founded(const World& w, u8 origin) {
     return n;
 }
 static_assert(sizeof(SoupTally) / sizeof(u64) == kTallyEarly + kTallyWarp + kTallyAction + kTallyThread + kTallyLife +
-                                                     kTallyDormant + kTallyArchive + kTallyDisaster + kTallyTier,
+                                                     kTallyDormant + kTallyArchive + kTallyDisaster + kTallyTier +
+                                                     kTallyLifeHistory,
               "a SoupTally field was added: update kColumns");
 
 } // namespace
@@ -156,7 +159,7 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
     const usize nt = sizeof tail / sizeof tail[0];
     static_assert(3 + kTallyEarly + sizeof tail / sizeof tail[0] + kTallyWarp + 2 + kTallyAction + kTallyThread + 1 +
                           kTallyLife + kTallyDormant + 2 + 1 + kTallyArchive + kFoundedColumns + kStatsDisasterColumns +
-                          kStatsTierColumns + kStatsProfileColumns + kStatsNoveltyColumns ==
+                          kStatsTierColumns + kStatsProfileColumns + kStatsNoveltyColumns + kStatsLifeColumns ==
                       kStatsIntColumns,
                   "stats row shape");
     for (usize i = 0; i < nt; ++i)
@@ -224,6 +227,10 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
     static_assert(3 + 39 + 18 + 5 + 2 + 4 + 2 + 1 + 9 + 5 + 2 + 1 + 2 + 4 + 26 + kStatsTierColumns + kStatsProfileColumns == kStatsNoveltyFirst, "novelty's first");
     for (u32 i = 0; i < kStatsNoveltyColumns; ++i)
         v[kStatsNoveltyFirst + i] = 0;
+    // Life history's sums (docs/lifehistory-plan.md), the last tallies.
+    for (u32 i = 0; i < kTallyLifeHistory; ++i)
+        v[kStatsLifeFirst + i] = t[kTallyEarly + kTallyWarp + kTallyAction + kTallyThread + kTallyLife + kTallyDormant +
+                                   kTallyArchive + kTallyDisaster + kTallyTier + i];
     marks->links = links;
     marks->inject = inject;
     marks->gpu = gpu;

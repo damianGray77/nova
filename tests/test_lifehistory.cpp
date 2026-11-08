@@ -5,6 +5,7 @@
 
 #include "check.h"
 #include "helpers.h"
+#include "nova/hash.h"
 #include "nova/snapshot.h"
 #include "soup_helpers.h"
 
@@ -133,7 +134,9 @@ struct RFix {
     u8 plain = 0, nop = 0;
     bool init(const char* extra, u32 size) {
         TextBuf cfg;
-        cfg.append("heat.enabled = false\nhazard.copy = 0\nhazard.flaw = 0\nmem.upkeep = 0\ncost.table = classic\n");
+        cfg.append("hazard.copy = 0\nhazard.flaw = 0\nmem.upkeep = 0\ncost.table = classic\n");
+        if (!strstr(extra, "heat.enabled ="))
+            cfg.append("heat.enabled = false\n");
         if (!strstr(extra, "hazard.rays ="))
             cfg.append("hazard.rays = true\n");
         if (!strstr(extra, "hazard.rot ="))
@@ -363,6 +366,182 @@ void test_ray_world() {
            static_cast<unsigned long long>(ticks));
 }
 
+// --- Wipe warnings (W) --------------------------------------------------------
+
+const char* const kWipes = "hazard.rays = false\nmem.wipe_pages = 1\n";
+
+// W2: a wipe lands exactly mem.wipe_warning ticks after it's drawn, and its
+// page is untouched until then (no flicker here).
+void test_wipe_lands_late() {
+    RFix f;
+    TextBuf extra;
+    extra.append(kWipes);
+    extra.append("mem.volatility = 0.002\nmem.wipe_warning = 10\nmem.wipe_false_alarms = 0\nmem.wipe_flicker = 0\n");
+    CHECK(f.init(extra.c_str(), 4096));
+    u64 t = 0;
+    while (f.s.pending_wipes().empty() && t < 1000)
+        f.s.tick(t++);
+    CHECK(!f.s.pending_wipes().empty());
+    if (f.s.pending_wipes().empty())
+        return;
+    const PendingWipe x = f.s.pending_wipes()[0];
+    CHECK(x.drawn == t - 1 && x.lands == x.drawn + 10 && x.pages == 1 && !x.false_alarm);
+    f.p.volatility = 0; // no more draws: the ones pending still land
+    const u32 lo = x.page * kPage;
+    u64 wipes = 0;
+    for (; t < x.lands; ++t) {
+        f.s.tick(t);
+        wipes += f.s.tally().wipes;
+    }
+    CHECK(wipes == 0 && f.changed(lo, kPage) == 0);
+    f.s.tick(t); // the landing tick
+    CHECK(f.s.tally().wipes >= 1 && f.changed(lo, kPage) > kPage / 2);
+    CHECK(f.s.pending_wipes().empty());
+    printf("  wipe warnings: drawn at tick %llu, page %u untouched until it landed at tick %llu\n",
+           static_cast<unsigned long long>(x.drawn), x.page, static_cast<unsigned long long>(x.lands));
+}
+
+// W2: the symptoms: the doomed page heats toward the memory curve's hot mark
+// and flickers more and more, and nothing else does.
+void test_wipe_symptoms() {
+    RFix f;
+    TextBuf extra;
+    extra.append(kWipes);
+    extra.append("heat.enabled = true\nmem.volatility = 0.002\nmem.wipe_warning = 20\nmem.wipe_false_alarms = 0\n"
+                 "mem.wipe_flicker = 0.05\n");
+    CHECK(f.init(extra.c_str(), 4096));
+    u64 t = 0;
+    while (f.s.pending_wipes().empty() && t < 1000)
+        f.s.tick(t++);
+    CHECK(f.s.pending_wipes().size() == 1);
+    if (f.s.pending_wipes().size() != 1)
+        return;
+    const PendingWipe x = f.s.pending_wipes()[0];
+    f.p.volatility = 0;
+    const u32 pages = 4096 / kPage;
+    u64 early = 0, late = 0;
+    bool ramp = true, others_cool = true;
+    float last = 0;
+    for (; t < x.lands; ++t) {
+        f.s.tick(t);
+        const float h = f.s.page_heat(x.page);
+        const float want = static_cast<float>(t - x.drawn) / 20.0f * f.p.mem.hot;
+        ramp = ramp && h >= want - 0.001f && h >= last;
+        last = h;
+        for (u32 q = 0; q < pages; ++q)
+            others_cool = others_cool && (q == x.page || f.s.page_heat(q) == 0);
+        (t - x.drawn < 10 ? early : late) += f.s.tally().wipe_flickers;
+    }
+    const u32 lo = x.page * kPage;
+    CHECK(ramp && others_cool && last >= 0.9f * f.p.mem.hot && last < f.p.mem.max);
+    CHECK(late > early && early + late > 10);
+    CHECK(f.changed(lo, kPage) > 0 && f.changed(0, lo) == 0 && f.changed(lo + kPage, 4096 - lo - kPage) == 0);
+    printf("  wipe warnings: the doomed page heats to %.1f (hot %.0f) and flickers %llu then %llu times; no other "
+           "page changes\n",
+           last, f.p.mem.hot, static_cast<unsigned long long>(early), static_cast<unsigned long long>(late));
+}
+
+// W3: the false-alarm share holds, and every warning that isn't one lands.
+void test_wipe_false_alarms() {
+    RFix f;
+    TextBuf extra;
+    extra.append(kWipes);
+    extra.append("mem.volatility = 0.005\nmem.wipe_warning = 5\n");
+    CHECK(f.init(extra.c_str(), 65536));
+    u64 warned = 0, fa = 0, wipes = 0, t = 0;
+    for (; t < 200; ++t) {
+        f.s.tick(t);
+        warned += f.s.tally().wipe_warnings;
+        fa += f.s.tally().wipe_false_alarms;
+        wipes += f.s.tally().wipes;
+    }
+    f.p.volatility = 0;
+    for (; t < 206; ++t) {
+        f.s.tick(t);
+        wipes += f.s.tally().wipes;
+    }
+    CHECK(f.s.pending_wipes().empty());
+    const double share = static_cast<double>(fa) / static_cast<double>(warned);
+    CHECK(warned > 500 && share > 0.2 && share < 0.3);
+    CHECK_EQ_U64(wipes, warned - fa);
+    printf("  wipe warnings: %llu warnings, %.3f false alarms (mem.wipe_false_alarms 0.25), the rest landed\n",
+           static_cast<unsigned long long>(warned), share);
+}
+
+// W5: a busy world with wipe warnings is the same at 1, 4 and 20 threads and
+// through a snapshot taken with wipes pending, and not the world without
+// them; a v4 snapshot (no warnings) still loads and resumes exactly.
+void test_wipe_world() {
+    const char* wipes = "mem.volatility = 0.0005\nmem.wipe_warning = 30\nheat.enabled = true\n";
+    const u64 ticks = 300;
+    const u32 threads[4] = {1, 4, 20, 1};
+    u64 hashes[4] = {};
+    ByteWriter snap;
+    u64 pending_at_snap = 0, warnings = 0;
+    for (u32 v = 0; v < 4; ++v) {
+        TextBuf cfg;
+        cfg.append(kSoupWorldProc);
+        cfg.append(v < 3 ? wipes : "mem.volatility = 0.0005\nheat.enabled = true\n");
+        Run run;
+        CHECK(make_run(run, cfg.c_str(), threads[v]));
+        for (u64 t = 1; t <= ticks; ++t) {
+            run.run_until(t);
+            if (v != 0)
+                continue;
+            warnings += run.world().last_soup_tick().wipe_warnings;
+            if (t == ticks / 2) {
+                run.snapshot(snap);
+                for (u32 n = 0; n < run.world().node_count(); ++n)
+                    pending_at_snap += run.world().node_soup(n).pending_wipes().size();
+            }
+        }
+        hashes[v] = run.world().hash();
+    }
+    CHECK_EQ_U64(hashes[1], hashes[0]);
+    CHECK_EQ_U64(hashes[2], hashes[0]);
+    CHECK(hashes[3] != hashes[0]);
+    CHECK(warnings > 0 && pending_at_snap > 0);
+    CHECK(snap.size() > 0);
+    if (snap.size() > 0) {
+        Run b;
+        TextBuf err;
+        CHECK(b.init_from_snapshot(snap.data(), snap.size(), 4, &err));
+        b.run_until(ticks);
+        CHECK_EQ_U64(b.world().hash(), hashes[0]);
+    }
+    // A v4 file: the same world without warnings, written as v4 wrote it
+    // (the version and the checksum: without warnings nothing else differs).
+    {
+        TextBuf cfg;
+        cfg.append(kSoupWorldProc);
+        cfg.append("mem.volatility = 0.0005\nheat.enabled = true\n");
+        Run a;
+        CHECK(make_run(a, cfg.c_str(), 2));
+        a.run_until(100);
+        ByteWriter s4;
+        a.snapshot(s4);
+        a.run_until(200);
+        Array<u8> bytes;
+        bytes.assign(s4.data(), s4.size());
+        bytes[8] = 4; // format v4
+        const u64 sum = hash_bytes(bytes.data(), bytes.size() - 8, 0x6E6F76612D736E70ull); // "nova-snp"
+        for (u32 i = 0; i < 8; ++i)
+            bytes[bytes.size() - 8 + i] = static_cast<u8>(sum >> (8 * i));
+        Run b;
+        TextBuf err;
+        const bool loaded = b.init_from_snapshot(bytes.data(), bytes.size(), 4, &err);
+        CHECK(loaded);
+        if (loaded) {
+            b.run_until(200);
+            CHECK_EQ_U64(b.world().hash(), a.world().hash());
+        }
+    }
+    printf("  wipe warnings: %llu in %llu ticks, %llu pending at the snapshot; the same at 1, 4 and 20 threads, "
+           "through the snapshot, and a v4 file resumes\n",
+           static_cast<unsigned long long>(warnings), static_cast<unsigned long long>(ticks),
+           static_cast<unsigned long long>(pending_at_snap));
+}
+
 } // namespace
 
 void suite_lifehistory() {
@@ -376,4 +555,8 @@ void suite_lifehistory() {
     test_ray_static();
     test_ray_determinism();
     test_ray_world();
+    test_wipe_lands_late();
+    test_wipe_symptoms();
+    test_wipe_false_alarms();
+    test_wipe_world();
 }

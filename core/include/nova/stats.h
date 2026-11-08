@@ -114,7 +114,7 @@
 //                                     that ran (rounded)
 //   action_kinds_x100                 their mean kinds of action used, x 100
 // then the live novelty meter's (docs/analysis-plan.md A2; novelty.h; zeros with
-// novelty.enabled or detection off), the last integer columns:
+// novelty.enabled or detection off):
 //   novelty                           innovation: the mean surprise of the window's
 //                                     new genotypes, bits per codon, in fixed point
 //                                     (x kNoveltyFixed, 10^6, rounded: 2753118 is
@@ -124,6 +124,13 @@
 //   novel_success                     how many of those novel ones belong to a
 //                                     lineage that has met the gate by the window's
 //                                     end (a sum)
+// then life history's (docs/lifehistory-plan.md; sums, zeros with each feature
+// off), the last integer columns:
+//   wipe_warnings, wipe_false_alarms  wipes drawn with a warning
+//                                     (mem.wipe_warning); of which false alarms
+//   wipe_flickers                     bit flips on doomed pages (their symptom)
+//   sleeps, sleep_woke, sleep_expired voluntary sleeps begun (YIELD BX 1 or 2,
+//                                     CX > 0); that woke; that died asleep
 // and last, as always, the two floating-point columns:
 //   compress                          soup compressibility (compress.h), mean
 //                                     over nodes: ~1 random, lower = repetitive
@@ -149,7 +156,10 @@ inline constexpr u32 kStatsProfileFirst = kStatsTierFirst + kStatsTierColumns;
 inline constexpr u32 kStatsNoveltyColumns = 3;
 inline constexpr double kNoveltyFixed = 1e6;
 inline constexpr u32 kStatsNoveltyFirst = kStatsProfileFirst + kStatsProfileColumns;
-inline constexpr u32 kStatsIntColumns = kStatsNoveltyFirst + kStatsNoveltyColumns;
+// Life history (docs/lifehistory-plan.md W, V7): six sums.
+inline constexpr u32 kStatsLifeColumns = 6;
+inline constexpr u32 kStatsLifeFirst = kStatsNoveltyFirst + kStatsNoveltyColumns;
+inline constexpr u32 kStatsIntColumns = kStatsLifeFirst + kStatsLifeColumns;
 inline constexpr u32 kStatsColumns = kStatsIntColumns + 2; // compress, ambient
 const char* stats_column(u32 i);
 // Index of a column by name, or kStatsColumns if there is none.

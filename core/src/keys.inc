@@ -507,6 +507,14 @@ NOVA_NUMBER("mem.volatility", 0.00001, 0, 1, kKeyLog, "Hazards", "Volatility", "
             "The chance per memory page per tick that a wipe starts there, turning whole pages to random codons.")
 NOVA_WHOLE("mem.wipe_pages", 4, 1, 1u << 18, 0, "Hazards", "Wipe size", "mem.volatility",
            "A wipe covers 1 to this many pages.")
+// Wipe warnings (docs/lifehistory-plan.md W)
+NOVA_WHOLE("mem.wipe_warning", 0, 0, 1000000000, 0, "Hazards", "Wipe warning", "mem.volatility",
+           "A wipe lands this many ticks after it's drawn, its pages heating toward hot and flickering more and "
+           "more until then (0 = at once, with no warning, as before).")
+NOVA_NUMBER("mem.wipe_false_alarms", 0.25, 0, 1, 0, "Hazards", "Wipe false alarms", "mem.wipe_warning",
+            "The share of warnings that fade with no wipe, as disasters' false alarms do.")
+NOVA_NUMBER("mem.wipe_flicker", 0.001, 0, 1, kKeyLog, "Hazards", "Wipe flicker", "mem.wipe_warning",
+            "Bit flips per codon per tick on a doomed page just before its wipe, rising from 0 when it's drawn.")
 
 // ---------------------------------------------------------------------------
 // Costs
