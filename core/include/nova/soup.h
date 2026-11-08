@@ -176,6 +176,8 @@ struct SoupParams {
     double ray_absorb;       // hazard.ray_absorb: energy lost per living codon passed
     double ray_absorb_waste; // hazard.ray_absorb_waste: ... per codon of dead matter
     double ray_absorb_nop;   // hazard.ray_absorb_nop: ... per NOP
+    double ray_indel;        // hazard.ray_indel: a cosmic hit's chance of an indel instead of a flip (R7)
+    double ray_indel_energy; // hazard.ray_indel_energy: ... while the ray has this much energy left
     // contact (ENGULF / INJECT, 6.4 #6-7)
     u32 contact_range;      // max distance from the attacker's IP to a surface
     u32 contact_base;       // instructions charged per attempt, success or not
@@ -662,6 +664,8 @@ struct SoupTally {
     u64 sleeps;           // voluntary sleeps begun (YIELD with BX 1 or 2 and CX > 0)
     u64 sleep_woke;        // ... that woke at the end of their timer
     u64 sleep_expired;     // ... that died asleep, their reserves spent
+    u64 ray_inserts;       // codons a cosmic ray copied in place, growing a block (R7)
+    u64 ray_deletes;       // ... it deleted, shrinking a block
 };
 
 // docs/lifehistory-plan.md W2-W5: a volatility wipe drawn and not yet landed
@@ -939,11 +943,24 @@ class Soup {
         u32 lo, n;   // the codons it passed: [lo, lo + n)
         u32 changed; // ... of which it flipped (or randomised)
     };
-    RayRun ray(u32 at, bool fwd, double energy, bool heat, bool wipe, Rng& r);
+    // R7 (Damian, 2026-11-08): with `indels`, a hit on living code while the
+    // ray still has hazard.ray_indel_energy is, with chance hazard.ray_indel,
+    // an indel (half each way, ray_indel below) instead of a flip.
+    RayRun ray(u32 at, bool fwd, double energy, bool heat, bool wipe, Rng& r, bool indels = false);
     // R2: rays arriving over the soup as a Poisson process at `rate` per
     // codon, each heading up or down at random, all drawn from r. Returns the
-    // codons they flipped.
-    u64 ray_shower(double rate, double energy, bool heat, Rng& r);
+    // codons they flipped (or changed by an indel).
+    u64 ray_shower(double rate, double energy, bool heat, Rng& r, bool indels = false);
+    // R7: an indel at codon a, which must be living code: `insert` copies the
+    // codon in place (the codons on one side move along one, and the block
+    // claims the free codon at that end), else deletes it (the codons on one
+    // side move back one, and the block lets that end's codon go, as heat
+    // does). Only in a block that owns all its range, with a free codon at
+    // one of its ends (the end first, else the start; a deletion takes the
+    // same end, so neither is likelier where there's no room), and a
+    // deletion only in a block of two or more. The codons moved are no
+    // one's writing (the detector's on_wipe). Returns whether it happened.
+    bool ray_indel(u32 a, bool insert);
     // R2: the rate of rays of `energy` that, through unshielded living code,
     // flips as many codons as independent flips at `flip_rate` per codon do:
     // flip_rate / (hazard.ray_flip x the codons such a ray passes). 0 when no

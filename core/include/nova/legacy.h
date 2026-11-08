@@ -36,11 +36,24 @@ inline constexpr const char* kLegacyFormatDefaults = //
     "profile.enabled = false\n"                     // observers start disabled for old files
     "novelty.enabled = false\n";
 
+// The second change of defaults (2026-11-08, Damian: "please stop defaulting
+// new features to off. Turn rays on"; docs/lifehistory-plan.md R): rays on.
+// Snapshots before format v6 and replay logs before format v4 were written
+// while they were off (v5 brought pending wipes), so they take this text too
+// for what they don't name -- the oldest files both texts.
+inline constexpr u32 kSnapshotRaysBefore = 6;
+inline constexpr u32 kReplayRaysBefore = 4;
+inline constexpr const char* kLegacyRaysDefaults = //
+    "hazard.rays = false\n";                         // rays (docs/lifehistory-plan.md R)
+
 // Sets each line of kLegacyFormatDefaults that cfg doesn't name, where the
 // world will read it, so no unused entry is added: every line is a soup
 // world's setting, and one whose registry entry needs a choice
 // (substrate.enabled: world.graph=procedural|landscape) is set only where
 // that choice is made.
 void apply_legacy_defaults(Config& cfg);
+// Every text a file of this format version predates (a snapshot's, or with
+// `snapshot` false a replay log's), the same way.
+void apply_format_defaults(Config& cfg, bool snapshot, u32 version);
 
 } // namespace nova

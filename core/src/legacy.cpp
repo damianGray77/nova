@@ -29,19 +29,28 @@ bool world_reads(Config& cfg, Str key) {
     return false;
 }
 
-} // namespace
-
-void apply_legacy_defaults(Config& cfg) {
+void apply_text(Config& cfg, const char* text) {
     if (!key_peek_str(cfg, "world.model").eq("soup")) // (every line is a soup world's setting)
         return;
     Config legacy;
     Config::ParseError pe;
-    const bool parsed = legacy.parse(Str(kLegacyFormatDefaults), &pe);
+    const bool parsed = legacy.parse(Str(text), &pe);
     NOVA_ASSERT(parsed);
     (void)parsed;
     for (usize i = 0; i < legacy.count(); ++i)
         if (!cfg.has(legacy.key(i)) && world_reads(cfg, legacy.key(i)))
             cfg.set(legacy.key(i), legacy.value(i));
+}
+
+} // namespace
+
+void apply_legacy_defaults(Config& cfg) { apply_text(cfg, kLegacyFormatDefaults); }
+
+void apply_format_defaults(Config& cfg, bool snapshot, u32 version) {
+    if (version < (snapshot ? kSnapshotLegacyBefore : kReplayLegacyBefore))
+        apply_text(cfg, kLegacyFormatDefaults);
+    if (version < (snapshot ? kSnapshotRaysBefore : kReplayRaysBefore))
+        apply_text(cfg, kLegacyRaysDefaults);
 }
 
 } // namespace nova

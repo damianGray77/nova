@@ -457,6 +457,8 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     p->ray_absorb = key_f64(cfg, "hazard.ray_absorb");
     p->ray_absorb_waste = key_f64(cfg, "hazard.ray_absorb_waste");
     p->ray_absorb_nop = key_f64(cfg, "hazard.ray_absorb_nop");
+    p->ray_indel = key_f64(cfg, "hazard.ray_indel"); // R7 (only with rays: hazard.rays)
+    p->ray_indel_energy = key_f64(cfg, "hazard.ray_indel_energy");
 
     p->contact_range = key_u32(cfg, "contact.range", key_max(soup_size));
     p->contact_base = key_u32(cfg, "contact.cost_base");
@@ -3339,7 +3341,7 @@ void Soup::vents() {
 }
 
 // docs/lifehistory-plan.md R1 (see soup.h).
-Soup::RayRun Soup::ray(u32 at, bool fwd, double energy, bool heat, bool wipe, Rng& r) {
+Soup::RayRun Soup::ray(u32 at, bool fwd, double energy, bool heat, bool wipe, Rng& r, bool indels) {
     const u32 n = p_->size;
     RayRun out{0, 0, 0};
     if (at >= n || !(energy > 0))
@@ -3357,6 +3359,7 @@ Soup::RayRun Soup::ray(u32 at, bool fwd, double energy, bool heat, bool wipe, Rn
     for (;;) {
         const Op op = t.op[mem_[a]];
         const bool nop = is_nop(op);
+        const bool dead = owner_[a] == kNone || op == Op::inert; // (what it passes, before the hit)
         if (wipe) {
             mem_[a] = static_cast<u8>(r.next() & 63);
             if (!stamp_.empty())
@@ -3367,13 +3370,22 @@ Soup::RayRun Soup::ray(u32 at, bool fwd, double energy, bool heat, bool wipe, Rn
             if (heat)
                 c *= p_->mem.err_mult(page_heat_[a >> kPageBits]);
             if (c > 0 && r.unit() < c) {
-                mem_[a] ^= static_cast<u8>(1u << r.below(6));
+                // R7: an energetic hit on living code may be an indel instead.
+                bool done = false;
+                if (indels && owner_[a] != kNone && e >= p_->ray_indel_energy && p_->ray_indel > 0 &&
+                    r.unit() < p_->ray_indel) {
+                    const bool insert = r.below(2) == 0;
+                    done = ray_indel(a, insert);
+                    if (done)
+                        ++(insert ? tally_.ray_inserts : tally_.ray_deletes);
+                }
+                if (!done)
+                    mem_[a] ^= static_cast<u8>(1u << r.below(6));
                 ++out.changed;
             }
         }
         ++out.n;
-        e -= nop ? p_->ray_absorb_nop
-                 : owner_[a] == kNone || op == Op::inert ? p_->ray_absorb_waste : p_->ray_absorb;
+        e -= nop ? p_->ray_absorb_nop : dead ? p_->ray_absorb_waste : p_->ray_absorb;
         if (!(e > 0))
             break;
         if (fwd) {
@@ -3389,12 +3401,89 @@ Soup::RayRun Soup::ray(u32 at, bool fwd, double energy, bool heat, bool wipe, Rn
     return out;
 }
 
+// R7 (see soup.h).
+bool Soup::ray_indel(u32 a, bool insert) {
+    if (a >= p_->size)
+        return false;
+    const u32 k = owner_[a];
+    if (k == kNone)
+        return false;
+    Block& bl = blocks_[k];
+    if (bl.owned != bl.len || (!insert && bl.len < 2))
+        return false; // (a block with holes: a flip instead)
+    const u32 s = bl.start, e = s + bl.len; // [s, e)
+    const bool tail = e < p_->size && owner_[e] == kNone;
+    const bool head = !tail && s > 0 && owner_[s - 1] == kNone;
+    if (!tail && !head)
+        return false; // no room at either end: a flip instead, for either kind
+    Body& B = bodies_[bl.body];
+    const bool st = !stamp_.empty();
+    auto move = [&](u32 to, u32 from) {
+        mem_[to] = mem_[from];
+        if (st)
+            stamp_[to] = stamp_[from];
+    };
+    auto claim = [&](u32 c) {
+        owner_[c] = k;
+        if (st)
+            stamp_[c] = 0;
+        mark_used(c, 1, true);
+        --waste_;
+        ++bl.len;
+        ++bl.owned;
+        ++B.mem;
+    };
+    auto release = [&](u32 c) { // as heat lets a codon go: a remnant of this body
+        if (st && stamp_[c] == 0)
+            stamp_[c] = genome_len(bl.body);
+        owner_[c] = kNone;
+        used_[c >> 6] &= ~(1ull << (c & 63));
+        ++waste_;
+        ++free_epoch_;
+        --bl.len;
+        --bl.owned;
+        --B.mem;
+    };
+    u32 lo = 0, hi = 0; // the codons moved or changed: [lo, hi)
+    if (insert && tail) { // a+1 .. e-1 up one, into e; a's copy at a+1
+        claim(e);
+        for (u32 i = e; i > a + 1; --i)
+            move(i, i - 1);
+        move(a + 1, a);
+        lo = a;
+        hi = e + 1;
+    } else if (insert) { // s .. a down one, into s-1; a's copy stays at a
+        claim(s - 1);
+        bl.start = s - 1;
+        for (u32 i = s - 1; i < a; ++i)
+            move(i, i + 1);
+        lo = s - 1;
+        hi = a + 1;
+    } else if (tail) { // a+1 .. e-1 down one; e-1 lets go
+        for (u32 i = a; i + 1 < e; ++i)
+            move(i, i + 1);
+        release(e - 1);
+        lo = a;
+        hi = e;
+    } else { // s .. a-1 up one; s lets go
+        for (u32 i = a; i > s; --i)
+            move(i, i - 1);
+        release(s);
+        bl.start = s + 1;
+        lo = s;
+        hi = a + 1;
+    }
+    if (obs_)
+        obs_->on_wipe(lo, hi - lo);
+    return true;
+}
+
 double Soup::ray_rate(double flip_rate, double energy) const {
     const double per = p_->ray_flip * ceil(energy / p_->ray_absorb);
     return flip_rate > 0 && per > 0 ? flip_rate / per : 0.0;
 }
 
-u64 Soup::ray_shower(double rate, double energy, bool heat, Rng& r) {
+u64 Soup::ray_shower(double rate, double energy, bool heat, Rng& r, bool indels) {
     if (!(rate > 0))
         return 0;
     u64 flips = 0;
@@ -3402,7 +3491,7 @@ u64 Soup::ray_shower(double rate, double energy, bool heat, Rng& r) {
     double pos = -log(1.0 - r.unit()) / rate;
     while (pos < n) {
         const bool fwd = r.below(2) == 0;
-        flips += ray(static_cast<u32>(pos), fwd, energy, heat, false, r).changed;
+        flips += ray(static_cast<u32>(pos), fwd, energy, heat, false, r, indels).changed;
         pos += -log(1.0 - r.unit()) / rate;
     }
     return flips;
@@ -3413,7 +3502,7 @@ void Soup::bit_rot() {
         return;
     if (p_->rays) { // docs/lifehistory-plan.md R2
         tally_.rot_flips += ray_shower(ray_rate(p_->rot_rate * hazard_mult_, p_->ray_cosmic), p_->ray_cosmic,
-                                       p_->heat_on, rng_);
+                                       p_->heat_on, rng_, true); // (R7: cosmic rays' indels)
         return;
     }
     const double top = p_->heat_on ? p_->mem.err_max : 1.0;

@@ -486,10 +486,10 @@ NOVA_NUMBER("hazard.rot", 1.5625e-5, 0, 1, kKeyLog | kKeyComputed, "Hazards", "B
             "The chance per codon per tick of a random bit flip, living or dead (default Ray's background rate x "
             "hazard.rot_scale).")
 // Rays (docs/lifehistory-plan.md R)
-NOVA_FLAG("hazard.rays", false, 0, "Hazards", "Rays", "",
+NOVA_FLAG("hazard.rays", true, 0, "Hazards", "Rays", "",
           "Cosmic rays, storm static and lightning travel as rays: each starts outside allocated space and loses "
           "energy to each codon it passes, NOPs most, dead matter next, living code least (off: independent flips, "
-          "as before).")
+          "as before rays; on by default since 2026-11-08, older files keep them off: legacy.h).")
 NOVA_NUMBER("hazard.ray_cosmic", 512, 0.001, 1e9, 0, "Hazards", "Cosmic ray energy", "hazard.rays",
             "A cosmic ray's energy (with hazard.ray_absorb = 1: the living codons it passes); they arrive so that "
             "unshielded code takes hazard.rot's flips.")
@@ -503,6 +503,15 @@ NOVA_NUMBER("hazard.ray_absorb_waste", 2, 0.000001, 1e9, 0, "Hazards", "Ray abso
             "... to each codon of dead matter, waste and INERT (more) ...")
 NOVA_NUMBER("hazard.ray_absorb_nop", 8, 0.000001, 1e9, 0, "Hazards", "Ray absorption, NOPs", "hazard.rays",
             "... and to each NOP, living or dead (the most), so NOP padding shields.")
+// Ray indels (docs/lifehistory-plan.md R7; Damian, 2026-11-08: on with rays)
+NOVA_NUMBER("hazard.ray_indel", 0.1, 0, 1, 0, "Hazards", "Ray indels", "hazard.rays",
+            "The share of a cosmic ray's hits on living code, while it has hazard.ray_indel_energy left, that copy "
+            "the codon in place or delete it (half each) instead of flipping a bit: the program grows or shrinks by "
+            "one, and a copier that copies its own size passes that on. Only in a program with a free codon at one "
+            "of its ends, else a flip, so neither is likelier (0 = flips only).")
+NOVA_NUMBER("hazard.ray_indel_energy", 256, 0, 1e9, 0, "Hazards", "Ray indel energy", "hazard.rays",
+            "The energy a ray needs left at a codon for an indel there (cosmic rays start at hazard.ray_cosmic, so "
+            "only the first stretch of a cosmic ray's path; static never has this much).")
 NOVA_NUMBER("mem.volatility", 0.00001, 0, 1, kKeyLog, "Hazards", "Volatility", "",
             "The chance per memory page per tick that a wipe starts there, turning whole pages to random codons.")
 NOVA_WHOLE("mem.wipe_pages", 4, 1, 1u << 18, 0, "Hazards", "Wipe size", "mem.volatility",

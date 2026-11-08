@@ -57,8 +57,9 @@ const char* const kColumns[kStatsColumns] = {
     "role_copier", "role_idle", "work_len", "action_kinds_x100",
     // the live novelty meter (docs/analysis-plan.md A2): two in fixed point (x kNoveltyFixed), then a sum
     "novelty", "novel_share", "novel_success",
-    // life history (docs/lifehistory-plan.md W, V7): six sums
-    "wipe_warnings", "wipe_false_alarms", "wipe_flickers", "sleeps", "sleep_woke", "sleep_expired",
+    // life history (docs/lifehistory-plan.md W, V7, R7): eight sums
+    "wipe_warnings", "wipe_false_alarms", "wipe_flickers", "sleeps", "sleep_woke", "sleep_expired", "ray_inserts",
+    "ray_deletes",
     // the two floating-point columns, last as always
     "compress",     "ambient"};
 // The first 39 tally fields fill columns 3-41; Phase 8's five go after

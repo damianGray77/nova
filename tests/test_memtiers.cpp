@@ -690,7 +690,8 @@ void test_old_files() {
     const char* world = "seed = 3\nworld.model = soup\nworld.graph = procedural\nworld.nodes = 8\n"
                         "world.soup_size = 2048\nspark.initial = 20\nspark.rate = 0.5\naccel.gpu = cpu\n"
                         "accel.npu = cpu\nwarp.device = cpu\nspark.activity = 0\nsubstrate.enabled = false\n"
-                        "world.archive = 0\ndisaster.enabled = false\n";
+                        "world.archive = 0\ndisaster.enabled = false\n"
+                        "hazard.rays = false\n"; // (rays: on by default since 2026-11-08)
     {
         const char* path = "nova_test_memtiers.replay";
         TextBuf cfg;

@@ -26,8 +26,8 @@ void Run::start_novelty() {
     }
 }
 
-static_assert(kSnapshotLegacyBefore <= kSnapshotVersion,
-              "snapshots before kSnapshotLegacyBefore take the legacy defaults (legacy.h)");
+static_assert(kSnapshotLegacyBefore <= kSnapshotRaysBefore && kSnapshotRaysBefore <= kSnapshotVersion,
+              "snapshots before kSnapshotLegacyBefore (kSnapshotRaysBefore) take the legacy defaults (legacy.h)");
 
 void genome_names(const CodonTable& t, const u8* codons, u32 len, TextBuf& out) {
     for (u32 i = 0; i < len; ++i) {
@@ -77,8 +77,8 @@ bool Run::init_from_snapshot(const u8* data, usize n, u32 threads, TextBuf* err,
     // whose disk section it lacks), so it resumes with them off, unless its
     // config (or an edit above) names them. The effective config then carries
     // them, so later snapshots keep them off.
-    if (h.version < kSnapshotLegacyBefore)
-        apply_legacy_defaults(config_);
+    // (And one from before v6, without rays on by default: legacy.h.)
+    apply_format_defaults(config_, true, h.version);
     budget_notes_.clear(); // a snapshot's budgets were resolved when it ran: this only checks the fit
     if (!resolve_budgets(config_, threads ? threads : ThreadPool::hardware_threads(), &budget_notes_, err))
         return false;

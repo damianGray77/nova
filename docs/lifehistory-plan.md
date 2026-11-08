@@ -114,6 +114,15 @@ All of it is automatic: the watchdog sends frozen bodies to sleep.
 - `hazard.ray_absorb`, `hazard.ray_absorb_waste`, `hazard.ray_absorb_nop`.
 - `disaster.strike_energy`, `disaster.static_energy`.
 
+**R7. Indels (Damian, 2026-11-08, after the calibration sweep).** Bit flips only substitute; they never change a genome's length, and a copier's daughters inherit its length exactly (it copies its own size). So a cosmic ray's hit on living code, while the ray has `hazard.ray_indel_energy` (256) left, is with chance `hazard.ray_indel` (0.1) an indel instead of a flip, half each:
+- an insertion copies the codon in place: the codons on one side move along one, and the block claims the free codon at that end;
+- a deletion removes it: the codons on one side move back one, and the block lets that end's codon go, as heat does.
+- Only in a block that owns its whole range, with a free codon at one of its ends (the end first, else the start; a deletion uses the same end), so neither kind is likelier in a crowded soup; else a flip. A one-codon block isn't shortened.
+- A copier that copies its own size passes the change on: its daughters are a codon longer or shorter.
+- Stats `ray_inserts` and `ray_deletes`.
+
+**Rays on by default (Damian, 2026-11-08: "please stop defaulting new features to off. Turn rays on").** `hazard.rays` is true; snapshots before v6 and replay logs before v4 resume and replay with it off (legacy.h's second text).
+
 ## 3. Wipe warnings (W)
 
 **W1. Why (Damian).** Wipes stay what they are: bank failures that turn whole pages to random codons. Today one strikes with no warning, which leaves nothing to respond to. They should give prior symptoms, as disasters do.

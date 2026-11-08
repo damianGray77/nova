@@ -3,8 +3,8 @@
 // The replay log (design.md 7.1 H and K): everything needed to re-run a run
 // exactly, plus checkpoints to prove that it did.
 //
-// Text format v3, one record per line, in time order:
-//   nova-replay 3
+// Text format v4, one record per line, in time order:
+//   nova-replay 4
 //   config <key> = <value>        the config at tick 0 (one line per entry)
 //   hash <tick> <16 hex digits>   world hash once <tick> ticks have completed
 //   knob <tick> <key> = <value>   a live knob change, applied before tick <tick> ran
@@ -20,6 +20,8 @@
 // so a v2 or v1 log replays with those features as they were then: a setting
 // it doesn't name takes its legacy default (legacy.h, as for snapshots before
 // v4), not the registry's. replay_config() gives the config to replay.
+// v4 (2026-11-08) changes no record either: rays came on by default, so a v3
+// log or older replays with hazard.rays = false unless it names it (legacy.h).
 //
 // Knob events are what keep a run reproducible once the analysis UI lets people
 // turn knobs mid-run: the change is logged with its tick, and replay reapplies
@@ -32,7 +34,7 @@
 
 namespace nova {
 
-inline constexpr u32 kReplayVersion = 3;
+inline constexpr u32 kReplayVersion = 4;
 
 class ReplayWriter {
   public:

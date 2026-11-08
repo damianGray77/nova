@@ -4,8 +4,8 @@
 
 namespace nova {
 
-static_assert(kReplayLegacyBefore <= kReplayVersion,
-              "replay logs before kReplayLegacyBefore take the legacy defaults (legacy.h)");
+static_assert(kReplayLegacyBefore <= kReplayRaysBefore && kReplayRaysBefore <= kReplayVersion,
+              "replay logs before kReplayLegacyBefore (kReplayRaysBefore) take the legacy defaults (legacy.h)");
 
 namespace {
 
@@ -132,13 +132,13 @@ Str ReplayLog::event_text(usize i) const {
 }
 
 // A log before v3 was written before the varied world's features came on by
-// default, and names only the settings it was given: the rest take the
-// values they had then (legacy.h), as a snapshot before v4 does.
+// default, and one before v4 before rays did; each names only the settings it
+// was given: the rest take the values they had then (legacy.h), as a
+// snapshot before v4 (v6) does.
 bool ReplayLog::replay_config(Config* out, Config::ParseError* err) const {
     if (!out->parse(config_.view(), err))
         return false;
-    if (version_ < kReplayLegacyBefore)
-        apply_legacy_defaults(*out);
+    apply_format_defaults(*out, false, version_);
     return true;
 }
 

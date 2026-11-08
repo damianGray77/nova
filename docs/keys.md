@@ -9,7 +9,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 - **Families:** a key with a `<placeholder>` stands for one setting per member listed.
 - **Needs:** the switch the setting depends on; it does nothing while that is off.
 
-377 settings, 83 of them from 14 families; 11 hidden (tests and demos).
+379 settings, 83 of them from 14 families; 11 hidden (tests and demos).
 
 ## Contents
 
@@ -281,13 +281,15 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `hazard.flaw` | number, log | 0.0001 | 0 to 1 | **Flaws**. The chance per instruction executed of a flaw (Ray's baseline: about 1 in 10,000). |
 | `hazard.rot_scale` | number | 0.01 (computed) | 0 to 1000000 | **Cosmic ray scale**. Bit rot (cosmic rays) as a share of Ray's background rate (default 0.01 with decay on, else 1). |
 | `hazard.rot` | number, log | 1.5625e-05 (computed) | 0 to 1 | **Bit rot**. The chance per codon per tick of a random bit flip, living or dead (default Ray's background rate x hazard.rot_scale). |
-| `hazard.rays` | switch | false | true or false | **Rays**. Cosmic rays, storm static and lightning travel as rays: each starts outside allocated space and loses energy to each codon it passes, NOPs most, dead matter next, living code least (off: independent flips, as before). |
+| `hazard.rays` | switch | true | true or false | **Rays**. Cosmic rays, storm static and lightning travel as rays: each starts outside allocated space and loses energy to each codon it passes, NOPs most, dead matter next, living code least (off: independent flips, as before rays; on by default since 2026-11-08, older files keep them off: legacy.h). |
 | `hazard.ray_cosmic` | number | 512 | 0.001 to 1000000000 | **Cosmic ray energy**. A cosmic ray's energy (with hazard.ray_absorb = 1: the living codons it passes); they arrive so that unshielded code takes hazard.rot's flips. Needs `hazard.rays`. |
 | `hazard.ray_flip` | number | 0.03125 | 0 to 1 | **Ray flip chance**. The chance a ray flips one bit of each codon it passes (cosmic rays: x the page's error multiplier) ... Needs `hazard.rays`. |
 | `hazard.ray_flip_nop` | number | 0.0078125 | 0 to 1 | **Ray flip chance, NOPs**. ... and of each NOP: NOPs resist, without being immune. Needs `hazard.rays`. |
 | `hazard.ray_absorb` | number | 1 | 1e-06 to 1000000000 | **Ray absorption, living**. The energy a ray loses to each codon of living code it passes (the least) ... Needs `hazard.rays`. |
 | `hazard.ray_absorb_waste` | number | 2 | 1e-06 to 1000000000 | **Ray absorption, dead**. ... to each codon of dead matter, waste and INERT (more) ... Needs `hazard.rays`. |
 | `hazard.ray_absorb_nop` | number | 8 | 1e-06 to 1000000000 | **Ray absorption, NOPs**. ... and to each NOP, living or dead (the most), so NOP padding shields. Needs `hazard.rays`. |
+| `hazard.ray_indel` | number | 0.1 | 0 to 1 | **Ray indels**. The share of a cosmic ray's hits on living code, while it has hazard.ray_indel_energy left, that copy the codon in place or delete it (half each) instead of flipping a bit: the program grows or shrinks by one, and a copier that copies its own size passes that on. Only in a program with a free codon at one of its ends, else a flip, so neither is likelier (0 = flips only). Needs `hazard.rays`. |
+| `hazard.ray_indel_energy` | number | 256 | 0 to 1000000000 | **Ray indel energy**. The energy a ray needs left at a codon for an indel there (cosmic rays start at hazard.ray_cosmic, so only the first stretch of a cosmic ray's path; static never has this much). Needs `hazard.rays`. |
 | `mem.volatility` | number, log | 1e-05 | 0 to 1 | **Volatility**. The chance per memory page per tick that a wipe starts there, turning whole pages to random codons. |
 | `mem.wipe_pages` | whole | 4 | 1 to 262144 | **Wipe size**. A wipe covers 1 to this many pages. Needs `mem.volatility`. |
 | `mem.wipe_warning` | whole | 0 | 0 to 1000000000 | **Wipe warning**. A wipe lands this many ticks after it's drawn, its pages heating toward hot and flickering more and more until then (0 = at once, with no warning, as before). Needs `mem.volatility`. |

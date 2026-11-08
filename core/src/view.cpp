@@ -393,7 +393,7 @@ void ViewFrame::clear_new() {
 // claims and failures (W3, 124-125; fast_held, 123, is a gauge).
 // Profiles (126-135) are gauges. The live novelty meter's novel_success
 // (138) is a sum; novelty and novel_share (136-137) describe the window.
-// Life history's six (docs/lifehistory-plan.md, 139-144) are sums.
+// Life history's eight (docs/lifehistory-plan.md, 139-146) are sums.
 bool stats_column_is_sum(u32 i) {
     return (i >= 3 && i < 42) || (i >= 49 && i <= 51) || (i >= 60 && i <= 64) || (i >= 67 && i <= 72) ||
            (i >= 74 && i <= 82) || (i >= 83 && i <= 87) || (i >= 91 && i <= 92) || (i >= 93 && i <= 96) ||

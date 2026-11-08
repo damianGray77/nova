@@ -375,6 +375,116 @@ void test_ray_world() {
            static_cast<unsigned long long>(ticks));
 }
 
+// --- Ray indels (R7) ------------------------------------------------------------
+
+// The op names of codons [at, at + n).
+TextBuf names_at(const Soup& s, u32 at, u32 n) {
+    TextBuf t;
+    for (u32 a = at; a < at + n; ++a) {
+        if (a > at)
+            t.append_char(' ');
+        t.append(op_name(s.params().table.op[s.mem()[a]]));
+    }
+    return t;
+}
+
+// R7: an insertion copies the codon in place, the codons after it moving up
+// one into the free codon past the block's end, which the block claims; a
+// deletion moves them back and lets the end go. With the end taken, the
+// start is used instead; with neither free, nothing happens (a flip, in a
+// ray); a one-codon block isn't shortened. Every invariant holds throughout.
+void test_indel_mechanics() {
+    LFix f;
+    CHECK(f.init("world.millicores = 4000\n"));
+    const u32 b = plant(f.s, 100, "INC DEC ZERO ROT PUSH POP SWAP NOT", 500);
+    CHECK(b != kNone);
+    const u32 k = f.s.body(b).blocks;
+    CHECK(f.s.ray_indel(103, true)); // ROT copied in place
+    CHECK(names_at(f.s, 100, 9).view().eq("INC DEC ZERO ROT ROT PUSH POP SWAP NOT"));
+    CHECK(f.s.block(k).start == 100 && f.s.block(k).len == 9 && f.s.body(b).mem == 9 && f.s.owner_body(108) == b);
+    CHECK(soup_ok(f.s));
+    CHECK(f.s.ray_indel(101, false)); // DEC deleted
+    CHECK(names_at(f.s, 100, 8).view().eq("INC ZERO ROT ROT PUSH POP SWAP NOT"));
+    CHECK(f.s.block(k).len == 8 && f.s.body(b).mem == 8 && f.s.owner_body(108) == kNone);
+    CHECK(soup_ok(f.s));
+    // Its end taken (y right after it): the start is used.
+    const u32 x = plant(f.s, 300, "INC DEC ZERO ROT", 500);
+    const u32 y = plant(f.s, 304, "NOT NEG", 500);
+    CHECK(x != kNone && y != kNone);
+    const u32 kx = f.s.body(x).blocks;
+    CHECK(f.s.ray_indel(301, true)); // DEC copied, the block grown to 299
+    CHECK(f.s.block(kx).start == 299 && f.s.block(kx).len == 5);
+    CHECK(names_at(f.s, 299, 5).view().eq("INC DEC DEC ZERO ROT"));
+    CHECK(f.s.ray_indel(301, false)); // a DEC deleted, 299 let go
+    CHECK(f.s.block(kx).start == 300 && f.s.block(kx).len == 4);
+    CHECK(names_at(f.s, 300, 4).view().eq("INC DEC ZERO ROT"));
+    CHECK(soup_ok(f.s));
+    // Hemmed in on both sides: nothing, either way.
+    const u32 w = plant(f.s, 296, "INC INC INC INC", 500); // [296, 300), x at [300, 304), y at [304, 306)
+    CHECK(w != kNone);
+    CHECK(!f.s.ray_indel(302, true) && !f.s.ray_indel(302, false));
+    CHECK(f.s.block(kx).len == 4 && names_at(f.s, 300, 4).view().eq("INC DEC ZERO ROT"));
+    // A one-codon block isn't shortened (it may grow).
+    const u32 one = plant(f.s, 500, "NOT", 500);
+    CHECK(one != kNone && !f.s.ray_indel(500, false) && f.s.ray_indel(500, true) && f.s.body(one).mem == 2);
+    CHECK(soup_ok(f.s));
+    printf("  ray indels: a codon copied in place or deleted, the block growing or shrinking at a free end\n");
+}
+
+// R7: a copier that copies its own size passes an indel on: the budder
+// (SENSE: my size; ALLOC it; DIVIDE) with its SENSE copied in place senses 4
+// and divides off a daughter of 4.
+void test_indel_inherits() {
+    LFix f;
+    CHECK(f.init(""));
+    const u32 b = plant(f.s, 100, kBudder, 1000);
+    CHECK(b != kNone && f.s.ray_indel(100, true));
+    CHECK(names_at(f.s, 100, 4).view().eq("SENSE SENSE ALLOC DIVIDE"));
+    const u64 t = f.first_birth(0, 10);
+    CHECK(t != ~0ull);
+    u32 daughter_len = 0;
+    for (usize i = 0; i < f.s.body_count(); ++i) {
+        const u32 d = f.s.body_at(i);
+        if (d != b && f.s.body(d).blocks != kNone)
+            daughter_len = f.s.block(f.s.body(d).blocks).len;
+    }
+    CHECK_EQ_U64(daughter_len, 4);
+}
+
+// R7 through the tick: energetic cosmic hits on living code make insertions
+// and deletions about equally often (each needs a free end), every invariant
+// holds, and the same seed gives the same world.
+void test_indel_rays() {
+    u64 hashes[2] = {0, 0}, ins = 0, del = 0;
+    for (u32 v = 0; v < 2; ++v) {
+        RFix f;
+        CHECK(f.init("hazard.rot = 0.01\nhazard.ray_flip = 0.25\nhazard.ray_indel = 1\nhazard.ray_indel_energy = 0\n"
+                     "world.millicores = 4000\n",
+                     8192));
+        for (u32 i = 0; i < 64; ++i)
+            CHECK(f.body(i * 128 + 32, 32, 0) != kNone);
+        u64 in = 0, out = 0;
+        for (u64 t = 0; t < 40; ++t) {
+            f.s.tick(t);
+            in += f.s.tally().ray_inserts;
+            out += f.s.tally().ray_deletes;
+        }
+        CHECK(soup_ok(f.s));
+        for (u32 a = 0; a < 8192; ++a)
+            hashes[v] = hashes[v] * 1099511628211ull + f.s.mem()[a] + 7ull * f.s.owner_body(a);
+        if (v == 0) {
+            ins = in;
+            del = out;
+        }
+    }
+    CHECK_EQ_U64(hashes[1], hashes[0]);
+    CHECK(ins > 50 && del > 50);
+    const double ratio = static_cast<double>(ins) / static_cast<double>(del);
+    CHECK(ratio > 0.7 && ratio < 1.4);
+    printf("  ray indels: %llu insertions and %llu deletions in 40 ticks (x%.2f); the same world twice\n",
+           static_cast<unsigned long long>(ins), static_cast<unsigned long long>(del), ratio);
+}
+
 // --- Wipe warnings (W) --------------------------------------------------------
 
 const char* const kWipes = "hazard.rays = false\nmem.wipe_pages = 1\n";
@@ -515,6 +625,7 @@ void test_wipe_world() {
         Run b;
         TextBuf err;
         CHECK(b.init_from_snapshot(snap.data(), snap.size(), 4, &err));
+        CHECK(!b.config().has("hazard.rays")); // (a v6 file: no legacy text)
         b.run_until(ticks);
         CHECK_EQ_U64(b.world().hash(), hashes[0]);
     }
@@ -541,6 +652,8 @@ void test_wipe_world() {
         const bool loaded = b.init_from_snapshot(bytes.data(), bytes.size(), 4, &err);
         CHECK(loaded);
         if (loaded) {
+            // From before rays came on by default (v6): it resumes with them off.
+            CHECK(b.config().get_str("hazard.rays", "").eq("false"));
             b.run_until(200);
             CHECK_EQ_U64(b.world().hash(), a.world().hash());
         }
@@ -788,6 +901,9 @@ void suite_lifehistory() {
     test_ray_static();
     test_ray_determinism();
     test_ray_world();
+    test_indel_mechanics();
+    test_indel_inherits();
+    test_indel_rays();
     test_wipe_lands_late();
     test_wipe_symptoms();
     test_wipe_false_alarms();

@@ -1727,8 +1727,11 @@ treating a short-world winner as an ecological improvement.
 
 Built from `docs/lifehistory-plan.md` revision 2, approved by Damian after
 long2 showed life settling on the shortest copier that works. Each of the
-four is behind its own keys and off by default, so every earlier hash,
-snapshot and replay log holds.
+four is behind its own keys. They were built off by default; then Damian
+turned rays on ("please stop defaulting new features to off", the same
+day), with snapshot v6 and replay v4 marking files written since: older
+ones resume and replay with `hazard.rays = false` unless they name it
+(legacy.h's second text; the test runner's fallback has it too).
 
 **Gestation** (`life.gestation`, `life.gestation_per_codon`). A daughter
 can be divided off only that long after the ALLOC that made her block
@@ -1759,6 +1762,16 @@ codons' worth of reach (3 at the defaults). Four NOPs on each side of a
 32-codon core cut its hits to x0.83 under 64-energy rays; denser dead
 matter (absorb 4) to x0.81.
 
+*Indels* (R7, Damian, after the calibration sweep: flips never change a
+genome's length). A cosmic ray's hit on living code while it has
+`hazard.ray_indel_energy` (256) left is, with chance `hazard.ray_indel`
+(0.1, on), an insertion (the codon copied in place, the block claiming a
+free codon at one end) or a deletion (the block letting one end go), half
+each, and only in a block owning its whole range with a free codon at an
+end, so a crowded soup favours neither. A copier that copies its own size
+passes the change to its daughters. Stats `ray_inserts`, `ray_deletes`;
+balanced in suite lifehistory (183 each).
+
 **Wipe warnings** (`mem.wipe_warning`, `mem.wipe_false_alarms`,
 `mem.wipe_flicker`). A volatility wipe is drawn as before but lands that
 many ticks later; a share (0.25) fade instead, as disasters' false alarms
@@ -1784,7 +1797,7 @@ which the host runs as a CPU's, taking the first lane's BX and CX; the GPU
 kernels agree with the reference word for word. The `sleeper` milestone is
 a gated lineage's first voluntary sleep; stats add `sleeps`, `sleep_woke`
 and `sleep_expired`, after `wipe_warnings`, `wipe_false_alarms` and
-`wipe_flickers`.
+`wipe_flickers` (and then the indels' two).
 
 ## 7. Technical direction [decided via 7.1]
 

@@ -2,7 +2,7 @@
 
 // Versioned binary snapshots (design.md 7.1 H).
 //
-// Format v5 (v4, v3, v2 and v1 are read too, see kSnapshotVersion), all integers little-endian:
+// Format v6 (v5 back to v1 are read too, see kSnapshotVersion), all integers little-endian:
 //   "NOVASNAP"   8-byte magic
 //   u32          format version (kSnapshotVersion)
 //   u32          flags (0)
@@ -46,7 +46,10 @@ namespace nova {
 // v5 (docs/lifehistory-plan.md W5): with wipe warnings on (mem.wipe_warning >
 // 0), each soup's pending wipes after its offline cores. v4 files load with
 // none pending (a v4 run had no warnings: the key came with v5).
-inline constexpr u32 kSnapshotVersion = 5;
+// v6 (2026-11-08) changes no section: rays came on by default, so a v5
+// snapshot or older resumes with hazard.rays = false unless its config names
+// it (legacy.h).
+inline constexpr u32 kSnapshotVersion = 6;
 inline constexpr u32 kSnapshotOldest = 1;
 
 void snapshot_write(const World& world, const Config& cfg, ByteWriter& out);

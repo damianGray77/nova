@@ -44,7 +44,7 @@ void test_log_and_verify() {
     ReplayLog log;
     TextBuf err;
     CHECK(log.load_file(kLogPath, &err));
-    CHECK(log.version() == kReplayVersion && kReplayVersion == 3); // new logs are v3 (legacy.h)
+    CHECK(log.version() == kReplayVersion && kReplayVersion == 4); // new logs are v4 (legacy.h)
     CHECK(log.knob_count() == 2);
     CHECK(log.knob_tick(0) == 100 && log.knob_key(0).eq("demo.send_rate") &&
           log.knob_value(0).eq("0.9"));
@@ -113,8 +113,8 @@ void test_parse_errors() {
     err.clear();
     CHECK(!log.parse("not a log\n", &err));
     err.clear();
-    CHECK(!log.parse("nova-replay 4\n", &err));
-    CHECK(strstr(err.c_str(), "unsupported replay version 4") != nullptr);
+    CHECK(!log.parse("nova-replay 5\n", &err));
+    CHECK(strstr(err.c_str(), "unsupported replay version 5") != nullptr);
     err.clear();
     CHECK(log.parse("nova-replay 3\nevent 5 replicator node=0\n", &err) && log.version() == 3);
     err.clear();
@@ -199,7 +199,8 @@ const char* const kDiskWorld = "seed = 11\nworld.model = soup\nworld.graph = pro
                                "world.soup_size = 2048\nworld.millicores = 600\nworld.disk = 512\nspark.initial = 20\n"
                                "spark.rate = 0.5\naccel.gpu = cpu\naccel.npu = cpu\nwarp.device = cpu\n";
 const char* const kNewFeaturesOff = "spark.activity = 0\nsubstrate.enabled = false\nworld.archive = 0\n"
-                                    "disaster.enabled = false\nmem.fast_share = 0\n"; // (memory tiers: W3)
+                                    "disaster.enabled = false\nmem.fast_share = 0\n" // (memory tiers: W3)
+                                    "hazard.rays = false\n"; // (rays: on by default since 2026-11-08)
 
 // The logged config a parsed log gives to replay, as a Config.
 bool replayed_config(Str text, Config* out) {
@@ -221,21 +222,30 @@ void test_legacy_config() {
         settings = settings && key_find(legacy.key(i)) != nullptr;
     CHECK(settings);
     const usize L = legacy.count();
+    // The second text (rays on by default, 2026-11-08): logs before v4 take it too.
+    Config rays;
+    CHECK(rays.parse(kLegacyRaysDefaults, &pe) && rays.count() == 1 && key_find(rays.key(0)) != nullptr);
+    const usize R = rays.count();
     Config c;
     CHECK(replayed_config("nova-replay 2\nconfig world.model = soup\nconfig world.graph = procedural\n", &c));
-    CHECK(c.count() == 2 + L && c.get_str("spark.activity", "").eq("0") &&
+    CHECK(c.count() == 2 + L + R && c.get_str("spark.activity", "").eq("0") &&
           c.get_str("substrate.enabled", "").eq("false") && c.get_str("world.archive", "").eq("0") &&
-          c.get_str("disaster.enabled", "").eq("false"));
+          c.get_str("disaster.enabled", "").eq("false") && c.get_str("hazard.rays", "").eq("false"));
     CHECK(replayed_config("nova-replay 1\nconfig world.model = soup\nconfig world.graph = landscape\n", &c));
-    CHECK(c.count() == 2 + L); // v1 too
+    CHECK(c.count() == 2 + L + R); // v1 too
     CHECK(replayed_config("nova-replay 3\nconfig world.model = soup\nconfig world.graph = procedural\n", &c));
-    CHECK(c.count() == 2 && !c.has("spark.activity") && !c.has("world.archive") && !c.has("disaster.enabled"));
+    CHECK(c.count() == 2 + R && !c.has("spark.activity") && !c.has("world.archive") && !c.has("disaster.enabled") &&
+          c.get_str("hazard.rays", "").eq("false")); // v3: only the second
+    CHECK(replayed_config("nova-replay 4\nconfig world.model = soup\nconfig world.graph = procedural\n", &c));
+    CHECK(c.count() == 2 && !c.has("hazard.rays")); // v4: neither
+    CHECK(replayed_config("nova-replay 3\nconfig world.model = soup\nconfig hazard.rays = true\n", &c));
+    CHECK(c.get_str("hazard.rays", "").eq("true")); // a log that names it keeps it
     // A setting the log names keeps its value.
     CHECK(replayed_config("nova-replay 2\nconfig world.model = soup\nconfig world.archive = 256\n", &c));
     CHECK(c.get_str("world.archive", "").eq("256") && c.get_str("spark.activity", "").eq("0"));
     // A ring reads no substrate settings, and a demo world none of these.
     CHECK(replayed_config("nova-replay 2\nconfig world.model = soup\n", &c));
-    CHECK(c.count() == L && !c.has("substrate.enabled"));
+    CHECK(c.count() == L + R && !c.has("substrate.enabled"));
     CHECK(replayed_config("nova-replay 2\nconfig seed = 1\n", &c));
     CHECK(c.count() == 1);
 }
