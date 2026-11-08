@@ -9,7 +9,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 - **Families:** a key with a `<placeholder>` stands for one setting per member listed.
 - **Needs:** the switch the setting depends on; it does nothing while that is off.
 
-361 settings, 83 of them from 14 families; 11 hidden (tests and demos).
+363 settings, 83 of them from 14 families; 11 hidden (tests and demos).
 
 ## Contents
 
@@ -322,6 +322,8 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 |---|---|---|---|---|
 | `life.threads_end` | switch | true | true or false | **Halted threads end**. A thread that halts leaves its body; a body with no thread left dies. |
 | `life.frozen_ticks` | whole | 200 | 0 to 1000000000 | **Frozen ticks**. A body none of whose threads ran an instruction for this long dies, or goes dormant (0 = never). |
+| `life.gestation` | whole | 0 | 0 to 1000000000 | **Gestation**. A daughter can be divided off only this many ticks after the ALLOC that made her block; an earlier DIVIDE waits, idle (0 = at once, as before; docs/lifehistory-plan.md G). |
+| `life.gestation_per_codon` | number | 0 | 0 to 1000000 | **Gestation per codon**. ... plus this many ticks per codon of her block. Needs `life.gestation`. |
 
 ## Dormancy
 

@@ -1245,8 +1245,9 @@ void Soup::warp_host(u32 round) {
         // (ENGULF): it runs for whoever holds it now, or not at all.
         if (warps_[w].body == kNone || !warps_[w].wait)
             continue;
+        host_stalled_ = false;
         host_step(w);
-        wagain_[w] = 1;
+        wagain_[w] = host_stalled_ ? 0 : 1; // (gestation, G4: a waiting DIVIDE doesn't run again this tick)
     }
     for (usize i = 0; i < waiting.size(); ++i) // a host instruction not done is retried next tick
         warps_[waiting[i]].wait = 0;

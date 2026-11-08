@@ -48,6 +48,8 @@ add_executable(nova_tests
     test_profiles.cpp
     # The viewer and the live novelty meter (docs/results/viewer.md), in suites view and viewer.
     test_viewer_more.cpp
+    # Gestation, ray hazards, wipe warnings and voluntary dormancy (docs/lifehistory-plan.md).
+    test_lifehistory.cpp
 )
 target_link_libraries(nova_tests PRIVATE nova::core nova_viewer)
 target_compile_features(nova_tests PRIVATE cxx_std_20)
@@ -67,7 +69,8 @@ set(NOVA_SUITES containers str rng config pool world gate snapshot stats replay 
     view viewer landscape budget warp costs ecology keys substrates tiers disasters
     memtiers # memory tiers (W3)
     analysis
-    profiles) # behaviour profiles (A3)
+    profiles # behaviour profiles (A3)
+    lifehistory) # docs/lifehistory-plan.md
 foreach(suite IN LISTS NOVA_SUITES)
     add_test(NAME ${suite} COMMAND nova_tests ${suite})
     set_tests_properties(${suite} PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})

@@ -50,6 +50,7 @@ void suite_disasters();  // docs/disasters-plan.md
 void suite_memtiers();   // memory tiers (docs/world-plan.md W3)
 void suite_analysis(); // learning from the runs (docs/analysis-plan.md)
 void suite_profiles(); // behaviour profiles (docs/analysis-plan.md A3)
+void suite_lifehistory(); // gestation, rays, wipe warnings, voluntary dormancy (docs/lifehistory-plan.md)
 
 namespace {
 
@@ -104,6 +105,7 @@ const Suite kSuites[] = {
     {"memtiers", suite_memtiers},
     {"analysis", suite_analysis},
     {"profiles", suite_profiles},
+    {"lifehistory", suite_lifehistory},
 };
 
 } // namespace

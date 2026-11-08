@@ -252,6 +252,8 @@ struct SoupParams {
     bool bites;           // engulf.bite: ENGULF bites (else it takes whole prey, as in Phase 9)
     bool threads_end;     // life.threads_end: a halted thread leaves its body
     u32 frozen_ticks;     // life.frozen_ticks: a body that runs nothing this long dies (0: never)
+    u32 gestation;        // life.gestation: ticks from a daughter's ALLOC to the earliest DIVIDE (0: none)
+    double gestation_per_codon; // life.gestation_per_codon: ... plus this a codon of her block
     // Dormancy and drift (docs/dormancy-plan.md): a frozen body with reserves
     // goes dormant instead of dying, drifts from node to node, and wakes where
     // a core of its kind is free.
@@ -306,7 +308,8 @@ struct Block {
     u32 body;       // owner, or kNone for a free slot
     u32 next;       // next block of the same body
     u32 owned;      // codons in the range still owned by this block
-    u32 pad;
+    u32 born;       // the tick it was claimed (its low 32 bits) with life.gestation, else 0
+                    // (docs/lifehistory-plan.md G3; 0 in older snapshots: ripe)
 };
 
 struct Body {
@@ -1256,6 +1259,7 @@ class Soup {
     const u32* wres_ = nullptr; // ... and the GPU's copy of it, if its records weren't copied back (warp_set_result)
     Array<u32> wleft_, wsteps_; // per warp slot: quota left, steps run this tick
     Array<u8> wagain_;          // per warp slot: its host instruction was done, run it again this tick
+    bool host_stalled_ = false; // host_step's last instruction was a DIVIDE waiting on gestation (transient)
     Array<u64> wkeys_;          // scratch: a body's blocks by start
     Array<u32> wlens_;
     // scratch (warp_pack's block index): its (start, place) pairs, and for

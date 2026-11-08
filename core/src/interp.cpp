@@ -36,6 +36,10 @@ struct Exec {
     const Action* resolving = nullptr;
     bool deferred = false;
     u32 wslot = kNone; // Phase 9b: the warp, for its host instruction
+    // Gestation (docs/lifehistory-plan.md G1): a DIVIDE before the daughter is
+    // ripe waits at itself, idle; ripe_at is the tick she will be.
+    bool stalled = false;
+    u64 ripe_at = 0;
     // Phase 9c: the costs of the kind of core it runs on (nullptr: a P-core's, the table itself).
     const CostTable* ct = nullptr;
     // --- behaviour profiles (docs/analysis-plan.md A3; profile.h) ------------
@@ -477,6 +481,23 @@ struct Exec {
     // DIVIDE (6.1 "DIVIDE mechanics only"): the most recently allocated block
     // becomes the daughter's body, with one CPU at its start, and she gets
     // share/64 of each non-memory holding (rounded down: zero gives nothing).
+    // Gestation (G1, G2): whether the body's latest block (the daughter DIVIDE
+    // would hand over) is ripe: life.gestation + life.gestation_per_codon x
+    // her length ticks since it was claimed (Block.born). With no daughter it
+    // is "ripe": DIVIDE then fails as before. Not ripe sets ripe_at.
+    bool ripe() {
+        const u32 k = s.bodies_[c.body].latest;
+        if (k == kNone)
+            return true;
+        const Block& b = s.blocks_[k];
+        const double need = static_cast<double>(p.gestation) + p.gestation_per_codon * static_cast<double>(b.len);
+        const double age = static_cast<double>(static_cast<u32>(s.tick_) - b.born);
+        if (age >= need)
+            return true;
+        ripe_at = s.tick_ + static_cast<u64>(ceil(need - age));
+        return false;
+    }
+
     bool divide(u32 share) {
         u32 parent = c.body;
         u32 k = s.bodies_[parent].latest;
@@ -1210,7 +1231,7 @@ struct Exec {
         b2.len = hi - lo;
         b2.body = s.blocks_[k].body;
         b2.owned = moved;
-        b2.pad = 0;
+        b2.born = s.blocks_[k].born; // (a bitten piece keeps its block's age)
         Block& b1 = s.blocks_[k];
         if (high) {
             b1.len = a - start;
@@ -2253,6 +2274,12 @@ struct Exec {
             profile_step(*prof, probe, s.tally_, op, ip, ok, next, c.cx, resolving != nullptr, self_load);
         if (deferred) // Phase 9: it started an action; the CPU waits here, at it, until its end
             return 0;
+        if (stalled) { // gestation (G1): it waits at the DIVIDE, idle, for the rest of the tick
+            stalled = false;
+            c.yielded = 1;
+            c.ip = ip;
+            return p.cost.timed ? costs().alu : 1;
+        }
         if (p.cost.timed) { // Phase 9: world time (the GPU verb adds its devices' own, 9b)
             const u64 t = own + extra_ps();
             cost = t > 0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<u32>(t);
@@ -2339,6 +2366,13 @@ struct Exec {
             ok = alloc();
             break;
         case Op::divide: {
+            // Gestation (G1): before she is ripe the DIVIDE waits, at itself,
+            // costing nothing; it runs again when its thread next runs.
+            if (p.gestation > 0 && !resolving && !ripe()) {
+                next = ip;
+                stalled = true;
+                break;
+            }
             // BX is the destination: 0 = here, k = neighbour k (nearest first).
             // BX 0-3 go through the selector map; BX >= 4 names neighbour BX
             // directly (Phase 3). Without dispersal anything but here fails.
@@ -2996,6 +3030,14 @@ bool Soup::host_step(u32 w, const Action* resolving) {
     const bool ok = e.exec_op(op, minip, &next, &cost);
     if (prof)
         profile_step(*prof, probe, tally_, op, minip, ok, next, e.c.cx, resolving != nullptr, e.self_load);
+    if (e.stalled) { // gestation (G1, G4): the warp waits at its DIVIDE, lanes unchanged, until she is ripe
+        if (p_->cost.timed)
+            wuntil_[w] = e.ripe_at;
+        host_stalled_ = true;
+        warps_[w].wait = 0;
+        ++tally_.warp_host;
+        return true;
+    }
     if (e.deferred) { // Phase 9b: an action began; the warp waits at the instruction until its end
         wuntil_[w] = actions_.back().end;
         warps_[w].wait = 0;

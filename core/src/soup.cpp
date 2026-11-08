@@ -352,6 +352,8 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     p->bites = key_flag(cfg, "engulf.bite");
     p->threads_end = key_flag(cfg, "life.threads_end");
     p->frozen_ticks = key_u32(cfg, "life.frozen_ticks");
+    p->gestation = key_u32(cfg, "life.gestation"); // docs/lifehistory-plan.md G
+    p->gestation_per_codon = key_f64(cfg, "life.gestation_per_codon");
     // Dormancy and drift (docs/dormancy-plan.md): the watchdog's frozen body
     // goes dormant instead of dying, if it has reserves to spend.
     p->dormancy = key_flag(cfg, "life.dormancy");
@@ -851,7 +853,7 @@ u32 Soup::new_block(u32 start, u32 len, u32 body) {
     bl.body = body;
     bl.next = kNone;
     bl.owned = len;
-    bl.pad = 0;
+    bl.born = p_->gestation > 0 ? static_cast<u32>(tick_) : 0; // (G3: only then, so hashes hold without it)
     for (u32 a = start; a < start + len; ++a)
         owner_[a] = k;
     if (!stamp_.empty()) // a claim makes it wholly the claimer's (Damian)

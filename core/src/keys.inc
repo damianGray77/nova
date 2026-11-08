@@ -544,6 +544,11 @@ NOVA_FLAG("life.threads_end", true, 0, "Life and death", "Halted threads end", "
           "A thread that halts leaves its body; a body with no thread left dies.")
 NOVA_WHOLE("life.frozen_ticks", 200, 0, 1000000000, 0, "Life and death", "Frozen ticks", "",
            "A body none of whose threads ran an instruction for this long dies, or goes dormant (0 = never).")
+NOVA_WHOLE("life.gestation", 0, 0, 1000000000, 0, "Life and death", "Gestation", "",
+           "A daughter can be divided off only this many ticks after the ALLOC that made her block; an earlier "
+           "DIVIDE waits, idle (0 = at once, as before; docs/lifehistory-plan.md G).")
+NOVA_NUMBER("life.gestation_per_codon", 0, 0, 1000000, 0, "Life and death", "Gestation per codon", "life.gestation",
+            "... plus this many ticks per codon of her block.")
 
 // ---------------------------------------------------------------------------
 // Dormancy
