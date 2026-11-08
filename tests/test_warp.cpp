@@ -713,7 +713,238 @@ void test_off_is_phase7() {
 
 } // namespace
 
+// --- Turing completeness, shown ---------------------------------------------------
+// Any two-symbol Turing machine compiles into Nova code (tm_compile): its tape
+// is a stretch of the body's own memory (codon 0 a blank, codon 1 a mark), its
+// head's address stays in AX, and each state is a block of code -- point the
+// read head at the cell (SETH) and READ it, IFZ to the symbol's case, then
+// point the write head there, WRITE, move AX a cell, and jump to the next
+// state's label (a template, as every Nova jump). The halt state is a jump to
+// itself. The same code runs on a CPU and on a warp: with S lanes, lane L's
+// heads sit L codons past AX (SETH), so the tape is interleaved, cell i of
+// lane L at i x S + L, and each lane runs its own copy of the machine.
+// Reading, writing at a computed address, a conditional branch and an
+// unbounded loop are all a Turing machine needs, so either form simulates any
+// machine its memory holds.
+struct TmRule {
+    u8 write, right, next; // next: a state, or kTmHalt
+};
+constexpr u8 kTmHalt = 0xFF;
+struct TuringMachine {
+    u32 states;
+    TmRule rule[4][2]; // [state][symbol read]
+};
+
+// Labels and their jump templates: 5 codons, a label starting NOP1 (so no
+// template, no tape cell and no stretch of NOP0s is one), its template the
+// complement. Ids: the tape 0 (the one label NOPs can follow -- in nova_v1 a
+// blank is NOP0 -- so its shifted windows start NOP0 and are no label),
+// states 1-4, each state's blank case 5-8, the halt 9.
+void tm_bits(TextBuf& p, u32 id, bool label) {
+    p.append(label ? " NOP1" : " NOP0");
+    for (int k = 3; k >= 0; --k)
+        p.append((((id >> k) & 1) != 0) == label ? " NOP1" : " NOP0");
+}
+// CX = k (ZERO, then a SHL and maybe an INC a bit, from the top bit).
+void tm_const(TextBuf& p, u32 k) {
+    p.append(" ZERO");
+    int top = 31;
+    while (top > 0 && !((k >> top) & 1))
+        --top;
+    for (int b = top; b >= 0; --b)
+        p.append(((k >> b) & 1) ? " SHL INC" : " SHL");
+}
+// AX += k or AX -= k, keeping AX's other registers' roles: CX = k, then
+// (h, B, k) -ROT-> (k, h, B) -SWAP-> (h, k, B) -ADD/SUB-> CX = h +- k -ROT-> (h +- k, h, k).
+void tm_move(TextBuf& p, u32 k, bool right) {
+    tm_const(p, k);
+    p.append(right ? " ROT SWAP ADD ROT" : " ROT SWAP SUB ROT");
+}
+
+struct TmProgram {
+    TextBuf names;  // the genome, as instruction names
+    u32 tape = 0;   // where the tape's first cell is, from the genome's start
+    u32 halt = 0;   // where the halt state's jump is
+};
+
+// The machine, the stride (lanes), tape cells, the cell the head starts on,
+// and the name of codon 0 in the table (the blank).
+TmProgram tm_compile(const TuringMachine& m, u32 stride, u32 cells, u32 start, const char* blank) {
+    TmProgram out;
+    TextBuf& p = out.names;
+    u32 n = 0; // codons so far (every name is one)
+    auto count = [&]() {
+        n = 0;
+        for (usize i = 0; i < p.size(); ++i)
+            n += p.c_str()[i] == ' ';
+    };
+    p.append(" FIND");
+    tm_bits(p, 0, false); // AX = the tape's first cell
+    tm_move(p, start * stride, true);
+    p.append(" JMP");
+    tm_bits(p, 1, false);
+    p.append(" ZERO"); // (never run: ends the template)
+    for (u32 s = 0; s < m.states; ++s) {
+        for (u32 sym = 2; sym-- > 0;) { // the mark's case falls through from IFZ, the blank's has its own label
+            if (sym == 1) {
+                tm_bits(p, 1 + s, true);
+                p.append(" ZERO ROT SWAP SETH READ"); // read head at AX; CX = the cell
+                p.append(" IFZ JMP");                // a blank: to its case; a mark: the JMP skipped, on
+                tm_bits(p, 5 + s, false);
+            } else {
+                tm_bits(p, 5 + s, true);
+            }
+            const TmRule& r = m.rule[s][sym];
+            p.append(" ZERO INC ROT SWAP SETH ZERO"); // write head at AX, CX = the symbol
+            if (r.write)
+                p.append(" INC");
+            p.append(" WRITE");
+            tm_move(p, stride, r.right != 0);
+            p.append(" JMP");
+            tm_bits(p, r.next == kTmHalt ? 9 : 1 + r.next, false);
+            p.append(" ZERO");
+        }
+    }
+    tm_bits(p, 9, true); // the halt: a jump to itself
+    count();
+    out.halt = n;
+    p.append(" JMP");
+    tm_bits(p, 9, false);
+    p.append(" ZERO");
+    tm_bits(p, 0, true); // the tape
+    count();
+    out.tape = n;
+    for (u32 i = 0; i < cells * stride; ++i) {
+        p.append_char(' ');
+        p.append(blank);
+    }
+    return out;
+}
+
+// The machine on a C++ tape, the answer the soup must reach.
+u32 tm_run(const TuringMachine& m, u32 cells, u32 start, u8* tape, u32* head_lo, u32* head_hi) {
+    u32 s = 0, h = start, steps = 0;
+    *head_lo = *head_hi = h;
+    while (s != kTmHalt && steps < 1000000) {
+        const TmRule& r = m.rule[s][tape[h]];
+        tape[h] = r.write;
+        h = r.right ? h + 1 : h - 1;
+        s = r.next;
+        ++steps;
+        *head_lo = h < *head_lo ? h : *head_lo;
+        *head_hi = h > *head_hi ? h : *head_hi;
+        if (h >= cells)
+            return 0; // (off the tape: the test's machine never is)
+    }
+    return steps;
+}
+
+void test_turing_machine() {
+    // The 4-state busy beaver (Brady): 107 steps, 13 marks.
+    const TuringMachine bb4 = {4,
+                               {{{1, 1, 1}, {1, 0, 1}},            // A: 0 -> 1RB, 1 -> 1LB
+                                {{1, 0, 0}, {0, 0, 2}},            // B: 0 -> 1LA, 1 -> 0LC
+                                {{1, 1, kTmHalt}, {1, 0, 3}},      // C: 0 -> 1RH, 1 -> 1LD
+                                {{1, 1, 3}, {0, 1, 0}}}};          // D: 0 -> 1RD, 1 -> 0RA
+    // On a roomy tape first, for the head's range; then the tape the soup
+    // gets, that range and a cell each side (a 32-lane warp's tape is 32
+    // codons a cell, and a genome is at most 1,024).
+    u8 roomy[64] = {};
+    u32 lo = 0, hi = 0;
+    const u32 steps = tm_run(bb4, 64, 32, roomy, &lo, &hi);
+    const u32 cells = hi - lo + 3, start = 32 - lo + 1;
+    u8 want[64] = {};
+    u32 lo2 = 0, hi2 = 0;
+    CHECK(cells <= 24 && tm_run(bb4, cells, start, want, &lo2, &hi2) == steps);
+    u32 marks = 0;
+    for (u32 i = 0; i < cells; ++i)
+        marks += want[i];
+    CHECK(steps == 107 && marks == 13 && lo2 > 0 && hi2 + 1 < cells);
+
+    AccelDevice devs[16];
+    const u32 nd = accel_list(devs, 16);
+    bool gpu = false;
+    for (u32 i = 0; i < nd; ++i)
+        gpu = gpu || (devs[i].gpu && devs[i].hardware);
+    struct Case {
+        const char* what;
+        const char* table;
+        const char* blank;
+        u32 lanes;     // 0: a CPU
+        const char* device;
+    };
+    const Case cases[] = {
+        {"a CPU (nova_v2)", "nova_v2", "INERT", 0, "cpu"},
+        {"a CPU (nova_v1)", "nova_v1", "NOP0", 0, "cpu"},
+        {"a CPU (nova_v1_plain)", "nova_v1_plain", "NOP0", 0, "cpu"},
+        {"a CPU (nova_v1_inv2)", "nova_v1_inv2", "NOP0", 0, "cpu"},
+        {"a 1-lane warp, the reference", "nova_v2", "INERT", 1, "cpu"},
+        {"a 32-lane warp, the reference", "nova_v2", "INERT", 32, "cpu"},
+        {"a 32-lane warp, the GPU (every round checked)", "nova_v2", "INERT", 32, "gpu"},
+    };
+    const u32 at = 100;
+    for (const Case& c : cases) {
+        if (strcmp(c.device, "gpu") == 0 && !gpu) {
+            printf("  turing: no hardware GPU, the GPU's case skipped\n");
+            continue;
+        }
+        const u32 stride = c.lanes ? c.lanes : 1;
+        const TmProgram prog = tm_compile(bb4, stride, cells, start, c.blank);
+        TextBuf cfg;
+        cfg.append("seed = 3\nworld.model = soup\nworld.nodes = 1\nworld.soup_size = 4096\nworld.millicores = 1000\n"
+                   "world.gpus = 64\ngpu.warps = true\nspark.initial = 0\nspark.rate = 0\nhazard.copy = 0\n"
+                   "hazard.flaw = 0\nhazard.rot = 0\nheat.enabled = false\nmem.upkeep = 0\nsalvage.ratio = 0\n"
+                   "warp.step_cost = 1\nwarp.lane_cost = 0\nwarp.capacity = 10000\nwarp.verify = 1\ncpu.instr_per_core = 10000\n");
+        cfg.append("isa.table = ");
+        cfg.append(c.table);
+        cfg.append("\nwarp.lanes = ");
+        cfg.append_u64(stride);
+        cfg.append("\nwarp.device = ");
+        cfg.append(c.device);
+        cfg.append("\nseed.at = ");
+        cfg.append_u64(at);
+        cfg.append(c.lanes ? "\nseed.form = gpu\nseed.millicores = 0\nseed.gpus = 1\n"
+                           : "\nseed.form = cpu\nseed.millicores = 1000\nseed.gpus = 0\n");
+        cfg.append("seed.genome =");
+        cfg.append(prog.names.view());
+        cfg.append_char('\n');
+        Run run;
+        if (!make_run(run, cfg.c_str(), 4)) {
+            CHECK(false);
+            continue;
+        }
+        run.run_until(6); // (107 steps take some 4,000 instructions: a tick at these budgets)
+        World& w = run.world();
+        w.warp_sync(0);
+        const Soup& s = w.node_soup(0);
+        // Every lane's tape is the machine's, and the code stands at the halt.
+        bool tape_ok = true;
+        for (u32 i = 0; i < cells; ++i)
+            for (u32 l = 0; l < stride; ++l)
+                tape_ok = tape_ok && s.mem()[at + prog.tape + i * stride + l] == want[i];
+        bool halted = s.body_count() == 1;
+        if (halted) {
+            const u32 b = s.body_at(0);
+            if (c.lanes) {
+                const u32 wp = s.warp_head(b);
+                halted = wp != kNone;
+                for (u32 l = 0; halted && l < stride; ++l)
+                    halted = s.lane(wp, l).ip == at + prog.halt && !s.lane(wp, l).halted;
+            } else {
+                halted = s.cpu(s.body(b).cpus).ip == at + prog.halt;
+            }
+        }
+        printf("  turing: the 4-state busy beaver (%u steps, %u marks) on %s: %s, %s\n", steps, marks, c.what,
+               tape_ok ? "the same tape" : "a DIFFERENT tape", halted ? "halted" : "NOT halted");
+        CHECK(tape_ok && halted);
+        CHECK(w.warp_mismatches() == 0 && !w.warp_failed());
+        if (strcmp(c.device, "gpu") == 0)
+            CHECK(w.warp_gpu_rounds() > 0 && w.warp_verified() == w.warp_gpu_rounds());
+    }
+}
+
 void suite_warp() {
+    test_turing_machine();
     test_lockstep();
     test_divergence();
     test_offset_copy();
