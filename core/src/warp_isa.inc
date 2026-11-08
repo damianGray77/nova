@@ -1096,11 +1096,16 @@ void w_run_warp(uint b, uint wi) {
                 IMG(w_page(e, minip) + WP_FETCH) += 1u; // one fetch serves every lane
             ONCE_END
         }
+        // The address after the step's instruction: the same for every lane
+        // that runs it (they all stand at minip), so it is found once -- on
+        // the CPU reference, once a step instead of once a lane (a third of
+        // its time on a mature world's round).
+        uint nx_step = w_adv(b, minip, 1u);
         LANE_BEGIN(lane0)
             gs_wa[l] = W_NONE;
             gs_wv[l] = 0u;
             if (L.halted == 0u && L.yielded == 0u && L.ip == minip) {
-                uint nx = w_adv(b, minip, 1u);
+                uint nx = nx_step;
                 uint wto = W_NONE;
                 uint wval = 0u;
                 bool ok = false;
