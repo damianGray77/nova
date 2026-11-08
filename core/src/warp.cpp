@@ -681,6 +681,7 @@ void Soup::build_warp_consts() {
 bool Soup::warp_pack(u32 round) {
     Lap lap(timing_on_, &timing_.pack);
     wimg_.clear();
+    wres_ = nullptr;
     wrec_.clear();
     wbody_.clear();
     wwarp_.clear();
@@ -1106,7 +1107,6 @@ void warp_run_reference(u32* img, const u32* cst, Lane* lanes, u32 rec) {
 void Soup::warp_unpack(bool all_on_gpu) {
     Lap lap(timing_on_, &timing_.unpack);
     const u32 L = p_->warp_lanes;
-    const u32* I = wimg_.data();
     const bool stamps = !stamp_.empty();
     u32 chain = 0;
     if (wround_ == 0 && wbody_chain_.size() < bodies_.size())
@@ -1114,6 +1114,7 @@ void Soup::warp_unpack(bool all_on_gpu) {
     for (usize r = 0; r < wrec_.size(); ++r) {
         const u32 rec = wrec_[r], b = wbody_[r];
         const bool on_gpu = all_on_gpu || (r < wrec_gpu_.size() && wrec_gpu_[r]);
+        const u32* I = on_gpu && wres_ ? wres_ : wimg_.data(); // (where the round left its words)
         u32 body_steps = 0;
         const u32 nblk = I[rec + WB_NBLK], blk = I[rec + WB_BLK];
         for (u32 j = 0; j < nblk; ++j) {
@@ -1225,11 +1226,11 @@ void Soup::resolve_warp_actions() {
 void Soup::warp_host(u32 round) {
     Lap lap(timing_on_, &timing_.host);
     (void)round;
-    const u32* I = wimg_.data();
     const u32 L = p_->warp_lanes;
     Array<u32> waiting; // in the schedule's order, then each body's
     for (usize r = 0; r < wrec_.size(); ++r) {
         const u32 rec = wrec_[r];
+        const u32* I = warp_round_image(r);
         const u32 nw = I[rec + WB_NWARP];
         for (u32 i = 0; i < nw; ++i) {
             const u32 w = I[rec + WB_WARPS + i * WW_SIZE + WW_LANE0] / L;

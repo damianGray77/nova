@@ -205,7 +205,8 @@ class WarpGpu {
     // GPU keeps every node's lanes between rounds (by node and warp slot):
     // submit() sends the jobs' images and the lanes listed in each job's
     // `send`, and starts every record running; finish() waits for it and
-    // copies the images back. `pool` (if given) does the copying in parallel.
+    // copies the images back (or leaves them for result()). `pool` (if
+    // given) does the copying in parallel.
     // False on a device error: the lanes the GPU held are lost with it.
     // Batches (the overlap plan): up to kBatches rounds in flight at once,
     // each on its own queue, for disjoint sets of nodes; the GPU may run
@@ -213,7 +214,14 @@ class WarpGpu {
     static constexpr u32 kBatches = 2;
     bool submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, TextBuf* err,
                 class ThreadPool* pool = nullptr, u32 batch = 0);
-    bool finish(TextBuf* err, class ThreadPool* pool = nullptr, u32 batch = 0);
+    // copy_back false: the images stay where they came back instead, read
+    // through result() (no copy of the whole round into the jobs' images,
+    // 91 MB a round on a mature world), until the batch's next submit().
+    bool finish(TextBuf* err, class ThreadPool* pool = nullptr, u32 batch = 0, bool copy_back = true);
+    // After finish(..., false): job j's image as the GPU left it (its
+    // records' words at their offsets in the job's image; the words of
+    // records it didn't run are the job's as sent), or null.
+    const u32* result(u32 j, u32 batch = 0) const;
     // Brings warps' lanes from the GPU into the host's copies (n of them), on
     // `batch`'s queue (not in flight; the other batch may be).
     bool fetch(const WarpFetch* list, u32 n, TextBuf* err, u32 batch = 0);

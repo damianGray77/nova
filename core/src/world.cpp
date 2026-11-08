@@ -2007,10 +2007,16 @@ bool World::warp_round0_groups(ThreadPool& pool, double* cpu_s, double* gpu_s, d
     const bool one_round = soup_params_.warp_rounds <= 1;
     for (u32 g = 0; g < 2; ++g) {
         const Array<u32>& gn = warp_grp_nodes_[g];
-        if (sent[g] && !warp_gpu_.finish(&why, &pool, g)) {
+        // (Its records read where they came back, as warp_step's: a tick
+        // that verifies runs one group.)
+        if (sent[g] && !warp_gpu_.finish(&why, &pool, g, false)) {
             warp_fail(why.view());
             return false;
         }
+        const Array<WarpJob>& jobs = warp_grp_jobs_[g];
+        if (sent[g])
+            for (usize i = 0; i < jobs.size(); ++i)
+                soups_[warp_grp_job_node_[g][i]].warp_set_result(warp_gpu_.result(static_cast<u32>(i), g));
         lap(nullptr, &gpu);
         warp_run_nodes(pool, gn, &World::warp_unpack_task);
         lap(&StepProfile::w_unpack, &cpu);
@@ -2018,18 +2024,20 @@ bool World::warp_round0_groups(ThreadPool& pool, double* cpu_s, double* gpu_s, d
         Array<u32>& fn = warp_fetch_node_;
         fl.clear();
         fn.clear();
-        const Array<WarpJob>& jobs = warp_grp_jobs_[g];
         for (usize i = 0; i < jobs.size(); ++i) {
             const WarpJob& j = jobs[i];
             const u32 n = warp_grp_job_node_[g][i];
             Soup& s = soups_[n];
             const u32 L = s.lanes_per_warp();
+            const u32* G = sent[g] ? warp_gpu_.result(static_cast<u32>(i), g) : nullptr;
+            if (!G) // (none ran)
+                G = j.img;
             for (u32 k = 0; k < j.nrec; ++k)
-                for (u32 q = 0; q < j.img[j.recs[k] + WB_NWARP]; ++q) {
+                for (u32 q = 0; q < G[j.recs[k] + WB_NWARP]; ++q) {
                     const u32 e = j.recs[k] + WB_WARPS + q * WW_SIZE;
-                    if (!j.img[e + WW_WAIT])
+                    if (!G[e + WW_WAIT])
                         continue;
-                    const u32 w = j.img[e + WW_LANE0] / L;
+                    const u32 w = G[e + WW_LANE0] / L;
                     fl.push(WarpFetch{n, w, s.lanes_mut().data() + static_cast<usize>(w) * L});
                     fn.push(n);
                 }
@@ -2310,10 +2318,18 @@ void World::warp_step(ThreadPool& pool, bool use_gpu) {
                 for (usize i = 0; i < warp_ref_time_.size(); ++i)
                     prof_->n_ref += warp_ref_time_[i];
         }
-        if (!warp_jobs_.empty() && !warp_gpu_.finish(&why, &pool)) {
+        // The GPU's records are read where they came back, not copied into
+        // the nodes' images first (2026-11-08: 2.5 ms a round on a mature
+        // world); warp.verify compares and restores whole images, so it
+        // has them copied.
+        const bool in_place = !warp_verifying_;
+        if (!warp_jobs_.empty() && !warp_gpu_.finish(&why, &pool, 0, !in_place)) {
             warp_fail(why.view());
             return;
         }
+        if (in_place)
+            for (usize i = 0; i < warp_jobs_.size(); ++i)
+                soups_[warp_job_node_[i]].warp_set_result(warp_gpu_.result(static_cast<u32>(i)));
         const double round_s = clock_seconds() - t; // the GPU and the CPU at once
         gpu_s += round_s;
         t = clock_seconds();
@@ -2496,12 +2512,15 @@ void World::warp_step(ThreadPool& pool, bool use_gpu) {
                 const u32 n = warp_job_node_[i];
                 Soup& s = soups_[n];
                 const u32 L = s.lanes_per_warp();
+                const u32* G = warp_gpu_.result(static_cast<u32>(i)); // (the GPU's records, in place)
+                if (!G) // (none ran)
+                    G = j.img;
                 for (u32 k = 0; k < j.nrec; ++k)
-                    for (u32 q = 0; q < j.img[j.recs[k] + WB_NWARP]; ++q) {
+                    for (u32 q = 0; q < G[j.recs[k] + WB_NWARP]; ++q) {
                         const u32 e = j.recs[k] + WB_WARPS + q * WW_SIZE;
-                        if (!j.img[e + WW_WAIT])
+                        if (!G[e + WW_WAIT])
                             continue;
-                        const u32 w = j.img[e + WW_LANE0] / L;
+                        const u32 w = G[e + WW_LANE0] / L;
                         fl.push(WarpFetch{n, w, s.lanes_mut().data() + static_cast<usize>(w) * L});
                         fn.push(n);
                     }

@@ -689,6 +689,80 @@ void test_gpu_div_loop() {
     }
 }
 
+// The world reads a round where it came back (WarpGpu::finish with copy_back
+// false, 2026-11-08): result() holds exactly the words a copied-back round
+// leaves in the image, the job's own image stays as it was sent, and a soup
+// unpacked from result() ends the tick as one unpacked from the copy.
+void test_gpu_results_in_place() {
+    AccelDevice devs[16];
+    const u32 n = accel_list(devs, 16);
+    u32 dev = kNone;
+    for (u32 i = 0; i < n && dev == kNone; ++i)
+        if (devs[i].gpu && devs[i].hardware)
+            dev = i;
+    if (dev == kNone)
+        return;
+    WarpGpu gpu;
+    TextBuf err;
+    CHECK(gpu.open(dev, 32, &err));
+    if (!gpu.is_open())
+        return;
+    WFix f[2]; // the same body twice: one round copied back, one left in place
+    WarpJob j[2] = {};
+    Array<u32> send[2];
+    for (u32 k = 0; k < 2; ++k) {
+        CHECK(f[k].init("DIV INC ROT NOP1 IFZ NOP0 DIV SWAP", 32, 300));
+        for (u32 l = 0; l < 32; ++l) {
+            Lane& x = f[k].lane(l);
+            x.ax = 7 + l;
+            x.bx = 1000 * l + 3;
+            x.cx = 11;
+        }
+        f[k].s.tick_first(0);
+        CHECK(f[k].s.warp_pack(0));
+        send[k].push(f[k].w);
+        j[k].node = k; // (the GPU keeps each node's lanes apart)
+        j[k].img = f[k].s.warp_image().data();
+        j[k].img_words = static_cast<u32>(f[k].s.warp_image().size());
+        j[k].recs = f[k].s.warp_records().data();
+        j[k].nrec = static_cast<u32>(f[k].s.warp_records().size());
+        j[k].lanes = f[k].s.lanes_mut().data();
+        j[k].nlanes = static_cast<u32>(f[k].s.lanes_mut().size());
+        j[k].send = send[k].data();
+        j[k].nsend = 1;
+    }
+    Array<u32> as_sent;
+    as_sent.assign(f[1].s.warp_image().data(), f[1].s.warp_image().size());
+    const u32* cst = f[0].s.warp_consts().data();
+    const u32 ncst = static_cast<u32>(f[0].s.warp_consts().size());
+    CHECK(gpu.run(cst, ncst, &j[0], 1, &err)); // copied back into f[0]'s image
+    CHECK(gpu.submit(cst, ncst, &j[1], 1, &err));
+    CHECK(gpu.finish(&err, nullptr, 0, false)); // left where it came back
+    const u32* res = gpu.result(0);
+    CHECK(res != nullptr && gpu.result(1) == nullptr);
+    const Array<u32>& copied = f[0].s.warp_image();
+    CHECK(copied.size() == as_sent.size() && j[1].nrec == 1 && j[1].recs[0] == 0); // (one record: all of the image)
+    CHECK(memcmp(res, copied.data(), copied.size() * 4) == 0);
+    CHECK(memcmp(copied.data(), as_sent.data(), as_sent.size() * 4) != 0); // (the round changed it)
+    CHECK(memcmp(f[1].s.warp_image().data(), as_sent.data(), as_sent.size() * 4) == 0); // not copied
+    f[1].s.warp_set_result(res);
+    for (u32 k = 0; k < 2; ++k) {
+        f[k].s.warp_record_on_gpu().fill(1);
+        f[k].s.warp_unpack();
+        WarpFetch q = {k, f[k].w, f[k].s.lanes_mut().data() + static_cast<usize>(f[k].w) * 32};
+        CHECK(gpu.fetch(&q, 1, &err));
+        f[k].s.set_lane_state(f[k].w, Soup::kLanesBoth);
+        f[k].s.warp_host(0);
+        f[k].s.tick_second();
+    }
+    CHECK(f[0].s.tally().warp_steps > 0 && f[1].s.tally().warp_steps == f[0].s.tally().warp_steps);
+    Hasher h0, h1;
+    f[0].s.hash_into(h0);
+    f[1].s.hash_into(h1);
+    CHECK_EQ_U64(h1.finish(), h0.finish());
+    printf("  warp GPU results in place: the same words as copied back, and the same soup after the tick\n");
+}
+
 // gpu.warps = false is Phase 7 exactly: the same hash as no key at all.
 void test_off_is_phase7() {
     TextBuf off;
@@ -963,5 +1037,6 @@ void suite_warp() {
     test_determinism();
     test_gpu_device();
     test_gpu_div_loop();
+    test_gpu_results_in_place();
     test_off_is_phase7();
 }

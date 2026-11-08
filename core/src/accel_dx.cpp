@@ -1705,6 +1705,8 @@ struct WarpBatch {
     // A round's buffers.
     ID3D12Resource *up = nullptr, *img = nullptr, *rb = nullptr;
     u64 up_cap = 0, img_cap = 0, rb_cap = 0;
+    const u32* rb_map = nullptr; // the readback, left mapped by finish(..., false) until the next submit
+    Array<u64> back_out;         // finish's scratch: per job, its steps, longest body and largest record
     ID3D12Resource* old_heap = nullptr; // a heap this round replaced: kept until it finishes
     // The round in flight, and whether it moved every node's lanes into a new
     // heap first (then nothing may touch the heap until it is done).
@@ -1977,6 +1979,11 @@ void WarpGpu::close() {
         WarpBatch& B = m->batch[b];
         if (B.busy && B.q)
             B.q->wait(nullptr);
+        if (B.rb_map) {
+            D3D12_RANGE none = {0, 0};
+            B.rb->Unmap(0, &none);
+            B.rb_map = nullptr;
+        }
         release(B.qh);
         release(B.qrb);
         release(B.up);
@@ -2008,14 +2015,13 @@ double WarpGpu::timestamp_hz() const { return impl_ ? static_cast<double>(impl_-
 
 namespace {
 
-// The round's copying, a job (node) at a time, in parallel: its image and the
-// lanes it sends into the upload buffer; its image back out of readback.
+// The round's copying in, a job (node) at a time, in parallel: its image and
+// the lanes it sends into the upload buffer.
 struct WarpCopy {
     const WarpJob* jobs;
     const u64* img_at;  // per job: its image's byte offset in the buffer
     const u64* send_at; // per job: where its sent lanes go, in bytes
     unsigned char* buf;
-    const unsigned char* rbuf;
     u32 lanes; // a warp's
     u64 size;  // the buffer's bytes
 };
@@ -2034,14 +2040,39 @@ void warp_copy_in(void* ctx, u32 j) {
     }
 }
 
-// Only the records the GPU ran come back: the CPU threads may be running the
-// node's others in the same image meanwhile (the per-body split).
-void warp_copy_out(void* ctx, u32 j) {
-    const WarpCopy& c = *static_cast<const WarpCopy*>(ctx);
+// A job's round back, in parallel: its records' warp steps (the body's, its
+// longest, and its largest record, for the stats and the split's model), and,
+// if asked, the records copied back into its image. Only the records the GPU
+// ran come back: the CPU threads may be running the node's others in the
+// same image meanwhile (the per-body split).
+struct WarpBack {
+    const WarpJob* jobs;
+    const u64* img_at; // per job: its image's word offset in the readback
+    const u32* back;   // the readback
+    bool copy;
+    u64* out; // per job: steps, longest body's steps, largest record's words
+};
+
+void warp_back_task(void* ctx, u32 j) {
+    const WarpBack& c = *static_cast<const WarpBack*>(ctx);
     const WarpJob& job = c.jobs[j];
-    for (u32 r = 0; r < job.nrec; ++r)
-        memcpy(job.img + job.recs[r], c.rbuf + c.img_at[j] + static_cast<u64>(job.recs[r]) * 4,
-               static_cast<usize>(warp_job_rec_words(job, r)) * 4);
+    const u32* img = c.back + c.img_at[j];
+    u64 steps = 0, longest = 0, rmax = 0;
+    for (u32 r = 0; r < job.nrec; ++r) {
+        const u32 words = warp_job_rec_words(job, r);
+        const u32* rec = img + job.recs[r];
+        if (c.copy)
+            memcpy(job.img + job.recs[r], rec, static_cast<usize>(words) * 4);
+        u64 body = 0;
+        for (u32 i = 0; i < rec[WB_NWARP]; ++i)
+            body += rec[WB_WARPS + i * WW_SIZE + WW_STEPS];
+        steps += body;
+        longest = body > longest ? body : longest;
+        rmax = words > rmax ? words : rmax;
+    }
+    c.out[3 * j] = steps;
+    c.out[3 * j + 1] = longest;
+    c.out[3 * j + 2] = rmax;
 }
 
 } // namespace
@@ -2054,6 +2085,11 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
     WarpBatch& B = m->batch[batch];
     Queue& Q = *B.q;
     const u32 wl = m->lanes;
+    if (B.rb_map) { // the last round's results, read in place, are done with
+        D3D12_RANGE none = {0, 0};
+        B.rb->Unmap(0, &none);
+        B.rb_map = nullptr;
+    }
     B.jobs = jobs;
     B.njobs = njobs;
     B.grew = false;
@@ -2232,7 +2268,7 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
         img_off.push(cst_b + tab_b + B.img_at[j] * 4);
         send_off.push(cst_b + tab_b + img_b + B.send_at[j] * wl * sizeof(Lane));
     }
-    WarpCopy cin = {jobs, img_off.data(), send_off.data(), up, nullptr, wl, B.up_cap};
+    WarpCopy cin = {jobs, img_off.data(), send_off.data(), up, wl, B.up_cap};
     if (pool)
         pool->run(njobs, &warp_copy_in, &cin);
     else
@@ -2315,7 +2351,14 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
     return true;
 }
 
-bool WarpGpu::finish(TextBuf* err, ThreadPool* pool, u32 batch) {
+const u32* WarpGpu::result(u32 j, u32 batch) const {
+    if (!impl_ || batch >= kBatches)
+        return nullptr;
+    const WarpBatch& B = impl_->batch[batch];
+    return B.rb_map && j < B.njobs ? B.rb_map + B.img_at[j] : nullptr;
+}
+
+bool WarpGpu::finish(TextBuf* err, ThreadPool* pool, u32 batch, bool copy_back) {
     if (!impl_ || batch >= kBatches)
         return false;
     Impl* m = impl_;
@@ -2340,18 +2383,15 @@ bool WarpGpu::finish(TextBuf* err, ThreadPool* pool, u32 batch) {
         say(err, "warp readback would not map");
         return false;
     }
-    Array<u64> img_off;
-    for (u32 j = 0; j < B.njobs; ++j)
-        img_off.push(B.img_at[j] * 4);
-    WarpCopy cout = {B.jobs, img_off.data(), nullptr, nullptr, static_cast<const unsigned char*>(mapped), m->lanes,
-                     img_b};
+    const u32* back = static_cast<const u32*>(mapped);
+    B.back_out.resize(static_cast<usize>(B.njobs) * 3);
+    WarpBack wb = {B.jobs, B.img_at.data(), back, copy_back, B.back_out.data()};
     if (pool)
-        pool->run(B.njobs, &warp_copy_out, &cout);
+        pool->run(B.njobs, &warp_back_task, &wb);
     else
         for (u32 j = 0; j < B.njobs; ++j)
-            warp_copy_out(&cout, j);
+            warp_back_task(&wb, j);
     D3D12_RANGE none = {0, 0};
-    B.rb->Unmap(0, &none);
     if (B.gcap_round) { // the gathered lanes are this round's; the next capacity follows the count
         u32 count = 0;
         void* gm = nullptr;
@@ -2367,18 +2407,15 @@ bool WarpGpu::finish(TextBuf* err, ThreadPool* pool, u32 batch) {
     u64 longest = 0; // the longest body's steps: a group runs its warps one after another
     stats_.img_words += B.img_words;
     for (u32 j = 0; j < B.njobs; ++j) {
-        const WarpJob& job = B.jobs[j];
-        for (u32 r = 0; r < job.nrec; ++r) {
-            const u64 size = warp_job_rec_words(job, r);
-            stats_.rec_words_max = size > stats_.rec_words_max ? size : stats_.rec_words_max;
-            const u32* rec = job.img + job.recs[r];
-            u64 body = 0;
-            for (u32 i = 0; i < rec[WB_NWARP]; ++i)
-                body += rec[WB_WARPS + i * WW_SIZE + WW_STEPS];
-            stats_.steps += body;
-            longest = body > longest ? body : longest;
-        }
+        const u64* o = B.back_out.data() + 3 * static_cast<usize>(j);
+        stats_.steps += o[0];
+        longest = o[1] > longest ? o[1] : longest;
+        stats_.rec_words_max = o[2] > stats_.rec_words_max ? o[2] : stats_.rec_words_max;
     }
+    if (copy_back)
+        B.rb->Unmap(0, &none);
+    else
+        B.rb_map = back;
     stats_.steps_longest += longest;
     last_longest_[batch] = longest;
     if (m->freq) {

@@ -1077,6 +1077,15 @@ class Soup {
     // constants, and the node's lanes: what the GPU backend moves.
     Array<u32>& warp_image() { return wimg_; }
     const Array<u32>& warp_image_view() const { return wimg_; }
+    // The image as the GPU left it, when its records weren't copied back
+    // into this one (WarpGpu::finish(..., false)): the records the GPU ran
+    // (warp_record_on_gpu) are read from it by warp_unpack and warp_host.
+    // Null after warp_pack. Valid until the GPU's next round is sent.
+    void warp_set_result(const u32* img) { wres_ = img; }
+    // Record i's words as the round left them: the GPU's copy if it ran it there.
+    const u32* warp_round_image(usize i) const {
+        return wres_ && i < wrec_gpu_.size() && wrec_gpu_[i] ? wres_ : wimg_.data();
+    }
     const Array<u32>& warp_records() const { return wrec_; }
     const Array<u32>& warp_consts() const { return wcst_; }
     Array<Lane>& lanes_mut() { return lanes_; }
@@ -1244,6 +1253,7 @@ class Soup {
     Array<double> warp_upkeep_; // per body: upkeep instructions its warps pay this tick
     usize sched_start_ = 0, sched_n_ = 0; // this tick's schedule over order_
     Array<u32> wimg_, wcst_, wrec_, wbody_, wwarp_; // the round's image, records, their bodies and warps
+    const u32* wres_ = nullptr; // ... and the GPU's copy of it, if its records weren't copied back (warp_set_result)
     Array<u32> wleft_, wsteps_; // per warp slot: quota left, steps run this tick
     Array<u8> wagain_;          // per warp slot: its host instruction was done, run it again this tick
     Array<u64> wkeys_;          // scratch: a body's blocks by start
