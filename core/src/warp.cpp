@@ -100,6 +100,11 @@ struct WarpVM {
     u32 gs_wa[kMaxLanes] = {}, gs_wv[kMaxLanes] = {}, gs_ctl[12] = {};
     u32 g_seen = 0; // the lane being run's template codons read and places searched (Phase 9c)
     u32 g_tseen = 0, g_tfast = 0; // memory tiers (W3): its search's time; its last template's fast codons
+    // The step's shared work (warp_isa.inc, w_step_begin): found by the step's
+    // first lane that needs it, taken by the rest.
+    u32 g_c_skip = 0, g_c_tn = 0, g_c_t0 = 0, g_c_t1 = 0, g_c_tfast = 0, g_c_after = 0, g_c_sdone = 0;
+    u32 g_c_to0 = 0, g_c_to1 = 0, g_c_to2 = 0, g_c_seen0 = 0, g_c_seen1 = 0, g_c_seen2 = 0;
+    u32 g_c_tseen0 = 0, g_c_tseen1 = 0, g_c_tseen2 = 0;
 
 #define INOUT(T) T&
 #define IMG(i) g_img[(i)]
@@ -128,7 +133,13 @@ struct WarpVM {
             (x) = (v);                                                                                                 \
     } while (0)
 #define W_LOOP
-#define W_TRACE(wr, l, step, ip, op, L) warp_trace(IMG((wr) + WW_LANE0), (l), (step), (ip), (op), (L), g_seen)
+// (Called only while tracing or counting ops: a call a lane-instruction
+// otherwise, for nothing.)
+#define W_TRACE(wr, l, step, ip, op, L)                                                                                \
+    do {                                                                                                               \
+        if (g_ophist || g_trace.on)                                                                                    \
+            warp_trace(IMG((wr) + WW_LANE0), (l), (step), (ip), (op), (L), g_seen);                                    \
+    } while (0)
 #define LANE_T Lane
 #define STACK_GET(L, i) ((L).stack[(i)])
 #define STACK_SET(L, i, v) ((L).stack[(i)] = (v))

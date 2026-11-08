@@ -72,8 +72,19 @@ uint w_mix(uint x) {
     return x;
 }
 
+// A draw is keyed by (body key, step, lane, purpose); its first half depends
+// on the key and step alone, so a step can work it out once (w_draw_key) and
+// each lane finish it (w_draw_k): the same bits as w_draw.
+uint w_draw_key(uint key, uint step) {
+    return w_mix(key + step * 0x9E3779B9u);
+}
+
+uint w_draw_k(uint ks, uint lane, uint what) {
+    return w_mix(ks ^ (lane * 0x85EBCA6Bu + what * 0xC2B2AE35u));
+}
+
 uint w_draw(uint key, uint step, uint lane, uint what) {
-    return w_mix(w_mix(key + step * 0x9E3779B9u) ^ (lane * 0x85EBCA6Bu + what * 0xC2B2AE35u));
+    return w_draw_k(w_draw_key(key, step), lane, what);
 }
 
 // floor(a x b / 2^32), with 32-bit arithmetic only (the GPU has no 64-bit).
@@ -484,19 +495,114 @@ uint w_search(uint b, uint a, uint t0, uint t1, uint n, int dir) {
     return W_NONE;
 }
 
+// --- the step's shared work ------------------------------------------------------
+// Every lane that runs a step stands at its instruction (ip), and nothing is
+// written until the step's write phase, so what depends only on ip and the
+// body's code is the same for all of them: the address after the next
+// instruction (an IF's skip), the template after ip, the address past it, and
+// its searches. The first lane to need one finds it and the rest take it, with
+// the search counts it left (g_seen and g_tseen from 0, as each lane's start,
+// and g_tfast). The cache is thread-private (g_c_*): on the GPU each thread is
+// its own first lane, as before; the CPU reference finds each once a step
+// instead of once a lane. w_step_begin empties it before each step's lanes.
+// Its callers pass the step's own values: `next` as the lane's instruction
+// begins (the address after ip), the cached template's t0, t1 and n.
+void w_step_begin() {
+    g_c_skip = W_NONE;
+    g_c_tn = W_NONE;
+    g_c_after = W_NONE;
+    g_c_sdone = 0u;
+}
+
+// The address after the next instruction (an IF's skip).
+uint w_c_skip1(uint b, uint next) {
+    if (g_c_skip == W_NONE)
+        g_c_skip = w_adv(b, next, 1u);
+    return g_c_skip;
+}
+
+// The template from `from` (the address after ip), as w_template.
+uint w_c_template(uint b, uint from, INOUT(uint) t0, INOUT(uint) t1) {
+    uint a0 = 0u;
+    uint a1 = 0u;
+    if (g_c_tn == W_NONE) {
+        g_c_tn = w_template(b, from, a0, a1);
+        g_c_t0 = a0;
+        g_c_t1 = a1;
+        g_c_tfast = g_tfast;
+    }
+    t0 = g_c_t0;
+    t1 = g_c_t1;
+    g_tfast = g_c_tfast;
+    return g_c_tn;
+}
+
+// The address past the instruction at ip and its n-codon template, as w_skip.
+uint w_c_skip(uint b, uint ip, uint n) {
+    if (g_c_after == W_NONE)
+        g_c_after = w_skip(b, ip, n);
+    return g_c_after;
+}
+
+// The template's search in direction dir, as w_search (its counts added to
+// the lane's: saturating sums of times are the same in either order).
+uint w_c_search(uint b, uint a, uint t0, uint t1, uint n, int dir) {
+    uint k = 1u;
+    uint to = W_NONE;
+    uint s0 = g_seen;
+    uint ts0 = g_tseen;
+    if (dir > 0)
+        k = 2u;
+    if (dir < 0)
+        k = 4u;
+    if ((g_c_sdone & k) == 0u) {
+        g_seen = 0u;
+        g_tseen = 0u;
+        to = w_search(b, a, t0, t1, n, dir);
+        g_c_sdone |= k;
+        if (k == 1u) {
+            g_c_to0 = to;
+            g_c_seen0 = g_seen;
+            g_c_tseen0 = g_tseen;
+        } else if (k == 2u) {
+            g_c_to1 = to;
+            g_c_seen1 = g_seen;
+            g_c_tseen1 = g_tseen;
+        } else {
+            g_c_to2 = to;
+            g_c_seen2 = g_seen;
+            g_c_tseen2 = g_tseen;
+        }
+    }
+    if (k == 1u) {
+        to = g_c_to0;
+        g_seen = s0 + g_c_seen0;
+        g_tseen = w_sat_add(ts0, g_c_tseen0);
+    } else if (k == 2u) {
+        to = g_c_to1;
+        g_seen = s0 + g_c_seen1;
+        g_tseen = w_sat_add(ts0, g_c_tseen1);
+    } else {
+        to = g_c_to2;
+        g_seen = s0 + g_c_seen2;
+        g_tseen = w_sat_add(ts0, g_c_tseen2);
+    }
+    return to;
+}
+
 // A template jump: on success next is the landing address; on failure it
-// skips the template and returns false.
+// skips the template and returns false. (next: the address after ip.)
 bool w_jump(uint b, uint ip, int dir, INOUT(uint) next) {
     uint t0 = 0u;
     uint t1 = 0u;
-    uint n = w_template(b, w_adv(b, ip, 1u), t0, t1);
-    uint after = w_skip(b, ip, n);
+    uint n = w_c_template(b, next, t0, t1);
+    uint after = w_c_skip(b, ip, n);
     uint to = W_NONE;
     if (n == 0u) {
         next = after;
         return false; // no template, no target
     }
-    to = w_search(b, ip, t0, t1, n, dir);
+    to = w_c_search(b, ip, t0, t1, n, dir);
     next = after;
     if (to != W_NONE)
         next = to;
@@ -588,7 +694,7 @@ bool w_exec(uint b, INOUT(LANE_T) L, uint lane, uint op, uint ip, uint key, uint
     case OP_IFZ:
     case OP_T_IFZ:
         if (L.cx != 0u)
-            next = w_adv(b, next, 1u);
+            next = w_c_skip1(b, next);
         break;
     case OP_INC:
     case OP_T_INCC:
@@ -669,11 +775,11 @@ bool w_exec(uint b, INOUT(LANE_T) L, uint lane, uint op, uint ip, uint key, uint
         break;
 
     case OP_FIND:
-        n = w_template(b, next, t0, t1);
-        next = w_skip(b, ip, n);
+        n = w_c_template(b, next, t0, t1);
+        next = w_c_skip(b, ip, n);
         to = W_NONE;
         if (n != 0u)
-            to = w_search(b, ip, t0, t1, n, 0);
+            to = w_c_search(b, ip, t0, t1, n, 0);
         ok = to != W_NONE;
         if (ok)
             L.ax = to;
@@ -681,16 +787,16 @@ bool w_exec(uint b, INOUT(LANE_T) L, uint lane, uint op, uint ip, uint key, uint
     case OP_T_ADRO:
     case OP_T_ADRB:
     case OP_T_ADRF:
-        n = w_template(b, next, t0, t1);
-        next = w_skip(b, ip, n);
+        n = w_c_template(b, next, t0, t1);
+        next = w_c_skip(b, ip, n);
         to = W_NONE;
         if (n != 0u) {
             if (op == OP_T_ADRO)
-                to = w_search(b, ip, t0, t1, n, 0);
+                to = w_c_search(b, ip, t0, t1, n, 0);
             else if (op == OP_T_ADRB)
-                to = w_search(b, ip, t0, t1, n, -1);
+                to = w_c_search(b, ip, t0, t1, n, -1);
             else
-                to = w_search(b, ip, t0, t1, n, 1);
+                to = w_c_search(b, ip, t0, t1, n, 1);
         }
         ok = to != W_NONE;
         if (ok) {
@@ -700,11 +806,11 @@ bool w_exec(uint b, INOUT(LANE_T) L, uint lane, uint op, uint ip, uint key, uint
         break;
     case OP_CALL:
     case OP_T_CALL:
-        n = w_template(b, next, t0, t1);
-        x = w_skip(b, ip, n); // where RET comes back to
+        n = w_c_template(b, next, t0, t1);
+        x = w_c_skip(b, ip, n); // where RET comes back to
         to = W_NONE;
         if (n != 0u)
-            to = w_search(b, ip, t0, t1, n, 0);
+            to = w_c_search(b, ip, t0, t1, n, 0);
         ok = false;
         if (to != W_NONE)
             ok = w_push(L, x);
@@ -723,38 +829,38 @@ bool w_exec(uint b, INOUT(LANE_T) L, uint lane, uint op, uint ip, uint key, uint
         if (L.cx != 0u) {
             ok = w_jump(b, ip, 0, next);
         } else {
-            n = w_template(b, next, t0, t1);
-            next = w_skip(b, ip, n);
+            n = w_c_template(b, next, t0, t1);
+            next = w_c_skip(b, ip, n);
         }
         break;
     case OP_JZ:
         if (L.cx == 0u) {
             ok = w_jump(b, ip, 0, next);
         } else {
-            n = w_template(b, next, t0, t1);
-            next = w_skip(b, ip, n);
+            n = w_c_template(b, next, t0, t1);
+            next = w_c_skip(b, ip, n);
         }
         break;
 
     case OP_IFLT:
         if (!((int)L.ax < (int)L.bx))
-            next = w_adv(b, next, 1u);
+            next = w_c_skip1(b, next);
         break;
     case OP_IFGT:
         if (!((int)L.ax > (int)L.bx))
-            next = w_adv(b, next, 1u);
+            next = w_c_skip1(b, next);
         break;
     case OP_IFNE:
         if (L.ax == L.bx)
-            next = w_adv(b, next, 1u);
+            next = w_c_skip1(b, next);
         break;
     case OP_IFEQ:
         if (L.ax != L.bx)
-            next = w_adv(b, next, 1u);
+            next = w_c_skip1(b, next);
         break;
     case OP_IFERR: // tests the previous instruction's flag
         if (L.err == 0u)
-            next = w_adv(b, next, 1u);
+            next = w_c_skip1(b, next);
         break;
 
     case OP_ADD:
@@ -1101,6 +1207,8 @@ void w_run_warp(uint b, uint wi) {
         // the CPU reference, once a step instead of once a lane (a third of
         // its time on a mature world's round).
         uint nx_step = w_adv(b, minip, 1u);
+        uint kstep = w_draw_key(key, step); // (each lane's draws finish it)
+        w_step_begin(); // the step's shared work, found by its first lane
         LANE_BEGIN(lane0)
             gs_wa[l] = W_NONE;
             gs_wv[l] = 0u;
@@ -1126,8 +1234,8 @@ void w_run_warp(uint b, uint wi) {
                     else
                         GS_MAX(gs_ctl[8], g_seen);
                     // an execution flaw: one register comes out off by one
-                    if (w_draw(key, step, l, WD_FLAW) < IMG(b + WB_FLAW_THR)) {
-                        fd = w_draw(key, step, l, WD_FLAW_KIND);
+                    if (w_draw_k(kstep, l, WD_FLAW) < IMG(b + WB_FLAW_THR)) {
+                        fd = w_draw_k(kstep, l, WD_FLAW_KIND);
                         fdelta = 0xFFFFFFFFu;
                         if ((fd & 1u) != 0u)
                             fdelta = 1u;

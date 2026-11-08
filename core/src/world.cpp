@@ -2277,11 +2277,40 @@ const char* World::accel_npu_name() const {
 // are those whose due tick has come, taken in the order they were issued; and
 // every batch comes home at the barrier after it was sent, its results held
 // until due, so a long latency holds no device slot.
-void World::accel_barrier() {
+void World::accel_gather_task(void* ctx, u32 n) {
+    World* w = static_cast<World*>(ctx);
+    if (!w->live(n))
+        return;
+    const u64* g = w->acc_gat_.data() + static_cast<usize>(n) * 3;
+    w->soups_[n].accel_gather_at(w->acc_ops_.data() + g[0], w->acc_in_.data(), static_cast<u32>(g[1]),
+                                 w->acc_addr_.data(), static_cast<u32>(g[2]));
+}
+
+void World::accel_barrier(ThreadPool& pool) {
     const usize first = acc_ops_.size();
-    for (u32 n = 0; n < nodes_; ++n)
-        if (live(n))
-            soups_[n].accel_gather(&acc_ops_, &acc_in_, &acc_addr_);
+    // Every live node's issued ops, in node order, each node into its own
+    // stretch (sizes first), all nodes at once on the threads.
+    acc_gat_.resize(static_cast<usize>(nodes_) * 3);
+    {
+        u64 ops = first, in = acc_in_.size(), addr = acc_addr_.size();
+        for (u32 n = 0; n < nodes_; ++n) {
+            u32 k = 0;
+            u64 r = 0, a = 0;
+            if (live(n))
+                soups_[n].accel_gather_size(&k, &r, &a);
+            acc_gat_[3 * n] = ops;
+            acc_gat_[3 * n + 1] = in;
+            acc_gat_[3 * n + 2] = addr;
+            ops += k;
+            in += r;
+            addr += a;
+        }
+        acc_ops_.resize(static_cast<usize>(ops));
+        acc_in_.resize_unfilled(static_cast<usize>(in));
+        acc_addr_.resize_unfilled(static_cast<usize>(addr));
+        if (ops > first)
+            pool.run(nodes_, &World::accel_gather_task, this);
+    }
     while (acc_job_.size() < acc_ops_.size()) {
         acc_job_.push(-1);
         acc_slot_.push(0);
@@ -2295,25 +2324,34 @@ void World::accel_barrier() {
     any_done = accel_complete_range(first, acc_ops_.size()) || any_done;
     if (!any_done)
         return;
-    // Keep the rest, in order, with their inputs, addresses and held results packed.
-    Array<u8> in, held;
-    Array<u32> addr;
-    usize w = 0;
+    // Keep the rest, in order, with their inputs, addresses and held results
+    // packed. The inputs and addresses lie in op order, so each kept op's
+    // move down, in place, never over a later one's; the held results come
+    // home out of op order, so they go through a scratch the world keeps.
+    // (Copying every kept input into new arrays each tick was most of this
+    // phase: 4 of 4.8 ms a tick in a young landscape, 7.7 MB in flight.)
+    // The arrays come out exactly as before.
+    acc_held_keep_.clear();
+    usize w = 0, in_w = 0, addr_w = 0;
     for (usize i = 0; i < acc_ops_.size(); ++i) {
         AccelOp op = acc_ops_[i];
         if (op.due <= tick_)
             continue;
         const u32 reads = op.src_n + op.dst_n + op.mat_n;
-        const u32 in_off = static_cast<u32>(in.size()), addr_off = static_cast<u32>(addr.size());
-        in.append(acc_in_.data() + op.in_off, reads);
-        addr.append(acc_addr_.data() + op.addr_off, op.out_n);
-        op.in_off = in_off;
-        op.addr_off = addr_off;
+        NOVA_ASSERT(op.in_off >= in_w && op.addr_off >= addr_w);
+        if (op.in_off != in_w && reads)
+            memmove(acc_in_.data() + in_w, acc_in_.data() + op.in_off, reads);
+        if (op.addr_off != addr_w && op.out_n)
+            memmove(acc_addr_.data() + addr_w, acc_addr_.data() + op.addr_off, static_cast<usize>(op.out_n) * 4);
+        op.in_off = static_cast<u32>(in_w);
+        op.addr_off = static_cast<u32>(addr_w);
+        in_w += reads;
+        addr_w += op.out_n;
         acc_job_[w] = acc_job_[i];
         acc_slot_[w] = acc_slot_[i];
         if (acc_job_[i] == -2) { // its held result moves too
-            acc_slot_[w] = static_cast<u32>(held.size());
-            held.append(acc_held_.data() + acc_slot_[i], op.out_n);
+            acc_slot_[w] = static_cast<u32>(acc_held_keep_.size());
+            acc_held_keep_.append(acc_held_.data() + acc_slot_[i], op.out_n);
         }
         acc_held_scalar_[w] = acc_held_scalar_[i];
         acc_held_flags_[w] = acc_held_flags_[i];
@@ -2324,9 +2362,11 @@ void World::accel_barrier() {
     acc_slot_.resize(w);
     acc_held_scalar_.resize(w);
     acc_held_flags_.resize(w);
-    acc_in_ = static_cast<Array<u8>&&>(in);
-    acc_addr_ = static_cast<Array<u32>&&>(addr);
-    acc_held_ = static_cast<Array<u8>&&>(held);
+    acc_in_.resize(in_w);
+    acc_addr_.resize(addr_w);
+    Array<u8> t = static_cast<Array<u8>&&>(acc_held_); // (a swap: both keep their room)
+    acc_held_ = static_cast<Array<u8>&&>(acc_held_keep_);
+    acc_held_keep_ = static_cast<Array<u8>&&>(t);
 }
 
 // Phase 9c: a batch sent at an earlier barrier has had a tick: it comes home
@@ -3053,7 +3093,7 @@ void World::step(ThreadPool& pool) {
         world_corrupted_ = world_transit_lost_ = 0;
         world_dormant_expired_ = world_dormant_hops_ = 0;
         if (accel_async_) {
-            accel_barrier();
+            accel_barrier(pool);
             lap(prof_ ? &prof_->accel : nullptr);
         }
         if (channels_) {

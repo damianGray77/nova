@@ -2366,11 +2366,37 @@ void Soup::collapse() {
 // now (the salvage rule applying, from a stream keyed by the op), and go to
 // the world's pending batch, in issue order, with their write-back addresses.
 void Soup::accel_gather(Array<AccelOp>* ops, Array<u8>* in, Array<u32>* addr) {
+    u32 n = 0;
+    u64 in_n = 0, addr_n = 0;
+    accel_gather_size(&n, &in_n, &addr_n);
+    const usize o = ops->size(), i0 = in->size(), a0 = addr->size();
+    ops->resize(o + n);
+    in->resize(i0 + static_cast<usize>(in_n));
+    addr->resize(a0 + static_cast<usize>(addr_n));
+    accel_gather_at(ops->data() + o, in->data(), static_cast<u32>(i0), addr->data(), static_cast<u32>(a0));
+}
+
+// The gather in two halves, so the world's nodes can gather at once, each
+// into its own stretch of the batch: what this node's issued ops take...
+void Soup::accel_gather_size(u32* ops, u64* in, u64* addr) const {
+    u64 r = 0, w = 0;
+    for (usize i = 0; i < issued_.size(); ++i) {
+        r += issued_[i].src_n + issued_[i].dst_n + issued_[i].mat_n;
+        w += issued_[i].out_n;
+    }
+    *ops = static_cast<u32>(issued_.size());
+    *in = r;
+    *addr = w;
+}
+
+// ... and the gather into it: ops[0..] and the batch's in and addr arrays
+// from in_off and addr_off (the ops' offsets are into those whole arrays).
+void Soup::accel_gather_at(AccelOp* ops, u8* in, u32 in_off, u32* addr, u32 addr_off) {
     for (usize i = 0; i < issued_.size(); ++i) {
         AccelOp op = issued_[i];
         const u32* a = issue_addr_.data() + issue_ref_[i];
         const u32 reads = op.src_n + op.dst_n + op.mat_n;
-        op.in_off = static_cast<u32>(in->size());
+        op.in_off = in_off;
         Rng sr(seed_ ^ 0x73616C7661676500ull, node_, op.serial); // "salvage"
         const double lim = p_->salvage_ratio * op.genome;
         for (u32 j = 0; j < reads; ++j) {
@@ -2382,11 +2408,13 @@ void Soup::accel_gather(Array<AccelOp>* ops, Array<u8>* in, Array<u32>* addr) {
                     ++tally_.garbled;
                 }
             }
-            in->push(v);
+            in[in_off++] = v;
         }
-        op.addr_off = static_cast<u32>(addr->size());
-        addr->append(a + reads, op.out_n);
-        ops->push(op);
+        op.addr_off = addr_off;
+        if (op.out_n)
+            memcpy(addr + addr_off, a + reads, static_cast<usize>(op.out_n) * 4);
+        addr_off += op.out_n;
+        ops[i] = op;
     }
     issued_.clear();
     issue_ref_.clear();

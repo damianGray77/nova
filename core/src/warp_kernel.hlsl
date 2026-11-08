@@ -63,6 +63,24 @@ static uint g_lidx; // this thread's lane in g_lanes
 static uint g_seen; // this lane's template codons read and places searched this step (Phase 9c)
 static uint g_tseen; // memory tiers (W3): ... their time, each at its tier
 static uint g_tfast; // ... and its last template's codons in fast memory
+// The step's shared work (warp_isa.inc, w_step_begin): thread-private, so
+// each thread finds its own, as before the CPU reference shared them.
+static uint g_c_skip;
+static uint g_c_tn;
+static uint g_c_t0;
+static uint g_c_t1;
+static uint g_c_tfast;
+static uint g_c_after;
+static uint g_c_sdone;
+static uint g_c_to0;
+static uint g_c_to1;
+static uint g_c_to2;
+static uint g_c_seen0;
+static uint g_c_seen1;
+static uint g_c_seen2;
+static uint g_c_tseen0;
+static uint g_c_tseen1;
+static uint g_c_tseen2;
 #if W_LDS
 groupshared uint gs_img[W_LDS];
 groupshared uint gs_cst[256];

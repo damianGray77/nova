@@ -551,7 +551,9 @@ class World {
     // then complete those due. The devices: opening them (init), sending the
     // newly gathered ops from `first` on, and completing ops [lo, hi) that are
     // due (true if any were).
-    void accel_barrier();
+    void accel_barrier(ThreadPool& pool);
+    static void accel_gather_task(void* ctx, u32 node); // one node's gather, into its stretch
+    Array<u64> acc_gat_; // accel_barrier: per node, where its ops, inputs and addresses start
     // --- Disasters (docs/disasters-plan.md X1-X11; disaster.cpp) -----------
     // read_disasters: the keys (init). weather_update: each node's symptoms
     // for the tick about to run (before it, serially). disasters_barrier:
@@ -764,6 +766,7 @@ class World {
     // sent, and its results wait here until due (a long latency holds no
     // device slot). Not world state: the same results as the reference's.
     Array<u8> acc_held_;
+    Array<u8> acc_held_keep_;    // accel_barrier's scratch for the held results it keeps
     Array<u32> acc_held_scalar_; // per op
     Array<u8> acc_held_flags_;   // per op: 1 checked against the reference, 2 ran on the NPU
     void accel_bring_home(usize first); // every op before `first` still on a device

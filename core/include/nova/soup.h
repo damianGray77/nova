@@ -960,6 +960,10 @@ class Soup {
     // their input codons to in, their write-back addresses to addr) and later
     // hands each back with its results (complete).
     void accel_gather(Array<AccelOp>* ops, Array<u8>* in, Array<u32>* addr);
+    // ... in two halves (the world's nodes gather at once): what it takes,
+    // then the gather into its stretch (ops' offsets are into the whole arrays).
+    void accel_gather_size(u32* ops, u64* in, u64* addr) const;
+    void accel_gather_at(AccelOp* ops, u8* in, u32 in_off, u32* addr, u32 addr_off);
     void accel_complete(const AccelOp& op, const u8* out, u32 scalar, const u32* addr);
     usize accel_issued() const { return issued_.size(); }
     u32 accel_result(u32 c) const { return c < cpu_result_.size() ? cpu_result_[c] : 0; }
