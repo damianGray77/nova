@@ -9,7 +9,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 - **Families:** a key with a `<placeholder>` stands for one setting per member listed.
 - **Needs:** the switch the setting depends on; it does nothing while that is off.
 
-360 settings, 83 of them from 14 families; 11 hidden (tests and demos).
+361 settings, 83 of them from 14 families; 11 hidden (tests and demos).
 
 ## Contents
 
@@ -238,6 +238,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `warp.device` | choice | auto | auto, gpu, cpu, mixed | **Warp device**. Where warps run: auto shares each round between the GPU and the CPU; gpu, cpu (the reference); mixed (a test). Every choice gives the same world. Needs `gpu.warps`. |
 | `warp.verify` | whole | 0 | 0 to 1000000000 | **Verify warps every**. Check every Nth GPU round against the CPU reference (0 = off). Needs `gpu.warps`. |
 | `warp.kernel` | choice | dxc | dxc, fxc | **Warp kernel**. dxc: the kernel compiled at build time where it can run, else FXC's; fxc: FXC's always. Needs `gpu.warps`. |
+| `warp.groups` | whole | 1 | 1 to 2 | **Overlap groups**. 2: a tick's GPU round in two node groups, one group's CPU work while the other's warps are on the GPU (quicker with warp.device = gpu; auto already keeps the CPU busy during the round); 1: every node in one round. Both give the same world. Needs `gpu.warps`. |
 | `accel.mode` | choice | async | instant, async | **Accelerator mode**. instant: accelerator ops finish at once (Phase 4); async: they run on the real devices and land some ticks later. |
 | `accel.latency` | whole | 2 | 1 to 64 | **Accelerator latency**. Barriers until an async result lands (1 = the same barrier; a timed table uses each device's own). Needs `accel.mode=async`. |
 | `accel.gpu` | text | auto | text | **GPU device**. Where GPU ops run: auto (the first hardware GPU), cpu (the reference), or part of a device's name. Needs `accel.mode=async`. |

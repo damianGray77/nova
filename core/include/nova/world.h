@@ -424,6 +424,7 @@ class World {
     double warp_model_hstep() const { return warp_hstep_; }
     double warp_ref_wall() const { return warp_ref_wall_; }    u64 warp_plain_ticks() const { return warp_plain_ticks_; }
     u64 warp_split_ticks() const { return warp_auto_ticks_ - warp_plain_ticks_; }
+    u64 warp_grouped_ticks() const { return warp_grouped_ticks_; } // ticks whose round ran in two groups
     // The GPU failed while it held warps' lanes: the world stopped (it can't
     // go on exactly); resume from a snapshot.
     bool warp_failed() const { return warp_failed_; }
@@ -819,7 +820,19 @@ class World {
     void warp_open(Config& cfg);
     void warp_step(ThreadPool& pool, bool use_gpu = true); // use_gpu false: every node on the reference
     void warp_fail(Str why);
-    bool warp_fetch(Array<WarpFetch>& list, Array<u32>& nodes);
+    bool warp_fetch(Array<WarpFetch>& list, Array<u32>& nodes, u32 batch = 0);
+    // The overlap plan (docs/overlap-plan.md): warp.groups 2 runs a tick's
+    // first round in two node groups staggered across the GPU's two batches
+    // (warp_round0_groups); 1, every node in one round. The groups' nodes, and
+    // each group's round lists (moved aside whole, so its jobs' pointers hold).
+    u32 warp_groups_ = 1;
+    u64 warp_grouped_ticks_ = 0;
+    Array<u32> warp_grp_nodes_[2];
+    Array<WarpJob> warp_grp_jobs_[2];
+    Array<u32> warp_grp_job_node_[2], warp_grp_send_[2], warp_grp_recs_[2], warp_grp_words_[2], warp_grp_chain_[2];
+    Array<u64> warp_grp_order_;
+    bool warp_round0_groups(ThreadPool& pool, double* cpu_s, double* gpu_s, double* pack_s, bool* second_done);
+    void warp_run_nodes(ThreadPool& pool, const Array<u32>& nodes, void (*fn)(void*, u32));
     static void warp_first_task(void* ctx, u32 node);
     static void warp_pack_task(void* ctx, u32 node);
     static void warp_ref_task(void* ctx, u32 node);
@@ -849,7 +862,7 @@ class World {
     Array<u64> warp_chains_; // scratch: the bodies' chains
     u32 warp_model_limit(u32 threads);
     bool warp_model_pick(u32 threads, double rest, u32* limit);
-    void warp_model_measure(u32 round, bool cpu_ran);
+    void warp_model_measure(u32 round, bool cpu_ran, double kernel_ms = -1.0); // (kernel_ms: the two groups' span)
     static void warp_ref_rec_task(void* ctx, u32 i);
     static void warp_unpack_task(void* ctx, u32 node);
     static void warp_host_task(void* ctx, u32 node);

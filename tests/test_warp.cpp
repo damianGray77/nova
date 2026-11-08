@@ -585,6 +585,34 @@ void test_gpu_device() {
     au.run_until(120);
     CHECK(au.world().warp_plain_ticks() >= 5 && au.world().warp_split_ticks() >= 5);
     CHECK_EQ_U64(au.world().hash(), want);
+    // The overlap plan: warp.groups = 2 runs a tick's round in two node groups
+    // on the GPU's two batches, staggered (World::warp_round0_groups). Only
+    // when its phases run changes: the same world on the GPU, mixed (lanes
+    // crossing every round) and auto, at 1, 20 and 4 threads, and through a
+    // snapshot taken mid-run.
+    const char* const grouped[3] = {"warp.device = gpu\nwarp.groups = 2\n", "warp.device = mixed\nwarp.groups = 2\n",
+                                    "warp.device = auto\nwarp.groups = 2\n"};
+    const u32 gthreads[3] = {1, 20, 4};
+    for (u32 i = 0; i < 3; ++i) {
+        TextBuf gc;
+        gc.append(busy_warp_world());
+        gc.append(grouped[i]);
+        Run gr;
+        CHECK(make_run(gr, gc.c_str(), gthreads[i]));
+        gr.run_until(60);
+        ByteWriter gs;
+        gr.snapshot(gs);
+        gr.run_until(120);
+        const World& gw = gr.world();
+        if (i < 2) // (auto groups only once its model has its rates, which this small world may not reach)
+            CHECK(gw.warp_grouped_ticks() >= 100);
+        CHECK(!gw.warp_failed() && gw.warp_mismatches() == 0);
+        CHECK_EQ_U64(gw.hash(), want);
+        Run gres;
+        CHECK(gres.init_from_snapshot(gs.data(), gs.size(), 4, &err));
+        gres.run_until(120);
+        CHECK_EQ_U64(gres.world().hash(), want);
+    }
 }
 
 // A loop of signed divisions, from a warp that differed on the GPU in Phase 10

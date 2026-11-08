@@ -1344,6 +1344,8 @@ void World::warp_open(Config& cfg) {
     warp_auto_ = d.eq("auto");
     warp_mixed_ = d.eq("mixed"); // a test: nodes split between the two at random, every round
     warp_verify_ = key_u32(cfg, "warp.verify");
+    warp_groups_ = key_u32(cfg, "warp.groups"); // the overlap plan: 1 or 2 node groups a round
+    warp_grouped_ticks_ = 0;
     // warp.kernel (docs/dxc-plan.md D3): DXC's kernel where it can run (32
     // lanes, Shader Model 6.0), else FXC's; or FXC's always. The same words.
     const Str kern = key_choice(cfg, "warp.kernel");
@@ -1418,11 +1420,11 @@ void World::warp_fail(Str why) {
 
 // Brings the listed warps' lanes back from the GPU; they are then the same
 // on both sides.
-bool World::warp_fetch(Array<WarpFetch>& list, Array<u32>& nodes) {
+bool World::warp_fetch(Array<WarpFetch>& list, Array<u32>& nodes, u32 batch) {
     if (list.empty())
         return true;
     TextBuf why;
-    if (!warp_gpu_.fetch(list.data(), static_cast<u32>(list.size()), &why)) {
+    if (!warp_gpu_.fetch(list.data(), static_cast<u32>(list.size()), &why, batch)) {
         warp_fail(why.view());
         return false;
     }
@@ -1690,12 +1692,14 @@ bool World::warp_model_pick(u32 threads, double rest, u32* limit) {
 }
 
 // The model's two rates, after a round (smoothed: a quarter new).
-void World::warp_model_measure(u32 round, bool cpu_ran) {
-    if (round == 0 && !warp_jobs_.empty()) { // the GPU's time a serial step
+void World::warp_model_measure(u32 round, bool cpu_ran, double kernel_ms) {
+    // (kernel_ms: a grouped round's two batches as one round, their span; -1:
+    // this round's one batch, if it had jobs.)
+    if (round == 0 && (kernel_ms >= 0 ? kernel_ms > 0 : !warp_jobs_.empty())) { // the GPU's time a serial step
         // In the guesses' own units (the longest guess it was given, not the
         // longest it ran): a body may run longer than its guess, and the pick
         // compares guesses, so their bias cancels.
-        const double ms = warp_gpu_.last_kernel_ms();
+        const double ms = kernel_ms >= 0 ? kernel_ms : warp_gpu_.last_kernel_ms();
         const u64 per = warp_gpu_guess_ >= 200 ? warp_gpu_guess_ : warp_gpu_.last_longest();
         if (ms > 0 && per >= 200) { // (a short longest body would be mostly fixed costs)
             const double g = ms / 1000.0 / static_cast<double>(per);
@@ -1777,6 +1781,290 @@ bool World::warp_write_dump(const Array<u32>& cst) {
     return ok;
 }
 
+// A per-node task over some of the nodes (a group's), on the threads.
+void World::warp_run_nodes(ThreadPool& pool, const Array<u32>& nodes, void (*fn)(void*, u32)) {
+    struct Run {
+        World* w;
+        const u32* nodes;
+        void (*fn)(void*, u32);
+    } run = {this, nodes.data(), fn};
+    auto task = [](void* ctx, u32 i) {
+        const Run& r = *static_cast<const Run*>(ctx);
+        r.fn(r.w, r.nodes[i]);
+    };
+    pool.run(static_cast<u32>(nodes.size()), task, &run);
+}
+
+// The overlap plan (docs/overlap-plan.md, approved by Damian): a tick's first
+// round in two node groups, staggered so one group's CPU phases run while
+// the other's warps are on the GPU. Group A's first halves, packing and
+// split, and its batch to the GPU (queue 0); then B's, its batch on queue 1
+// while A's runs; the reference's share of both on the threads; then A's
+// batch back, its unpacking and host instructions (and, with one round a
+// tick, its second halves) while B's runs; then B's. Each node's tick is
+// exactly as before -- its first half, its rounds, its second half -- and
+// nodes meet only at the barrier, so a node's group decides only when its
+// phases run, never what they do: warp.groups 1 and 2 give one world.
+// `second_done`: the second halves ran here (warp.rounds = 1). False on a
+// device error (warp_fail has stopped the world).
+bool World::warp_round0_groups(ThreadPool& pool, double* cpu_s, double* gpu_s, double* pack_s, bool* second_done) {
+    // The groups: nodes by last tick's CPU time (first half, pack, second
+    // half), slowest first, each to the group with less so far; each group
+    // then in node order.
+    Array<u64>& ord = warp_grp_order_;
+    ord.clear();
+    for (u32 n = 0; n < nodes_; ++n) {
+        const double us = (warp_node_t_[3 * n] + warp_node_t_[3 * n + 1] + warp_node_t_[3 * n + 2]) * 1e6;
+        ord.push((us >= 4e9 ? 0xFFFFFFFFull : static_cast<u64>(us)) << 32 | n);
+    }
+    sort_u64(ord.data(), ord.size());
+    double load[2] = {0, 0};
+    for (u32 g = 0; g < 2; ++g)
+        warp_grp_nodes_[g].clear();
+    for (usize i = ord.size(); i-- > 0;) {
+        const u32 g = load[1] < load[0] ? 1 : 0;
+        warp_grp_nodes_[g].push(static_cast<u32>(ord[i] & 0xFFFFFFFFu));
+        load[g] += static_cast<double>(ord[i] >> 32) + 1.0; // (+1: nodes not timed yet still alternate)
+    }
+    for (u32 g = 0; g < 2; ++g) {
+        Array<u32>& gn = warp_grp_nodes_[g];
+        ord.clear();
+        for (usize i = 0; i < gn.size(); ++i)
+            ord.push(gn[i]);
+        sort_u64(ord.data(), ord.size());
+        for (usize i = 0; i < gn.size(); ++i)
+            gn[i] = static_cast<u32>(ord[i]);
+    }
+
+    warp_node_gpu_.resize(nodes_);
+    warp_node_ref_.resize(nodes_);
+    warp_node_guess_.resize(nodes_);
+    warp_node_longest_.resize(nodes_);
+    warp_node_nfetch_.resize(nodes_);
+    warp_node_nsend_.resize(nodes_);
+    warp_node_nrec_.resize(nodes_);
+    warp_node_ofetch_.resize(nodes_);
+    warp_node_osend_.resize(nodes_);
+    warp_node_orec_.resize(nodes_);
+    const bool model = warp_auto_ && warp_gstep_ > 0 && warp_hstep_ > 0;
+    u32 gpu_recs[2] = {0, 0}, ref_recs[2] = {0, 0};
+    bool sent[2] = {false, false};
+    warp_round_ = 0;
+    warp_gpu_guess_ = 0;
+    warp_verifying_ = false; // (a tick that verifies runs one group: warp_step)
+    warp_use_gpu_ = true;
+    TextBuf why;
+    double t = clock_seconds(), cpu = 0, gpu = 0, pack = 0;
+    auto lap = [&](double StepProfile::*part, double* side) {
+        const double now = clock_seconds();
+        if (prof_ && part)
+            prof_->*part += now - t;
+        if (side)
+            *side += now - t;
+        t = now;
+    };
+    for (u32 g = 0; g < 2; ++g) {
+        const Array<u32>& gn = warp_grp_nodes_[g];
+        warp_grp_jobs_[g].clear();
+        warp_grp_job_node_[g].clear();
+        warp_run_nodes(pool, gn, &World::warp_first_task);
+        lap(&StepProfile::w_first, &cpu);
+        warp_run_nodes(pool, gn, &World::warp_pack_task);
+        lap(&StepProfile::w_pack, &pack);
+        // The constants must be the same for the batch's one dispatch.
+        const Array<u32>* cst = nullptr;
+        bool same = true;
+        for (usize i = 0; i < gn.size(); ++i) {
+            const u32 n = gn[i];
+            if (!warp_active_[n])
+                continue;
+            const Array<u32>& c = soups_[n].warp_consts();
+            if (!cst)
+                cst = &c;
+            else
+                same = same && c.size() == cst->size() && memcmp(c.data(), cst->data(), c.size() * 4) == 0;
+        }
+        if (!cst)
+            continue; // none of this group's nodes has warps to run
+        // auto's limit: group A takes last tick's; with every node packed, B
+        // takes one from all of them (and so does next tick's A).
+        if (g == 1 && model)
+            warp_limit_ = warp_model_limit(pool.threads());
+        warp_same_ = same;
+        warp_run_nodes(pool, gn, &World::warp_choose_task);
+        for (usize i = 0; i < gn.size(); ++i) {
+            const u32 n = gn[i];
+            gpu_recs[g] += warp_node_gpu_[n];
+            ref_recs[g] += warp_node_ref_[n];
+            if (warp_node_guess_[n] > warp_gpu_guess_)
+                warp_gpu_guess_ = warp_node_guess_[n];
+        }
+        // The group's lists (as warp_step's: count, then fill at each node's
+        // offset, in node order), its jobs, and the lanes its CPU bodies need.
+        warp_run_nodes(pool, gn, &World::warp_list_count_task);
+        u32 nfetch = 0, nsend = 0, nrec = 0;
+        for (usize i = 0; i < gn.size(); ++i) {
+            const u32 n = gn[i];
+            warp_node_ofetch_[n] = nfetch;
+            warp_node_osend_[n] = nsend;
+            warp_node_orec_[n] = nrec;
+            nfetch += warp_node_nfetch_[n];
+            nsend += warp_node_nsend_[n];
+            nrec += warp_node_nrec_[n];
+        }
+        warp_fetch_.resize(nfetch);
+        warp_fetch_node_.resize(nfetch);
+        warp_send_.resize(nsend);
+        warp_job_recs_.resize(nrec);
+        warp_job_words_.resize(nrec);
+        warp_job_chain_.resize(nrec);
+        warp_run_nodes(pool, gn, &World::warp_list_fill_task);
+        warp_jobs_.clear();
+        warp_job_node_.clear();
+        for (usize i = 0; i < gn.size(); ++i) {
+            const u32 n = gn[i];
+            if (!warp_active_[n] || !warp_on_gpu_[n])
+                continue;
+            Soup& s = soups_[n];
+            WarpJob j = {};
+            j.node = n;
+            j.img = s.warp_image().data();
+            j.img_words = static_cast<u32>(s.warp_image().size());
+            j.lanes = s.lanes_mut().data();
+            j.nlanes = static_cast<u32>(s.lanes_mut().size());
+            j.send = warp_send_.data() + warp_node_osend_[n];
+            j.nsend = warp_node_nsend_[n];
+            j.recs = warp_job_recs_.data() + warp_node_orec_[n];
+            j.rec_words = warp_job_words_.data() + warp_node_orec_[n];
+            j.rec_chain = warp_job_chain_.data() + warp_node_orec_[n];
+            j.nrec = warp_node_nrec_[n];
+            warp_jobs_.push(j);
+            warp_job_node_.push(n);
+        }
+        if (!warp_fetch(warp_fetch_, warp_fetch_node_, g)) // (on this batch's queue: the other may be running)
+            return false;
+        lap(&StepProfile::w_split, &cpu);
+        if (!warp_jobs_.empty()) {
+            if (!warp_gpu_.submit(cst->data(), static_cast<u32>(cst->size()), warp_jobs_.data(),
+                                  static_cast<u32>(warp_jobs_.size()), &why, &pool, g)) {
+                warp_fail(why.view());
+                return false;
+            }
+            sent[g] = true;
+        }
+        // The group's lists aside, whole (their buffers move, so the jobs'
+        // pointers into them hold), before the next group's are built.
+        warp_grp_jobs_[g] = static_cast<Array<WarpJob>&&>(warp_jobs_);
+        warp_grp_job_node_[g] = static_cast<Array<u32>&&>(warp_job_node_);
+        warp_grp_send_[g] = static_cast<Array<u32>&&>(warp_send_);
+        warp_grp_recs_[g] = static_cast<Array<u32>&&>(warp_job_recs_);
+        warp_grp_words_[g] = static_cast<Array<u32>&&>(warp_job_words_);
+        warp_grp_chain_[g] = static_cast<Array<u32>&&>(warp_job_chain_);
+        lap(&StepProfile::w_split, &cpu);
+    }
+    // The reference's share of both groups, record by record over the
+    // threads, the longest bodies first, while the GPU runs both batches.
+    const u32 refs = ref_recs[0] + ref_recs[1];
+    if (refs) {
+        warp_ref_build();
+        const double tr = clock_seconds();
+        pool.run(static_cast<u32>(warp_ref_list_.size()), &World::warp_ref_rec_task, this);
+        if (sent[0] || sent[1])
+            warp_ref_wall_ += clock_seconds() - tr;
+        if (prof_)
+            for (usize i = 0; i < warp_ref_time_.size(); ++i)
+                prof_->n_ref += warp_ref_time_[i];
+    }
+    lap(nullptr, &gpu);
+    // Each group's batch back, in turn: its unpacking, the lanes its waiting
+    // warps need, its host instructions (and second halves) -- A's while B's
+    // batch still runs.
+    const bool one_round = soup_params_.warp_rounds <= 1;
+    for (u32 g = 0; g < 2; ++g) {
+        const Array<u32>& gn = warp_grp_nodes_[g];
+        if (sent[g] && !warp_gpu_.finish(&why, &pool, g)) {
+            warp_fail(why.view());
+            return false;
+        }
+        lap(nullptr, &gpu);
+        warp_run_nodes(pool, gn, &World::warp_unpack_task);
+        lap(&StepProfile::w_unpack, &cpu);
+        Array<WarpFetch>& fl = warp_fetch_;
+        Array<u32>& fn = warp_fetch_node_;
+        fl.clear();
+        fn.clear();
+        const Array<WarpJob>& jobs = warp_grp_jobs_[g];
+        for (usize i = 0; i < jobs.size(); ++i) {
+            const WarpJob& j = jobs[i];
+            const u32 n = warp_grp_job_node_[g][i];
+            Soup& s = soups_[n];
+            const u32 L = s.lanes_per_warp();
+            for (u32 k = 0; k < j.nrec; ++k)
+                for (u32 q = 0; q < j.img[j.recs[k] + WB_NWARP]; ++q) {
+                    const u32 e = j.recs[k] + WB_WARPS + q * WW_SIZE;
+                    if (!j.img[e + WW_WAIT])
+                        continue;
+                    const u32 w = j.img[e + WW_LANE0] / L;
+                    fl.push(WarpFetch{n, w, s.lanes_mut().data() + static_cast<usize>(w) * L});
+                    fn.push(n);
+                }
+        }
+        if (!fl.empty()) { // most came back with the batch (gathered on the GPU): fetch only the rest
+            warp_got_.resize(fl.size());
+            if (warp_gpu_.take_gathered(fl.data(), static_cast<u32>(fl.size()), warp_got_.data(), &pool, g) > 0) {
+                usize k = 0;
+                for (usize i = 0; i < fl.size(); ++i) {
+                    if (warp_got_[i]) {
+                        soups_[fn[i]].set_lane_state(fl[i].slot, Soup::kLanesBoth);
+                    } else {
+                        fl[k] = fl[i];
+                        fn[k] = fn[i];
+                        ++k;
+                    }
+                }
+                fl.resize(k);
+                fn.resize(k);
+            }
+        }
+        if (!warp_fetch(fl, fn, g))
+            return false;
+        lap(&StepProfile::w_hostlanes, &cpu);
+        warp_run_nodes(pool, gn, &World::warp_host_task);
+        lap(&StepProfile::w_host, &cpu);
+        if (one_round) {
+            warp_run_nodes(pool, gn, &World::warp_second_task);
+            lap(&StepProfile::w_second, &cpu);
+        }
+    }
+    *second_done = one_round;
+    if (sent[0] || sent[1])
+        ++warp_gpu_rounds_;
+    if (refs)
+        ++warp_ref_rounds_;
+    warp_gpu_bodies_ += gpu_recs[0] + gpu_recs[1];
+    warp_ref_bodies_ += refs;
+    // auto's model: the GPU's two batches as one round (their span on the
+    // device's clock, or the longer kernel), and the reference's steps.
+    if (warp_auto_) {
+        double ms = 0;
+        const double hz = warp_gpu_.timestamp_hz();
+        if (sent[0] && sent[1] && hz > 0) {
+            const u64 b0 = warp_gpu_.last_begin(0) < warp_gpu_.last_begin(1) ? warp_gpu_.last_begin(0) : warp_gpu_.last_begin(1);
+            const u64 e0 = warp_gpu_.last_end(0) > warp_gpu_.last_end(1) ? warp_gpu_.last_end(0) : warp_gpu_.last_end(1);
+            ms = e0 > b0 ? static_cast<double>(e0 - b0) / hz * 1000.0 : 0.0;
+        } else {
+            for (u32 g = 0; g < 2; ++g)
+                if (sent[g] && warp_gpu_.last_kernel_ms(g) > ms)
+                    ms = warp_gpu_.last_kernel_ms(g);
+        }
+        warp_model_measure(0, refs > 0, ms);
+    }
+    *cpu_s += cpu;
+    *gpu_s += gpu;
+    *pack_s += pack;
+    return true;
+}
+
 // The update with warps on the GPU: every node's first half (sparks, CPUs),
 // then each round -- every node packs; the GPU runs its share of the nodes
 // while the CPU threads run the rest on the reference; every node unpacks
@@ -1811,9 +2099,26 @@ void World::warp_step(ThreadPool& pool, bool use_gpu) {
         warp_node_t_.resize(static_cast<usize>(nodes_) * 3);
         warp_node_t_.fill(0.0);
     }
-    pool.run(nodes_, &World::warp_first_task, this);
-    wmark(&StepProfile::w_first);
-    for (u32 r = 0; r < soup_params_.warp_rounds && !warp_failed_; ++r) {
+    // The overlap plan: the first round in two groups (warp_round0_groups),
+    // when the GPU is in use, auto's model has its rates, and this tick
+    // neither verifies nor dumps its round (those run one group, as before).
+    const bool grouped = use_gpu && warp_groups_ >= 2 && warp_gpu_.is_open() && nodes_ >= 2 &&
+                         (!warp_auto_ || (warp_gstep_ > 0 && warp_hstep_ > 0)) &&
+                         !(warp_verify_ && warp_gpu_rounds_ % warp_verify_ == 0) &&
+                         !(warp_dump_path_ && tick_ + 1 >= warp_dump_tick_);
+    u32 r_first = 0;
+    bool second_done = false;
+    if (grouped) {
+        if (!warp_round0_groups(pool, &cpu_s, &gpu_s, &pack_s, &second_done))
+            return;
+        ++warp_grouped_ticks_;
+        r_first = 1;
+        tw = prof_ ? clock_seconds() : 0;
+    } else {
+        pool.run(nodes_, &World::warp_first_task, this);
+        wmark(&StepProfile::w_first);
+    }
+    for (u32 r = r_first; r < soup_params_.warp_rounds && !warp_failed_; ++r) {
         warp_round_ = r;
         double t = clock_seconds();
         tw = t;
@@ -2241,7 +2546,8 @@ void World::warp_step(ThreadPool& pool, bool use_gpu) {
         }
     }
     tw = prof_ ? clock_seconds() : 0;
-    pool.run(nodes_, &World::warp_second_task, this);
+    if (!second_done) // (a grouped round ran each group's second halves itself)
+        pool.run(nodes_, &World::warp_second_task, this);
     wmark(&StepProfile::w_second);
     if (prof_) { // the slowest node in each pool phase: the floor under its wall time
         double m[3] = {0, 0, 0};

@@ -194,6 +194,16 @@ budget keeps frames to about 5% of the sim thread: 2.0 ms a frame on long1
 (2.8 coloured by material), 0.33 ms on the new landscape and 1.6 ms at
 10,000 nodes -- watching now costs about 2% of a tick.
 
+**Simulation speed (design 6.16 item 11).** Same hashes throughout. long1's
+mature world: 83.5 -> 61-62 ms a tick (`auto`; 108.9 -> 58.6 with warps on
+the CPU), from the warp reference finding lane-shared work once a step
+(1,610 -> 799 ms on a dumped round, one thread). A young landscape's first
+1,000 ticks: 19.5 -> 15.2 s, the accelerator barrier also falling from 4.85
+to 0.75 ms a tick (its in-flight inputs packed in place, its gather on the
+threads). Packing's exact savings were about 1% and weren't taken; the
+overlap plan's two groups work (`warp.groups = 2`, one world) but lose to
+`auto`'s one group now, so they default off.
+
 **The map's seed** (`world.seed`, design 6.13): the map apart from the run,
 as a number or any text, drawn on the setup page with a **new map** button.
 Empty, every world is exactly as before (the landscape suite checks the same
