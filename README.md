@@ -210,7 +210,9 @@ with GDI (Windows' own `user32` and `gdi32`, nothing else).
 
 - **Live:** `nova view <config>` runs the world and shows it, writing the
   outputs the config names (`--no-output` turns them off). A sim thread steps
-  the run; the window reads view frames between ticks. Pause, step, a speed
+  the run; the window reads view frames between ticks, built on the run's
+  idle workers and kept to about 5% of the sim's time, so watching a big
+  world costs about 2% of its speed. Pause, step, a speed
   limit, snapshot now and stop: watching changes nothing. (Phase 6's live
   knobs in the toolbar are gone: since the setup page, a run's settings are
   fixed from its start. Replay logs with knob records still replay.)

@@ -350,6 +350,10 @@ struct ViewRequest {
     u64 genotype = 0;     // count living copies of this genotype on every node (0 = none)
     bool hash = false;    // compute the world hash (it reads everything: on pause)
     bool populations = false; // A5: living members of every genotype (the map of life sizes points by them)
+    // Each node's dead-matter share (NodeView::material, the map coloured by
+    // material): a scan of every node's soup, so the viewer asks only while
+    // it shows it; without, the field is 0 and not marked known.
+    bool material = true;
 };
 
 // The memory tiers' boundary (docs/world-plan.md W3) for the inspector's
@@ -485,6 +489,10 @@ class ViewSession {
     void build(const ViewRequest& q, ViewFrame* f);
     // Takes the partial chart window now (used at a pause or the end).
     void flush_sample();
+
+    // One node's NodeView (build's node pass, run on the run's thread pool
+    // between ticks: it only reads the world, and writes f->node[n] alone).
+    void node_view(u32 n, const ViewRequest& q, float inv, ViewFrame* f) const;
 
   private:
     void sample();

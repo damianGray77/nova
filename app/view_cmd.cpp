@@ -378,6 +378,10 @@ DWORD WINAPI sim_main(void* param) {
     double speed = 0;
     const double t0 = now_ms();
     double last_frame = 0, next_due = t0;
+    // The frame budget: frames are built here, between ticks, so while the
+    // world runs flat out the next waits at least 20 times the last one's
+    // build (at most 5% of this thread's time), and 33 ms to 1 s.
+    double frame_gap = 33.0;
     const u64 start_tick = run.world().tick();
     int next = 0;
     Array<ViewCommand> cmds;
@@ -479,20 +483,26 @@ DWORD WINAPI sim_main(void* param) {
             }
         }
         now = now_ms();
-        // Frames: about 30 a second while running; while paused, when the
-        // request changes (a new selection), after a command, or 4 a second.
+        // Frames: about 30 a second while running (fewer when a frame is
+        // slow to build: the budget above; a speed limit leaves this thread
+        // time to spare); while paused, when the request changes (a new
+        // selection), after a command, or 4 a second.
         const bool still = paused || finished;
         const bool changed = req.node != last_req.node || req.body != last_req.body ||
                              req.serial != last_req.serial || req.strip != last_req.strip ||
-                             req.genotype != last_req.genotype;
-        if (want && (still ? (changed || !cmds.empty() || ran || now - last_frame >= 250.0) : now - last_frame >= 33.0)) {
+                             req.genotype != last_req.genotype || req.material != last_req.material;
+        const double gap = speed > 0 ? 33.0 : frame_gap;
+        if (want && (still ? (changed || !cmds.empty() || ran || now - last_frame >= 250.0) : now - last_frame >= gap)) {
             if (still)
                 app.session->flush_sample();
             req.hash = still;
             last_req = req;
             ViewFrame* f = &app.frames[next];
             next ^= 1;
+            const double b0 = now_ms();
             app.session->build(req, f);
+            const double took = now_ms() - b0;
+            frame_gap = took * 20 < 33.0 ? 33.0 : (took * 20 > 1000.0 ? 1000.0 : took * 20);
             AcquireSRWLockExclusive(&sh.lock);
             sh.ready = f;
             sh.want = false;
@@ -518,7 +528,7 @@ DWORD WINAPI sim_main(void* param) {
             AcquireSRWLockExclusive(&sh.lock);
             const bool fresh = sh.req.node != last_req.node || sh.req.body != last_req.body ||
                                sh.req.serial != last_req.serial || sh.req.strip != last_req.strip ||
-                               sh.req.genotype != last_req.genotype;
+                               sh.req.genotype != last_req.genotype || sh.req.material != last_req.material;
             if (!sh.quit && sh.cmds.empty() && !(fresh && sh.want && !sh.ready))
                 SleepConditionVariableSRW(&sh.wake, &sh.lock, ms, 0);
             ReleaseSRWLockExclusive(&sh.lock);

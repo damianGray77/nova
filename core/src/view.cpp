@@ -784,6 +784,90 @@ void ViewSession::flush_sample() {
         sample();
 }
 
+void ViewSession::node_view(u32 n, const ViewRequest& q, float inv, ViewFrame* f) const {
+    const World& w = run_->world();
+    const SoupParams& mean = w.soup_params();
+    NodeView& v = f->node[n];
+    memset(&v, 0, sizeof v);
+    const Soup& s = w.node_soup(n);
+    const SoupParams& p = w.node_params(n);
+    v.x = px_[n];
+    v.y = py_[n];
+    v.live = w.live(n) ? 1 : 0;
+    v.life = w.life(n);
+    v.bodies = static_cast<u32>(s.body_count());
+    for (usize k = 0; k < s.body_count(); ++k)
+        v.cpus += s.body(s.body_at(k)).ncpu;
+    v.health = s.lifecycle() && v.live ? s.health() : (v.live ? 100 : 0);
+    const Lineages* L = w.node_lineages(n);
+    if (L) {
+        LineageSurvey sv;
+        L->survey(&sv);
+        v.lineages = sv.lineages;
+        v.colonists = sv.colonists;
+        v.top_alive = sv.top_alive;
+        v.top_lineage = sv.top_lineage;
+        if (q.genotype) {
+            for (usize k = 0; k < s.body_count(); ++k) {
+                const u32 blk = s.body(s.body_at(k)).blocks;
+                if (blk == kNone)
+                    continue;
+                const BlockTag tag = L->tag(blk);
+                if (tag.lineage && tag.genotype == q.genotype)
+                    ++v.holding;
+            }
+        }
+    }
+    v.soup_size = p.size;
+    v.millicores = p.millicores;
+    v.emillicores = s.e_total();
+    v.known = (1u << kColorCount) - 1;
+    if (q.material) { // Phase 10: the share of its waste that isn't dead matter (every 16th codon)
+        u32 waste = 0, live = 0;
+        for (u32 a = 0; a < p.size; a += 16) {
+            if (s.owner_block(a) != kNone)
+                continue;
+            ++waste;
+            live += p.table.op[s.mem()[a] & 63] != Op::inert;
+        }
+        v.material = waste ? static_cast<float>(live) / waste : 0.0f;
+    } else {
+        v.known &= ~(1u << kColorMaterial); // (not asked for: a scan of every soup)
+    }
+    v.free_millicores = s.free_units();
+    v.waste = s.waste();
+    v.gpus = p.gpus;
+    v.npus = p.npus;
+    v.disk = p.disk;
+    v.degree = w.degree(n);
+    const float* a = acc_.data() + static_cast<usize>(n) * kAcc;
+    v.births = a[0] * inv;
+    v.deaths = a[1] * inv;
+    v.sent = a[2] * inv;
+    v.arrived = a[3] * inv;
+    v.emits = a[4] * inv;
+    v.symptoms = a[5] * inv; // disasters (X10, X7)
+    v.struck = static_cast<u32>(a[6]);
+    v.cores_offline = s.offline_count();
+    for (u32 t = 0; t < kSubstrateTypes; ++t) { // a varied world (W8)
+        v.sub[t] = static_cast<float>(w.substrate_mult(n, t));
+        v.sub_level[t] = w.substrate_level(n, t);
+    }
+    v.occupancy = static_cast<float>(s.occupancy());
+    v.cool = p.cool;
+    v.spark_rate = static_cast<float>(p.spark_rate);
+    v.radiation = static_cast<float>(mean.copy_rate > 0 ? p.copy_rate / mean.copy_rate : 1.0);
+    v.volatility = static_cast<float>(p.volatility);
+    v.mass = w.node_mass(n);
+    if (s.warps_on()) { // Phase 8: lanes still running, bodies born on a GPU
+        for (usize wi = 0; wi < s.warp_slots(); ++wi)
+            if (s.warp(static_cast<u32>(wi)).body != kNone)
+                v.lanes += s.warp_live(static_cast<u32>(wi));
+        for (usize k = 0; k < s.body_count(); ++k)
+            v.gpu_bodies += s.body(s.body_at(k)).form == kFormGpu;
+    }
+}
+
 void ViewSession::build(const ViewRequest& q, ViewFrame* f) {
     if (q.node != kNone && q.node < run_->world().node_count())
         run_->world().warp_sync(q.node); // Phase 8: the inspected node's lanes, back from the GPU
@@ -821,87 +905,20 @@ void ViewSession::build(const ViewRequest& q, ViewFrame* f) {
 
     f->node.resize(nodes);
     if (w.model() == Model::soup) {
-        const SoupParams& mean = w.soup_params();
-        const float inv = acc_ticks_ ? 1.0f / static_cast<float>(acc_ticks_) : 0.0f;
-        for (u32 n = 0; n < nodes; ++n) {
-            NodeView& v = f->node[n];
-            memset(&v, 0, sizeof v);
-            const Soup& s = w.node_soup(n);
-            const SoupParams& p = w.node_params(n);
-            v.x = px_[n];
-            v.y = py_[n];
-            v.live = w.live(n) ? 1 : 0;
-            v.life = w.life(n);
-            v.bodies = static_cast<u32>(s.body_count());
-            for (usize k = 0; k < s.body_count(); ++k)
-                v.cpus += s.body(s.body_at(k)).ncpu;
-            v.health = s.lifecycle() && v.live ? s.health() : (v.live ? 100 : 0);
-            const Lineages* L = w.node_lineages(n);
-            if (L) {
-                LineageSurvey sv;
-                L->survey(&sv);
-                v.lineages = sv.lineages;
-                v.colonists = sv.colonists;
-                v.top_alive = sv.top_alive;
-                v.top_lineage = sv.top_lineage;
-                if (q.genotype) {
-                    for (usize k = 0; k < s.body_count(); ++k) {
-                        const u32 blk = s.body(s.body_at(k)).blocks;
-                        if (blk == kNone)
-                            continue;
-                        const BlockTag tag = L->tag(blk);
-                        if (tag.lineage && tag.genotype == q.genotype)
-                            ++v.holding;
-                    }
-                }
-            }
-            v.soup_size = p.size;
-            v.millicores = p.millicores;
-            v.emillicores = s.e_total();
-            { // Phase 10: the share of its waste that isn't dead matter (every 16th codon)
-                u32 waste = 0, live = 0;
-                for (u32 a = 0; a < p.size; a += 16) {
-                    if (s.owner_block(a) != kNone)
-                        continue;
-                    ++waste;
-                    live += p.table.op[s.mem()[a] & 63] != Op::inert;
-                }
-                v.material = waste ? static_cast<float>(live) / waste : 0.0f;
-            }
-            v.free_millicores = s.free_units();
-            v.waste = s.waste();
-            v.gpus = p.gpus;
-            v.npus = p.npus;
-            v.disk = p.disk;
-            v.degree = w.degree(n);
-            const float* a = acc_.data() + static_cast<usize>(n) * kAcc;
-            v.births = a[0] * inv;
-            v.deaths = a[1] * inv;
-            v.sent = a[2] * inv;
-            v.arrived = a[3] * inv;
-            v.emits = a[4] * inv;
-            v.symptoms = a[5] * inv; // disasters (X10, X7)
-            v.struck = static_cast<u32>(a[6]);
-            v.cores_offline = s.offline_count();
-            for (u32 t = 0; t < kSubstrateTypes; ++t) { // a varied world (W8)
-                v.sub[t] = static_cast<float>(w.substrate_mult(n, t));
-                v.sub_level[t] = w.substrate_level(n, t);
-            }
-            v.occupancy = static_cast<float>(s.occupancy());
-            v.cool = p.cool;
-            v.spark_rate = static_cast<float>(p.spark_rate);
-            v.radiation = static_cast<float>(mean.copy_rate > 0 ? p.copy_rate / mean.copy_rate : 1.0);
-            v.volatility = static_cast<float>(p.volatility);
-            v.known = (1u << kColorCount) - 1;
-            v.mass = w.node_mass(n);
-            if (s.warps_on()) { // Phase 8: lanes still running, bodies born on a GPU
-                for (usize wi = 0; wi < s.warp_slots(); ++wi)
-                    if (s.warp(static_cast<u32>(wi)).body != kNone)
-                        v.lanes += s.warp_live(static_cast<u32>(wi));
-                for (usize k = 0; k < s.body_count(); ++k)
-                    v.gpu_bodies += s.body(s.body_at(k)).form == kFormGpu;
-            }
-        }
+        // Every node's view at once, on the run's workers (idle between
+        // ticks): a big world's pass was 10-20 ms on this thread alone, the
+        // sim's time while it is watched.
+        struct Job {
+            const ViewSession* s;
+            const ViewRequest* q;
+            ViewFrame* f;
+            float inv;
+        } job = {this, &q, f, acc_ticks_ ? 1.0f / static_cast<float>(acc_ticks_) : 0.0f};
+        auto task = [](void* ctx, u32 n) {
+            const Job& j = *static_cast<const Job*>(ctx);
+            j.s->node_view(n, *j.q, j.inv, j.f);
+        };
+        run_->pool().run(nodes, task, &job);
         acc_.fill(0);
         acc_ticks_ = 0;
     } else {

@@ -292,6 +292,35 @@ void test_frame_matches_world() {
                    v.x >= 0 && v.x <= 1 && v.y >= 0 && v.y <= 1 && v.soup_size == w.node_params(n).size;
     }
     CHECK(nodes_ok);
+    // The node pass runs on the run's workers: the same views from a run on
+    // one thread, and the dead-matter share only when asked for (known says
+    // whether it is there).
+    {
+        Run one;
+        CHECK(make_run(one, cfg.c_str(), 1));
+        one.keep_genebank(true);
+        ViewSession s1;
+        s1.attach(&one, 10);
+        for (u32 t = 0; t < 120; ++t) {
+            one.step();
+            s1.after_step();
+        }
+        ViewFrame f1;
+        s1.build(q, &f1);
+        bool same = f1.node.size() == f.node.size();
+        for (usize n = 0; same && n < f.node.size(); ++n)
+            same = memcmp(&f1.node[n], &f.node[n], sizeof(NodeView)) == 0;
+        CHECK(same);
+        ViewRequest nq = q;
+        nq.material = false;
+        s1.build(nq, &f1);
+        bool skipped = true, some = false;
+        for (usize n = 0; n < f.node.size(); ++n) {
+            skipped = skipped && f1.node[n].material == 0 && !((f1.node[n].known >> kColorMaterial) & 1);
+            some = some || f.node[n].material > 0;
+        }
+        CHECK(skipped && some && ((f.node[0].known >> kColorMaterial) & 1));
+    }
     u32 undirected = 0;
     for (u32 e = 0; e < w.edge_count(); ++e)
         undirected += w.edge_src(e) < w.edge_dst(e);

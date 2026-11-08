@@ -144,6 +144,10 @@ class Run {
     World& world() { return world_; }
     const World& world() const { return world_; }
     u32 threads() const { return pool_.threads(); }
+    // The run's workers, idle between steps: an observer may borrow them then,
+    // on the stepping thread (the viewer's node pass), for work that only
+    // reads the world.
+    ThreadPool& pool() { return pool_; }
 
     // Instructions executed so far (soup model).
     u64 instructions() const { return instructions_; }

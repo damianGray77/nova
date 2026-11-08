@@ -313,6 +313,7 @@ ViewRequest Viewer::request() const {
     q.strip = strip_by_;
     q.genotype = sel_save_ < saves_.size() ? saves_[sel_save_].genotype : 0;
     q.populations = life_mode_; // A5: the map sizes points by their living members
+    q.material = color_by_ == kColorMaterial; // (a scan of every soup: only while the map shows it)
     return q;
 }
 

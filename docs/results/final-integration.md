@@ -183,8 +183,16 @@ too, 12.0 with nothing -- the always-on observers cost about 1%. Watching
 costs more: the viewer builds its frame on the sim thread between ticks
 (about 30 a second, so one after nearly every tick of a big world), and a
 frame took 14.7 ms on long1 (a tick: 83 ms) and 9.9 ms on a new landscape (a
-tick: 22 ms). A watched big world therefore runs some 15-30% slower than
-headless.
+tick: 22 ms). A watched big world therefore ran some 15-30% slower than
+headless. GDI's drawing (4-7 ms a frame at 1,000 nodes, about 11 ms at
+10,000, on the window's own thread) never held the simulation up, so a GPU
+renderer was not the fix. Two per-node passes were most of the build: the
+lineage survey (7.5 ms on long1) and the dead-matter scan (3.6 ms on long1,
+8.4 on the new landscape). Now the node pass runs on the run's pool between
+ticks, the scan only when the map is coloured by material, and a frame
+budget keeps frames to about 5% of the sim thread: 2.0 ms a frame on long1
+(2.8 coloured by material), 0.33 ms on the new landscape and 1.6 ms at
+10,000 nodes -- watching now costs about 2% of a tick.
 
 **The map's seed** (`world.seed`, design 6.13): the map apart from the run,
 as a number or any text, drawn on the setup page with a **new map** button.
