@@ -1718,6 +1718,69 @@ Outputs include summary and Pareto CSVs, best configurations and fitted
 setting influence. Full-size, longer confirmation remains necessary before
 treating a short-world winner as an ecological improvement.
 
+### 6.24 Life history: gestation, rays, wipe warnings and voluntary sleep [built 2026-11-08]
+
+Built from `docs/lifehistory-plan.md` revision 2, approved by Damian after
+long2 showed life settling on the shortest copier that works. Each of the
+four is behind its own keys and off by default, so every earlier hash,
+snapshot and replay log holds.
+
+**Gestation** (`life.gestation`, `life.gestation_per_codon`). A daughter
+can be divided off only that long after the ALLOC that made her block
+(`Block.born`, the old padding word, set only with gestation on). An
+earlier DIVIDE waits rather than failing: the thread runs the DIVIDE again
+each tick at one instruction's cost, so the frozen watchdog leaves it
+alone; a warp waits in front of its DIVIDE until the ripe tick. A new ALLOC
+restarts the clock. Anything a program does between ALLOC and DIVIDE that
+fits in the gestation is free, which is a reason to carry more code.
+
+**Rays** (`hazard.rays`). Cosmic rot, storm static and lightning travel as
+rays. Each is drawn where today's flip would be (the same Poisson process,
+from the node's stream), heading up or down at random, and always starts
+outside allocated space: drawn inside a block, it starts at the last
+unallocated codon behind it, or at that end of the soup. Each codon it
+passes, it flips one bit of with chance `hazard.ray_flip` (NOPs:
+`hazard.ray_flip_nop`; cosmic rays also take the page's error multiplier),
+and it loses `hazard.ray_absorb` for living code, `hazard.ray_absorb_waste`
+for dead matter (waste and INERT) and `hazard.ray_absorb_nop` for NOPs
+(defaults 1, 2, 8). Energies: `hazard.ray_cosmic` 512, `disaster.static_energy`
+32; a strike is a ray of its drawn size x `disaster.strike_energy` that
+randomises every codon it passes. Rays arrive at the old flip rate divided
+by an unshielded ray's flips, so unshielded code takes today's damage
+(measured x0.98-0.99). Because rays drawn inside a body start at its edge,
+a body's exposure still grows with its own length, as before; each NOP of
+padding then costs the rays from outside absorb_nop / absorb_waste - 1
+codons' worth of reach (3 at the defaults). Four NOPs on each side of a
+32-codon core cut its hits to x0.83 under 64-energy rays; denser dead
+matter (absorb 4) to x0.81.
+
+**Wipe warnings** (`mem.wipe_warning`, `mem.wipe_false_alarms`,
+`mem.wipe_flicker`). A volatility wipe is drawn as before but lands that
+many ticks later; a share (0.25) fade instead, as disasters' false alarms
+do. Until it lands, at f of the way, its pages' heat is raised to at least
+f x the memory curve's hot mark (SENSE reads it; the error multiplier rises
+with it) and they flicker at f x `mem.wipe_flicker` bit flips per codon a
+tick. No new reading (Damian, Phase 4). Pending wipes are world state:
+snapshot v5 holds them (with warnings on); v4 files load with none.
+
+**Voluntary sleep** (`life.sleep`, `dormant.sleep_max`). YIELD whose BX
+picks 1 (rest here) or 2 (drift) through the resource selector, with CX =
+N > 0, sends the program dormant for N ticks (at most 5,000) at the death
+sweep, on its reserves; with none it dies. Its timer
+(`Dormant.spare`, flag `kDormantVoluntary`) runs down first and it never
+wakes early; then it wakes as any dormant program does. BX 1 rests where it
+is (`kDormantStays`); BX 2 drifts, its timer travelling and running in
+`Cargo.sleep`. The plan's four-way `life.dormancy` choice became a second
+switch, so configs naming `life.dormancy = true/false` read as before:
+`life.dormancy` is the automatic rule, `life.sleep` the instruction, and
+"voluntary only" is the first off and the second on. With sleep on a
+warp's YIELD is a host instruction (`WC_SLEEP` in the shared constants),
+which the host runs as a CPU's, taking the first lane's BX and CX; the GPU
+kernels agree with the reference word for word. The `sleeper` milestone is
+a gated lineage's first voluntary sleep; stats add `sleeps`, `sleep_woke`
+and `sleep_expired`, after `wipe_warnings`, `wipe_false_alarms` and
+`wipe_flickers`.
+
 ## 7. Technical direction [decided via 7.1]
 
 - C++ (or Rust) core; Python only for analysis. *Superseded by 7.1 A and B: C++20, no STL, no third-party, no Python.*

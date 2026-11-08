@@ -1,5 +1,7 @@
 # Plan: gestation, ray hazards and voluntary dormancy
 
+> **Built 2026-11-08** (steps 1-5; design.md 6.24 says what changed in the build: V4's choice is a second switch, `life.sleep`, and W adds `mem.wipe_flicker`). Calibration runs (step 6) are still to do.
+>
 > **Revision 2, APPROVED by Damian (2026-11-08)**, with two answers changed from revision 1:
 > - Volatility wipes stay wipes, but now come with warning symptoms (new section 3).
 > - Dead matter shields too, and rays always start outside allocated space (R1, R3).
