@@ -122,6 +122,22 @@ u32 LifeMap::find(u64 genotype) const {
     return i ? *i : kNone;
 }
 
+void LifeMap::drop_before(u64 tick) {
+    if (!final_)
+        return;
+    usize k = 0;
+    for (usize i = 0; i < pts_.size(); ++i)
+        if (pts_[i].last >= tick)
+            pts_[k++] = pts_[i];
+    if (k == pts_.size())
+        return;
+    pts_.resize(k);
+    index_.clear();
+    for (usize i = 0; i < k; ++i)
+        index_.get_or_insert(pts_[i].genotype) = static_cast<u32>(i);
+    t0_ = tick > t0_ ? tick : t0_;
+}
+
 double LifeMap::variance_share(u32 axis) const {
     return axis < var_.size() && total_var_ > 0 ? var_[axis] / total_var_ : 0.0;
 }

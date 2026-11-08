@@ -396,6 +396,7 @@ class ProfileReader {
     i32 col_kinds_ = -1, col_act_[kPaCount] = {}, col_lta_[6] = {};
     i32 col_nb_[5] = {}; // node_bodies, lin_alive, geno_alive, nb_left, nb_right
     i32 col_copy_[3] = {-1, -1, -1}; // op_COPY, op_WRITE, op_movii (whichever the table has)
+    i32 max_col_ = 0;                 // the last column read (under 256: a row splits into at most 256)
     u32 fields_ = 0;
     u64 rows_ = 0;
     char err_[160] = {};

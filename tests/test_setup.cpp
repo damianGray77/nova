@@ -484,7 +484,8 @@ void test_page_check_merged() {
     t.append("world.disk = 1000\naccel.gpu = cpu\naccel.npu = cpu\nwarp.device = cpu\n");
     SettingsCheck dq;
     check_settings(t.view(), &dq, run_keys_here, false);
-    CHECK(dq.archive == 250 && dq.ram == 6.0 * 2048.0 * 20.0 + 6.0 * 1250.0 * disk_bytes_per_codon(false));
+    // (salvage stamps on, as salvage.ratio's default 4 makes them)
+    CHECK(dq.archive == 250 && dq.ram == 6.0 * 2048.0 * 20.0 + 6.0 * 1250.0 * disk_bytes_per_codon(true));
     CHECK(Config::set_fallback(kLegacyDefaults, nullptr));
     // The landscape summary counts the substrates as nova land does, and the
     // cache follows the substrates' own settings.

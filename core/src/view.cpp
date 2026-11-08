@@ -8,6 +8,7 @@
 #include "nova/genebank.h"
 #include "nova/hash.h"
 #include "nova/novelty.h" // the live novelty meter (A2)
+#include "nova/profile.h" // behaviour profiles' roles, for the map of life (A3, A5)
 
 namespace nova {
 
@@ -379,6 +380,8 @@ void ViewFrame::clear_new() {
     if (life_sent)
         life.clear();
     life_sent = false;
+    role_genotype.clear();
+    role_of.clear();
 }
 
 // Sums: the early tallies, the link counts, the warp tallies, Phase 9's
@@ -614,6 +617,11 @@ void ViewSession::attach(Run* run, u32 sample_every) {
     cand_codons_.clear();
     closed_.clear();
     closed_text_.clear();
+    open_.clear();
+    open_text_.clear();
+    open_tick_ = ~0ull;
+    role_genotype_.clear();
+    role_of_.clear();
     pop_tick_ = ~0ull;
 }
 
@@ -633,6 +641,18 @@ void ViewSession::after_step() {
     for (usize i = 0; i < sizeof(SoupTally) / sizeof(u64); ++i)
         s[i] += t[i];
     ++ticks_;
+    // A5: this step's finished behaviour samples (A3), their roles by the live
+    // rules, for the map's colour by role (observe-only; node order).
+    for (u32 n = 0; n < w.node_count(); ++n) {
+        const Profiles* P = w.node_profiles(n);
+        if (!P)
+            break; // profiles are off on every node
+        for (usize i = 0; i < P->finished().size(); ++i) {
+            const ProfileSample& x = P->finished()[i];
+            role_genotype_.push(x.genotype);
+            role_of_.push(static_cast<u8>(role_by_rules(x.act)));
+        }
+    }
     for (u32 n = 0; n < w.node_count(); ++n) {
         const SoupTally& nt = w.node_soup(n).tally();
         float* a = acc_.data() + static_cast<usize>(n) * kAcc;
@@ -743,6 +763,7 @@ void ViewSession::close_window() {
     top_picks(false, &closed_, &closed_text_);
     cand_.clear();
     cand_codons_.clear();
+    open_tick_ = ~0ull; // a new open window: its leaders afresh
     open_first_ = open_first_ == ~0ull ? ~0ull : open_first_ + nov_window_;
 }
 
@@ -1176,8 +1197,32 @@ void ViewSession::build(const ViewRequest& q, ViewFrame* f) {
     }
     closed_.clear();
     closed_text_.clear();
-    if (f->novelty && !cand_.empty())
-        top_picks(true, &f->picks_open, &f->pick_text);
+    // A5: the roles learned since the last frame.
+    f->role_genotype.append(role_genotype_.data(), role_genotype_.size());
+    f->role_of.append(role_of_.data(), role_of_.size());
+    role_genotype_.clear();
+    role_of_.clear();
+    // The open window's leaders, rescored at most every tenth of a window (100
+    // ticks at most) or when the tick moved, paused -- not every frame: a big
+    // world's open window holds hundreds of thousands of candidates. Every
+    // frame carries the latest (the viewer replaces its list with them).
+    if (f->novelty && !cand_.empty()) {
+        const u64 every = nov_window_ / 10 < 1 ? 1 : (nov_window_ / 10 > 100 ? 100 : nov_window_ / 10);
+        if (open_tick_ == ~0ull || w.tick() < open_tick_ || w.tick() >= open_tick_ + every ||
+            (q.hash && w.tick() != open_tick_)) {
+            open_tick_ = w.tick();
+            open_.clear();
+            open_text_.clear();
+            top_picks(true, &open_, &open_text_);
+        }
+        for (usize i = 0; i < open_.size(); ++i) {
+            NoveltyPick p = open_[i];
+            const u32 off = static_cast<u32>(f->pick_text.size());
+            f->pick_text.append(open_text_.data() + p.off, p.n);
+            p.off = off;
+            f->picks_open.push(p);
+        }
+    }
     // A5: living members per genotype (the map of life's sizes), at most
     // every 100 ticks (or when the tick moved, paused).
     if (q.populations && w.model() == Model::soup && w.node_lineages(0) &&
@@ -1351,6 +1396,37 @@ bool RunArchive::load(const char* dir, TextBuf* err) {
             return false;
     } else if (has_bank && want_life_ < 0) {
         notes_.append("map of life: not built (genebank.txt is over 256 MB; nova view --run <dir> --life builds it)\n");
+    }
+    // A5: the profiled genotypes' roles (profiles.csv, A3), each its latest
+    // sample's, for the map's colour by role. (A run without the file, or with
+    // a malformed one, just has none.)
+    role_genotype_.clear();
+    role_of_.clear();
+    {
+        TextBuf ppath;
+        path_join(ppath, Str(dir), "profiles.csv");
+        ProfileReader pr;
+        TextBuf perr;
+        if (pr.open(ppath.c_str(), &perr)) {
+            HashMap<u32> at; // genotype -> its place
+            ProfileRow r;
+            while (pr.next(&r)) {
+                bool fresh = false;
+                u32& i = at.get_or_insert(r.genotype, &fresh);
+                if (fresh) {
+                    i = static_cast<u32>(role_genotype_.size());
+                    role_genotype_.push(r.genotype);
+                    role_of_.push(static_cast<u8>(r.role));
+                } else {
+                    role_of_[i] = static_cast<u8>(r.role);
+                }
+            }
+            notes_.append("roles: ");
+            notes_.append_u64(role_genotype_.size());
+            notes_.append(" profiled genotypes from profiles.csv (");
+            notes_.append_u64(pr.rows());
+            notes_.append(" samples)\n");
+        }
     }
     return true;
 }
@@ -1897,6 +1973,8 @@ void RunArchive::build(u32 window, const ViewRequest& q, ViewFrame* f) {
         f->life = move(life_);
         f->life_sent = true;
         life_.clear(); // (moved: start it clean)
+        f->role_genotype.append(role_genotype_.data(), role_genotype_.size());
+        f->role_of.append(role_of_.data(), role_of_.size());
     }
     f->novelty = novelty_;
     f->novelty_window = pick_window_;

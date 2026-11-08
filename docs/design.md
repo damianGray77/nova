@@ -1534,7 +1534,11 @@ values. The check calls the engine's configuration-reading path and returns
 before building a world or opening devices. It reports problems by setting,
 effective values, land and resource summaries, and RAM and disk estimates.
 The page and the budget fit check share `world_footprint`, including archive
-space. Budget estimates still have the salvage issue in section 10.
+space. The estimates count the salvage stamps (4 bytes a disk codon, on by
+default), and `budget.disk` covers the whole disk tier, the archive
+included: a `world.archive` given comes out of the budget first, else the
+archive is a quarter of `world.disk` (fixed after the review on 2026-11-07;
+before it, `budget.disk = 20GB` made about 44 GB of files).
 
 A run's settings are fixed from its start (Damian). Start writes every
 setting to `run.cfg` and starts in the window or headlessly. Live and archived
@@ -1671,13 +1675,22 @@ silhouette, and reports named clusters, census and working-code complexity.
 Names summarize actions rather than proving a role. `analyse groups`
 compares grouped arrivals, neighbouring kin and listening then branching
 against chance baselines. Planted effects and shuffled controls test them.
+The bitmaps mark the codons a body's own CPUs ran: warps' lanes count in
+`lane_instr` only, since where lanes stand is on the host only when they
+didn't run on the GPU, which `warp.device = auto` decides by timing. Kin
+clustering takes one side of each sample (its next neighbour in memory), so
+two neighbours both sampled don't count their adjacency twice.
 
 `analyse tree` uses shifted and rotated alignment plus neighbour joining,
 reports parent-link agreement and likely orphan ancestors, and caps input
 at 2,000 genomes by default. The map of life hashes three-codon runs into
 1,024 counts and fits PCA on a reference window. Coordinates stay fixed
-while its time slider moves; live populations size the points. The viewer
-can render maps and animation frames headlessly. These measures do not
+while its time slider moves; live populations size the points. Points are
+coloured by lineage or, where a behaviour profile sampled the genotype, by
+its latest sample's role (the header's colour button, `--life-colour role`;
+a finished run's roles come from profiles.csv). A long live session keeps
+the genotypes saved since the oldest save the viewer still holds. The
+viewer can render maps and animation frames headlessly. These measures do not
 establish causal communication or evolutionary progress.
 
 `nova search` starts with a Latin hypercube, then uses a Matérn Gaussian
@@ -1904,11 +1917,22 @@ this build does not start it automatically.
 
 ## 10. Open questions
 
-From the 2026-11-07 build, still for Damian: the budget estimate assumes
-`salvage.ratio = 0` although the default is 4 (a nominal 20 GB disk can use
-about 36 GB); whether disk-failure warnings should identify the tier at the
-episode's start; approval of the tracker's four-codon descent floor; and
-the NPU's cost and roughly 710-tick latency, parked for tuning. Old logs
+From the 2026-11-07 build, still for Damian: whether disk-failure warnings
+should identify the tier at the episode's start; approval of the tracker's
+four-codon descent floor; and the NPU's cost and roughly 710-tick latency,
+parked for tuning. (The budget estimate's salvage assumption is fixed: 6.18.)
+From the review after it: whether A5's genome vectors should also carry
+the behaviour profile "where A3 has one" (not built: few genotypes are ever
+sampled, and a point that gained a profile later would move, against the
+fixed axes); and three memory-tier prices that differ from world-plan W3's
+worked numbers, to confirm -- every slow-tier price (stores and scans too)
+is scaled by the load ratio (a 32-codon slow copy costs 683 adds, not the
+plan's about 620), a DISK op's memory side is now priced per codon by tier
+(nothing before tiers), and the E cores' slow load is scaled, not measured.
+A known bug, older than this build: a landscape world resumed from a
+snapshot drifts from the uninterrupted run (warps' running-lane counts;
+results/final-integration.md), so snapshots aren't yet exact resume points
+there. Old logs
 continue replaying their recorded knob changes. Sampling and novelty are
 observers, so their histories restart at snapshots even though the world
 continues exactly. The analysis roles and maps are measurements to interpret,

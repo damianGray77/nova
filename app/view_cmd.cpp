@@ -70,6 +70,7 @@ struct ViewArgs {
     u32 life_ref = RunArchive::kLifeRefAll; // --map-ref all | first | A-B
     u64 ref_a = 0, ref_b = 0;
     bool show_life = false, show_kinds = false; // --show life | kinds
+    bool life_by_role = false;                  // --life-colour role (A5: the map of life by role)
     u32 sub_type = 0;                           // --substrate TYPE (with --color substrate)
 };
 
@@ -185,6 +186,15 @@ bool parse_view_args(int argc, char** argv, ViewArgs* a) {
                 a->show_life = true;
             else if (strcmp(v, "kinds") == 0)
                 a->show_kinds = true;
+            else
+                return false;
+        } else if (strcmp(s, "--life-colour") == 0 || strcmp(s, "--life-color") == 0) {
+            if (!next(&v))
+                return false;
+            if (strcmp(v, "role") == 0)
+                a->life_by_role = true;
+            else if (strcmp(v, "lineage") == 0)
+                a->life_by_role = false;
             else
                 return false;
         } else if (strcmp(s, "--substrate") == 0) {
@@ -1087,6 +1097,7 @@ void apply_show(Viewer& v, const ViewArgs& a) {
         v.set_kinds(true);
     if (a.show_life)
         v.set_life_mode(true);
+    v.set_life_by_role(a.life_by_role);
 }
 
 bool render_page(SetupPage& page, const char* out, u32 w, u32 h) {
@@ -1116,7 +1127,8 @@ int cmd_view(int argc, char** argv) {
                         "  (--group NAME: open on the settings page, at that group)\n"
                         "  (--show life | kinds: the map of life, the new kinds of life; --substrate TYPE with\n"
                         "   --color substrate: p_cores e_cores gpu npu mem_fast mem_slow disk_fast disk_slow)\n"
-                        "  (--map-of-life PREFIX [--frames N]: frames of the map of life, PREFIX_0000.png ...)\n");
+                        "  (--map-of-life PREFIX [--frames N]: frames of the map of life, PREFIX_0000.png ...;\n"
+                        "   --life-colour lineage | role: its points by lineage, or by behaviour-profile role)\n");
         return 2;
     }
     App* app = new App;

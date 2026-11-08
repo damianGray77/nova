@@ -737,8 +737,8 @@ NOVA_TEXT("budget.memory", "off", 0, "Budgets", "Memory budget", "",
           "off, a percentage of the RAM available (25%) or an amount (24GB): sets world.soup_size, the mean per "
           "node.")
 NOVA_TEXT("budget.disk", "off", 0, "Budgets", "Disk budget", "disk.path",
-          "off, a percentage of the free space at disk.path (20%) or an amount (100GB): sets world.disk (the "
-          "archive, world.archive, comes on top).")
+          "off, a percentage of the free space at disk.path (20%) or an amount (100GB) for the whole disk tier, "
+          "salvage stamps included: sets world.disk so it and its archive (world.archive) fit.")
 NOVA_TEXT("budget.gpu", "off", 0, "Budgets", "GPU budget", "",
           "off or a percentage (50%): a calibration sizes gpu.elements (and warp.capacity, with warps) to keep the "
           "GPU about that busy.")

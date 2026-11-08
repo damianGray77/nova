@@ -93,3 +93,76 @@ open decisions. New runs keep fixed settings; old knob records replay.
 Measurement files and rendered evidence are retained under
 `out/verification-20261107` in the main checkout before worktree cleanup.
 The stray `nova_test_gpu.replay` is excluded from every commit.
+
+## Review and fixes (after the push, 2026-11-07)
+
+Damian asked for the budget bug fixed and the last three features
+reviewed. Three read-only reviews (memory tiers, profiles, the viewer and
+the integration) found nothing that changes a world; these were fixed:
+
+- **The disk budget** (open question 1): `budget.disk` and the footprint
+  estimate assumed salvage stamps off unless `salvage.ratio` was set, though
+  its default is 4, and the budget sized only `world.disk` with the archive
+  on top. Both now count the stamps, and the budget covers the whole tier:
+  a given `world.archive` comes out of it first, else world.disk is the
+  largest d with d + d/4 inside it. 8 MB now makes 8,388,357 bytes of tier
+  (the old rule: about 2.2 times that). `key_given` tells a given key from
+  a computed default without reading one.
+- **The novelty model's counts** could wrap after 2^32 codons learned (about
+  a million ticks of a big landscape), making a probability exceed 1, a
+  negative surprise and an out-of-range histogram index. Totals are now 64
+  bits, counts saturate, and the bin index is NaN-safe.
+- **Profiles under `warp.device = auto`:** lanes were marked in the
+  executed-code bitmap only when their warp hadn't run on the GPU, which is
+  decided by timing, so `profiles.csv` and the `work_len` gauge could vary
+  between runs. Lanes are no longer marked (their work is `lane_instr`);
+  `on_lanes` checks the body's serial.
+- **`nova analyse roles`** rescanned every row for every window; the rows
+  are now bucketed by one sort.
+- **Kin clustering** counted an adjacency twice when both neighbours were
+  sampled; it takes one side per sample now. Planted z stays about 38.
+- **The live map of life** grew without bound once opened; it now drops the
+  genotypes not saved since the oldest save the viewer keeps. The open
+  window's "new kinds of life" are rescored at most every tenth of a window
+  (or on a paused frame), not every frame on the sim thread.
+- **DISK's memory-side price** checked only the length against the body's
+  disk, so a DISK failing on its range was charged its moves; it now checks
+  `[ax, ax + n)`, as its comment says.
+- **Readers:** a profiles.csv header whose needed column is past the 256th,
+  and an arrivals node id over `world.nodes`' range, are refused instead of
+  read out of bounds. `analyse groups` notes when its pair cap is hit.
+- **A5's colour by role** was missing: the map can now colour points by
+  their latest profile's role (live from the frames, a finished run from
+  profiles.csv), with a legend and the role in the tooltip.
+
+Left for Damian (design section 10): the behaviour profile in A5's genome
+vector, and three memory-tier prices that differ from W3's worked numbers.
+All 46 suites pass.
+
+### Release checks of the new features
+
+`configs/landscape.cfg` (1,000 nodes, every resource doubled, everything
+on, the real RTX 5080 and NPU) ran 2,000 ticks in 53 s on 20 threads, with
+the disasters made frequent: 2 surges, 10 crashes, 6 burnouts, 10 disk
+failures, 26 storms and 27 lightning strikes, 20 collapses. Memory tiers
+held 897,657 fast codons (590 fast ALLOCs, 453 failed); 3,821 profile
+samples; the live novelty columns filled. Outputs, snapshots and the real
+devices against the CPU reference all leave the world's hash unchanged, and
+a snapshot resumed at 4 and at 23 threads gives one hash. Every `nova
+analyse` command, every render (`--show life`, `--life-colour role`,
+`--show kinds`, `--map-of-life`, substrates, live, the setup page) and `nova
+land` ran. `budget.disk = 1GB` made disk-tier files peaking at 1,073,741,500
+bytes. The long run's `snap.600000`, resumed 200 ticks by its own build and
+by this one, gives the same hash (`ac6a0d4441722c93`), and `nova view --run
+runs\long1` renders all 68 windows.
+
+**Found, not fixed: a resumed snapshot is not exact on a landscape.**
+Resumed from its snapshot, `landscape.cfg` reaches a different (repeatable)
+hash than the uninterrupted run -- also with the CPU reference, and also in
+the build from before this one (98c2a3c, at every snapshot tried), so it is
+older than these features. The loaded state hashes the same; the first
+difference is warp working state a snapshot rebuilds: some warps' running
+lane count (`wlive_`) is 0 in the running world while their lanes, brought
+home, are all running, and the resumed world counts them as running. The
+tests' snapshot gates (smaller procedural worlds) don't meet it.
+`nova run --dump-node N:PREFIX` now writes that working state too.

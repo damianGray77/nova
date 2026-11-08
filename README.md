@@ -29,7 +29,8 @@ reference. `nova analyse novelty|roles|groups|tree|scores <run folder>`
 produces offline reports (`nova analyse` lists options). `nova search
 <search file> --dry-run` checks a tuning search before running its trials.
 `nova view --run <folder> --show life --render life.png` renders the map of
-life; `--map-of-life frames/life --frames 24` writes animation frames.
+life (`--life-colour role` colours it by behaviour-profile role);
+`--map-of-life frames/life --frames 24` writes animation frames.
 The viewer also offers new kinds of life, substrate maps and disaster marks.
 
 ## Status: varied world, disasters and analysis built (design.md 6.18–6.23)

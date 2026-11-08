@@ -3445,6 +3445,48 @@ void Soup::debug_dump(const char* prefix) const {
     out("x_espeed", espeed_.data(), espeed_.size() * sizeof(float));
     out("x_ework", ework_.data(), ework_.size() * sizeof(u32));
     out("x_warp_upkeep", warp_upkeep_.data(), warp_upkeep_.size() * sizeof(double));
+    // Later state (Phase 4 onward), for bisecting a snapshot divergence: the
+    // disk and its tiers, the unit ledgers, dormancy, the disasters' offline
+    // cores; and more of what a snapshot leaves out (x_: derived or working).
+    out("disk_mem", disk_.mem.data(), disk_.mem.size());
+    out("disk_owner", disk_.owner.data(), disk_.owner.size() * sizeof(u32));
+    out("disk_ext", disk_.ext.data(), disk_.ext.size() * sizeof(DiskExtent));
+    out("disk_free_ext", disk_.free_ext.data(), disk_.free_ext.size() * sizeof(u32));
+    out("disk_total", disk_.total.data(), disk_.total.size() * sizeof(u32));
+    out("disk_stamp", disk_.stamp.data(), disk_.stamp.size() * sizeof(u32));
+    const u32 dcount[3] = {disk_.free, disk_.afree, disk_.fast};
+    out("x_disk_counts", dcount, sizeof dcount);
+    out("x_disk_used", disk_.used.data(), disk_.used.size() * sizeof(u64));
+    const UnitLedger* led[2] = {&gpu_, &npu_};
+    const char* lname[2][5] = {{"gpu_owner", "gpu_pool", "gpu_heat", "gpu_count", "x_gpu_pool_pos"},
+                               {"npu_owner", "npu_pool", "npu_heat", "npu_count", "x_npu_pool_pos"}};
+    for (u32 i = 0; i < 2; ++i) {
+        out(lname[i][0], led[i]->owner.data(), led[i]->owner.size() * sizeof(u32));
+        out(lname[i][1], led[i]->pool.data(), led[i]->pool.size() * sizeof(u32));
+        out(lname[i][2], led[i]->heat.data(), led[i]->heat.size() * sizeof(float));
+        out(lname[i][3], led[i]->count.data(), led[i]->count.size() * sizeof(u32));
+        out(lname[i][4], led[i]->pool_pos.data(), led[i]->pool_pos.size() * sizeof(u32));
+    }
+    out("dorm", dorm_.data(), dorm_.size() * sizeof(Dormant));
+    out("offline", offline_.data(), offline_.size() * sizeof(OfflineCore));
+    out("page_fetch", page_fetch_.data(), page_fetch_.size() * sizeof(u32));
+    out("page_write", page_write_.data(), page_write_.size() * sizeof(u32));
+    out("x_used", used_.data(), used_.size() * sizeof(u64));
+    out("x_pool_pos", pool_pos_.data(), pool_pos_.size() * sizeof(u32));
+    out("x_origin", origin_.data(), origin_.size());
+    out("x_wstate", wstate_.data(), wstate_.size());
+    out("x_wsteps", wsteps_.data(), wsteps_.size() * sizeof(u32));
+    out("x_wbody_chain", wbody_chain_.data(), wbody_chain_.size() * sizeof(u32));
+    out("x_emit", emit_.data(), emit_.size() * sizeof(i64));
+    out("x_field", field_.data(), field_.size() * sizeof(i32));
+    out("x_cpu_time", cpu_time_.data(), cpu_time_.size() * sizeof(u32));
+    const u64 misc[10] = {free_epoch_, fail_epoch_, fail_len_, wchain_, wround_, writes_, arrived_dry_, arrived_all_,
+                          static_cast<u64>(faults_on_), static_cast<u64>(collapse_)};
+    out("x_misc", misc, sizeof misc);
+    const double misc_d[5] = {flaw_left_, copy_left_, hazard_mult_, fault_left_, static_cast<double>(ambient_)};
+    out("x_misc_d", misc_d, sizeof misc_d);
+    out("x_weather", &weather_, sizeof weather_);
+    out("x_fever", fever_unit_.data(), fever_unit_.size() * sizeof(u32));
 }
 
 namespace {

@@ -848,6 +848,7 @@ void test_everything() {
     CHECK_EQ_U64(hashes[2], hashes[0]);
     CHECK_EQ_U64(hashes[3], hashes[0]);
     CHECK(held_max > 0 && sum.wipes > 0 && sum.warp_steps > 0 && (sum.crashes + sum.burnouts + sum.disk_failures) > 0);
+    CHECK(sum.fast_allocs + sum.fast_alloc_fails > 0); // the fast-only ALLOC ran, through threads, shuffle and snapshot
     {
         Run a;
         CHECK(make_run(a, everything("cpu"), 4));

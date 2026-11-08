@@ -314,8 +314,9 @@ bool resolve_budgets(Config& cfg, u32 threads, TextBuf* notes, TextBuf* err) {
     dpath.append(key_peek_str(cfg, "disk.path"));
     req.clear();
     req.append(key_str(cfg, "budget.disk"));
-    // (assumed off when not set, as before the registry: its default is now 4)
-    const bool salvage = key_peek_f64_assuming(cfg, "salvage.ratio", 0.0) > 0;
+    // A disk codon takes 9.125 bytes of file with the salvage stamps
+    // (salvage.ratio, on by default since Phase 10), 5.125 without.
+    const bool salvage = key_peek_f64(cfg, "salvage.ratio") > 0;
     if (!is_off(req.view())) {
         if (!soup)
             return fail("budget.disk", "needs world.model = soup");
@@ -327,9 +328,33 @@ bool resolve_budgets(Config& cfg, u32 threads, TextBuf* notes, TextBuf* err) {
         double bytes = 0;
         if (!parse_amount(req.view(), static_cast<double>(free_b), &bytes))
             return fail("budget.disk", "must be off, a percentage (20%) or an amount (100GB)");
-        double mean = floor(bytes / disk_bytes_per_codon(salvage) / static_cast<double>(nodes ? nodes : 1));
+        // The budget is the whole disk tier: world.disk and the archive (W4),
+        // which shares its files. A world.archive given comes out of it first;
+        // otherwise the archive is a quarter of world.disk, so world.disk is the
+        // largest d with d + d / 4 codons a node inside the budget.
+        const double per_node = floor(bytes / disk_bytes_per_codon(salvage) / static_cast<double>(nodes ? nodes : 1));
+        const bool archive_given = key_given(cfg, "world.archive");
+        double mean = 0, archive = 0;
+        if (archive_given) {
+            archive = static_cast<double>(key_u32(cfg, "world.archive", key_default(0)));
+            mean = per_node - archive;
+        } else if (per_node <= 1e12) {
+            u64 d = static_cast<u64>(per_node * 0.8);
+            const u64 cap = static_cast<u64>(per_node);
+            while (d > 0 && d + d / 4 > cap)
+                --d;
+            while (d + 1 + (d + 1) / 4 <= cap)
+                ++d;
+            mean = static_cast<double>(d);
+            archive = static_cast<double>(d / 4);
+        } else {
+            mean = per_node; // far over 2^24 codons a node: refused below
+        }
         if (mean < 64)
-            return fail("budget.disk", "too little for world.nodes (under 64 codons a node)");
+            return fail("budget.disk", archive_given
+                                           ? "too little for world.nodes once world.archive is taken out (under 64 "
+                                             "codons a node)"
+                                           : "too little for world.nodes (under 64 codons a node)");
         if (mean > 16777216.0)
             return fail("budget.disk", "too much for world.nodes (over 2^24 codons a node): add nodes");
         TextBuf v;
@@ -344,7 +369,9 @@ bool resolve_budgets(Config& cfg, u32 threads, TextBuf* notes, TextBuf* err) {
         gb(t, bytes);
         t.append(" in ");
         t.append(dpath.view());
-        snprintf(line, sizeof line, ": world.disk = %llu codons a node on average\n", static_cast<unsigned long long>(mean));
+        snprintf(line, sizeof line, ": world.disk = %llu codons a node on average, and %llu of archive (%s)\n",
+                 static_cast<unsigned long long>(mean), static_cast<unsigned long long>(archive),
+                 archive_given ? "world.archive" : "a quarter of world.disk");
         t.append(line);
         notes->append(t.view());
     }
@@ -499,13 +526,12 @@ void world_footprint(Config& cfg, WorldFootprint* out) {
     if (!out->soup)
         return;
     // Disk tiers (docs/world-plan.md W4): the archive shares the disk tier's
-    // storage, on top of world.disk (a quarter more by default). (The salvage
-    // stamp is assumed off when salvage.ratio isn't set, as before:
-    // docs/results/registry.md.)
+    // storage, on top of world.disk (a quarter more by default). The salvage
+    // stamps, on by default, add 4 bytes a codon.
     const u64 fast = key_peek_u64(cfg, "world.disk");
     out->disk = static_cast<double>(fast);
     out->archive = static_cast<double>(key_u32(cfg, "world.archive", key_default(static_cast<double>(fast / 4))));
-    const bool salvage = key_peek_f64_assuming(cfg, "salvage.ratio", 0.0) > 0;
+    const bool salvage = key_peek_f64(cfg, "salvage.ratio") > 0;
     const double tier = out->nodes * (out->disk + out->archive) * disk_bytes_per_codon(salvage);
     out->ram = out->nodes * out->soup_size * kRamPerCodon + (out->in_file ? 0.0 : tier);
     out->disk_file = out->in_file ? tier : 0.0;

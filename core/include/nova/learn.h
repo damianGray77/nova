@@ -113,8 +113,11 @@ class NgramModel {
   private:
     u32 alphabet_ = 0, order_ = 0;
     u64 learned_ = 0;
+    // A live meter on a big world learns billions of codons: the totals are 64
+    // bits, and a count stops at 2^32 - 1 rather than wrapping, so a count
+    // never exceeds its total and a probability never exceeds 1.
     Array<u32> count_[kMaxOrder]; // order k (contexts of k symbols): V^(k+1) counts of (context, symbol)
-    Array<u32> total_[kMaxOrder]; // ... V^k context totals N
+    Array<u64> total_[kMaxOrder]; // ... V^k context totals N
     Array<u32> types_[kMaxOrder]; // ... V^k distinct followers T
 };
 

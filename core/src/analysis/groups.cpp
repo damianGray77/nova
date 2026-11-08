@@ -163,7 +163,10 @@ void kin_clustering(const Array<ProfileRow>& rows, const GroupOptions& o, GroupM
         if (r.node_bodies < 2)
             continue;
         const double others = static_cast<double>(r.node_bodies - 1);
-        const u32 sides[2] = {r.nb_left, r.nb_right};
+        // One side a sample, the right: two neighbours both sampled in a
+        // round would otherwise count their one adjacency twice (A's right is
+        // B's left), understating the spread and inflating z.
+        const u32 sides[1] = {r.nb_right};
         for (u32 side : sides) {
             if (!(side & kNbFound))
                 continue;
@@ -303,9 +306,11 @@ void groups_summary(const GroupsReport& r, const GroupOptions& o, TextBuf& out) 
                                 "%u-tick blocks per node, %u times):\n",
              o.gap, o.block, o.shuffles);
     out.append(line);
+    if (r.together.n >= 20000000) // moving_together's kMaxPairs
+        out.append("  (pairs capped at 20,000,000, the rest not counted: a shorter --gap or --block counts them all)\n");
     measure_line(out, "all pairs", r.together, "pairs");
     measure_line(out, "from different neighbours", r.apart, "pairs");
-    out.append("kin clustering (a sampled body's memory neighbours; chance = a random other living body):\n");
+    out.append("kin clustering (a sampled body's next neighbour in memory; chance = a random other living body):\n");
     measure_line(out, "same lineage", r.kin_lineage, "sides");
     measure_line(out, "same genome", r.kin_genotype, "sides");
     out.append("listening then acting (heard value vs the next branch's way; mutual information, bits, summed):\n");

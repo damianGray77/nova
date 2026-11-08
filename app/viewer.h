@@ -107,6 +107,13 @@ class Viewer {
     bool life_mode() const { return life_mode_; }
     void set_life_time(u64 tick, u64 span);
     void set_life_follow() { life_follow_ = true; }
+    // ... coloured by role (A3's live rules, where a behaviour profile sampled
+    // the genotype; the rest dim) rather than by lineage.
+    void set_life_by_role(bool on) { life_by_role_ = on; }
+    bool life_by_role() const { return life_by_role_; }
+    // The role a genotype was last profiled as (kRole...), kRoleCount if never.
+    u32 genotype_role(u64 genotype) const;
+    usize roles_known() const { return roles_.size(); }
     const LifeMap& life() const { return life_; }
     // Where a map-of-life point was drawn in the last frame (false if not shown).
     bool life_point_screen(u32 i, i32* x, i32* y) const;
@@ -289,8 +296,9 @@ class Viewer {
     i32 pick_sx_ = 0;
     Array<i32> pick_sy_; // per list row: its centre's y as drawn, -1 not shown
     // A5: the map of life
-    bool life_mode_ = false, life_built_ = false, life_archive_ = false;
+    bool life_mode_ = false, life_built_ = false, life_archive_ = false, life_by_role_ = false;
     LifeMap life_;
+    HashMap<u8> roles_; // genotype -> its latest profiled role + 1
     bool life_follow_ = true;
     u64 life_t_ = 0, life_span_ = 0, life_span_now_ = 0;
     bool pop_known_ = false;

@@ -1568,7 +1568,7 @@ struct Exec {
         // codon's tier (the read head for compare and store, the write head
         // for load, advancing as COPY's), where the range lies in my disk.
         // Without tiers it costs nothing, as before.
-        if (tiered && n <= s.disk_held(c.body)) {
+        if (tiered && static_cast<u64>(c.ax) + n <= s.disk_held(c.body)) {
             u32 a = p.sel.disk[c.bx] == 2 ? c.wh : c.rh, nf = 0;
             for (u64 i = 0; i < n; ++i, a = next_addr(a))
                 nf += fast(a) ? 1u : 0u;

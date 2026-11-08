@@ -423,7 +423,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | Key | Kind | Default | Range | Setting |
 |---|---|---|---|---|
 | `budget.memory` | text | off | text | **Memory budget**. off, a percentage of the RAM available (25%) or an amount (24GB): sets world.soup_size, the mean per node. |
-| `budget.disk` | text | off | text | **Disk budget**. off, a percentage of the free space at disk.path (20%) or an amount (100GB): sets world.disk (the archive, world.archive, comes on top). Needs `disk.path`. |
+| `budget.disk` | text | off | text | **Disk budget**. off, a percentage of the free space at disk.path (20%) or an amount (100GB) for the whole disk tier, salvage stamps included: sets world.disk so it and its archive (world.archive) fit. Needs `disk.path`. |
 | `budget.gpu` | text | off | text | **GPU budget**. off or a percentage (50%): a calibration sizes gpu.elements (and warp.capacity, with warps) to keep the GPU about that busy. |
 | `budget.npu` | text | off | text | **NPU budget**. off or a percentage (50%): a calibration sizes npu.macs to keep the NPU about that busy. Needs `accel.mode=async`. |
 | `budget.threads` | text | all_but_one | text | **Threads**. Threads when run.threads is 0: all, all_but_one, a count, or a percentage of the logical processors. |

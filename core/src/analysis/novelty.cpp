@@ -45,7 +45,7 @@ double NoveltyMeter::add(u64 tick, u64 hash, const u8* sym, u32 len, bool succes
     const double s = model_.surprise(sym, len);
     model_.learn(sym, len);
     const bool novel = s >= o_.threshold;
-    const u32 bin = s >= 9.5 ? kBins - 1 : static_cast<u32>(s * 2);
+    const u32 bin = !(s > 0) ? 0 : (s >= 9.5 ? kBins - 1 : static_cast<u32>(s * 2)); // (NaN-safe)
     ++hist_[0][bin];
     hist_[1][bin] += successful;
     NoveltyWindow* ws[2] = {&cur_, &total_};

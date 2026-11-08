@@ -879,7 +879,7 @@ void Soup::warp_unpack(bool all_on_gpu) {
             tally_.warp_steps += steps;
             tally_.lane_instr += lins;
             if (prof_) // behaviour profiles (A3): observe-only
-                prof_->on_lanes(b, lins);
+                prof_->on_lanes(*this, b, lins);
             wleft_[w] = quota > used ? quota - used : 0;
             if (used > quota) // the last step's overshoot is a debt, as a CPU's
                 warp_carry_[b] -= static_cast<float>(used - quota);

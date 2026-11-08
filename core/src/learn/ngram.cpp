@@ -39,7 +39,7 @@ double NgramModel::prob(const u8* ctx, u32 ctx_len, u32 sym) const {
         usize h = 0; // the last k symbols of ctx
         for (u32 i = ctx_len - k; i < ctx_len; ++i)
             h = h * V + ctx[i];
-        const u32 N = total_[k].data()[h];
+        const u64 N = total_[k].data()[h];
         if (N == 0)
             break; // a longer context ending in an unseen one is unseen too
         const u32 T = types_[k].data()[h];
@@ -68,7 +68,8 @@ void NgramModel::learn(const u8* s, u32 len) {
             u32& c = count_[k].data()[h * V + s[i]];
             if (c == 0)
                 ++types_[k].data()[h];
-            ++c;
+            if (c != 0xFFFFFFFFu) // saturates: never above its total
+                ++c;
             ++total_[k].data()[h];
         }
     }

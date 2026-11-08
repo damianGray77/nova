@@ -4,11 +4,26 @@
 #include <cstdio>
 #include <cstring>
 
-#include "theme.h" // the dark theme and the virtual keys
+#include "nova/profile.h" // the roles (A3), for the map of life's colour by role
+#include "theme.h"        // the dark theme and the virtual keys
 
 namespace nova {
 
 namespace {
+
+// A5: the map of life's colours by role (kRole... order); unprofiled dim.
+u32 role_color(u32 r) {
+    static const u32 k[kRoleCount] = {
+        0xE06060, // predator
+        0xB07CE8, // parasite
+        0x5EA1FF, // repairer
+        0xE5C050, // signaller
+        0x4FD0B0, // wanderer
+        0x60C080, // copier
+        0x8A91A0, // idle
+    };
+    return r < kRoleCount ? k[r] : 0x3C414C;
+}
 
 // The speed limits the - and + buttons step through (0 = flat out, last).
 const double kSpeeds[] = {1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 0};
@@ -192,6 +207,9 @@ void Viewer::take(ViewFrame& f) {
         if (life_built_ && !life_archive_) // A5: the live map keeps up with the saves
             life_.add(e.tick, e.genotype, e.lineage, e.node, e.len, e.name, Str(save_text_.data() + off, e.n));
     }
+    // A5: profiled genotypes' roles (the latest sample's wins), for the colour by role.
+    for (usize i = 0; i < f.role_genotype.size() && i < f.role_of.size(); ++i)
+        roles_.get_or_insert(f.role_genotype[i]) = static_cast<u8>(f.role_of[i] + 1);
     saves_seen_ += f.saves.size();
     // A2: "new kinds of life": closed windows join the list, the open one's
     // leaders replace the last frame's.
@@ -270,6 +288,8 @@ void Viewer::trim_logs() {
             sel_save_ = sel_save_ >= drop ? sel_save_ - drop : ~static_cast<usize>(0);
         order_dirty_ = true;
         phylo_saves_ = ~static_cast<usize>(0); // lay out again
+        if (life_built_ && !life_archive_ && !saves_.empty()) // A5: the live map follows the log
+            life_.drop_before(saves_[0].tick);
     }
     if (events_.size() > kMaxSaves) {
         const usize drop = events_.size() - kMaxSaves + kMaxSaves / 4;
@@ -364,6 +384,11 @@ void Viewer::set_life_mode(bool on) {
     life_mode_ = on;
     if (on && !life_built_)
         life_build();
+}
+
+u32 Viewer::genotype_role(u64 genotype) const {
+    const u8* r = roles_.find(genotype);
+    return r && *r ? *r - 1u : kRoleCount;
 }
 
 void Viewer::set_life_time(u64 tick, u64 span) {
@@ -1735,6 +1760,13 @@ void Viewer::life_panel(const UiInput& in_raw, Canvas& c) {
             life_refit();
         x = rf.right() + c.px(6);
     }
+    { // the colour: lineage or role (A3's, where a profile sampled the genotype)
+        const char* cl = life_by_role_ ? "colour: role" : "colour: lineage";
+        const Rect rc{x, map_.y + c.px(2), c.text_w("colour: lineage", kFontUi) + c.px(16), hh - c.px(4)};
+        if (button(in, c, rc, cl, life_by_role_))
+            life_by_role_ = !life_by_role_;
+        x = rc.right() + c.px(6);
+    }
     const Rect wm{x, map_.y + c.px(2), c.px(24), hh - c.px(4)};
     const Rect wp{x + c.px(26) + c.px(110), map_.y + c.px(2), c.px(24), hh - c.px(4)};
     const u64 t_lo = life_.first_tick();
@@ -1846,7 +1878,8 @@ void Viewer::life_panel(const UiInput& in_raw, Canvas& c) {
         }
         life_sx_[i] = sx;
         life_sy_[i] = sy;
-        const u32 col = mix_color(lineage_color(p.lineage), 0x15181E, 0.75 * age);
+        const u32 base = life_by_role_ ? role_color(genotype_role(p.genotype)) : lineage_color(p.lineage);
+        const u32 col = mix_color(base, 0x15181E, 0.75 * age);
         const i32 ri = static_cast<i32>(r + 0.5);
         if (ri <= 1)
             c.fill(Rect{sx - 1, sy - 1, 2, 2}, col);
@@ -1863,15 +1896,30 @@ void Viewer::life_panel(const UiInput& in_raw, Canvas& c) {
         }
         ++shown;
     }
+    // The roles' legend, top left in the plot (by role).
+    if (life_by_role_) {
+        i32 lx = life_plot_.x + c.px(6);
+        const i32 ly = life_plot_.y + c.px(4);
+        for (u32 r = 0; r <= kRoleCount; ++r) {
+            const char* nm = r < kRoleCount ? role_name(r) : "not profiled";
+            c.text(lx, ly, nm, kFontSmall, role_color(r));
+            lx += c.text_w(nm, kFontSmall) + c.px(10);
+        }
+    }
     c.unclip();
     // Info: the axes and what's shown.
     commas(life_.ref_first(), a);
     commas(life_.ref_last(), b);
+    char colour[64];
+    if (life_by_role_)
+        snprintf(colour, sizeof colour, "role (%llu genotypes profiled)", static_cast<unsigned long long>(roles_.size()));
+    else
+        snprintf(colour, sizeof colour, "lineage");
     snprintf(buf, sizeof buf,
              "%u shown of %u   axes %s on %u genotypes (ticks %s - %s): PC1 %.0f%%, PC2 %.0f%% of their variance   "
-             "colour: lineage   size: %s",
+             "colour: %s   size: %s",
              shown, static_cast<unsigned>(np), life_.final() ? "fitted" : "provisional, fitted", life_.reference(), a, b,
-             100.0 * life_.variance_share(0), 100.0 * life_.variance_share(1),
+             100.0 * life_.variance_share(0), 100.0 * life_.variance_share(1), colour,
              pops ? "living members" : "genebank saves");
     c.text(inner.x, inner.y, buf, kFontSmall, kDim, kAlignLeft, inner.w);
     if (hover != kNone) {
@@ -1880,10 +1928,12 @@ void Viewer::life_panel(const UiInput& in_raw, Canvas& c) {
         lineage_text(p.lineage, lin, sizeof lin);
         commas(p.first, t0);
         commas(p.last, t1);
+        const u32 role = genotype_role(p.genotype);
         snprintf(buf, sizeof buf,
                  "%s  (lineage %s, %u codons)\nfirst saved at tick %s on node %u, last at %s\n%u genebank saves\n"
-                 "PC1 %.3f, PC2 %.3f\nclick: select it in the genome browser",
-                 p.name, lin, p.len, t0, p.node, t1, p.saves, p.x, p.y);
+                 "role: %s\nPC1 %.3f, PC2 %.3f\nclick: select it in the genome browser",
+                 p.name, lin, p.len, t0, p.node, t1, p.saves, role < kRoleCount ? role_name(role) : "not profiled",
+                 p.x, p.y);
         set_tooltip(buf);
         cursor_ = 3;
         if (in.pressed) {

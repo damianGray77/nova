@@ -603,8 +603,12 @@ u64 key_peek_u64_assuming(Config& cfg, Str name, u64 assume) {
     return peek_entry(name, KeyKind::whole) ? cfg.get_u64(name, assume) : 0;
 }
 
-double key_peek_f64_assuming(Config& cfg, Str name, double assume) {
-    return peek_entry(name, KeyKind::number) ? cfg.get_f64(name, assume) : 0;
+bool key_given(Config& cfg, Str name) {
+    if (!key_find(name)) {
+        misuse(name, "has no entry in the settings registry (add one to core/src/keys.inc)");
+        return false;
+    }
+    return cfg.get_str(name, "").n > 0;
 }
 
 bool key_check(Str name, Str text, KeyAt at, double* out) {

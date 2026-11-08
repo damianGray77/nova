@@ -188,6 +188,22 @@ bool ProfileReader::open(const char* path, TextBuf* err) {
     col_copy_[0] = h_.find("op_COPY");
     col_copy_[1] = h_.find("op_WRITE");
     col_copy_[2] = h_.find("op_movii");
+    // A row splits into at most 256 fields (next): every column read must be
+    // among them, or a hand-made file with a wider header would read past them.
+    max_col_ = 0;
+    for (const Need& n : need)
+        max_col_ = *n.col > max_col_ ? *n.col : max_col_;
+    for (u32 a = 0; a < kPaCount; ++a)
+        max_col_ = col_act_[a] > max_col_ ? col_act_[a] : max_col_;
+    for (u32 i = 0; i < 6; ++i)
+        max_col_ = col_lta_[i] > max_col_ ? col_lta_[i] : max_col_;
+    for (u32 i = 0; i < 3; ++i)
+        max_col_ = col_copy_[i] > max_col_ ? col_copy_[i] : max_col_;
+    if (max_col_ >= 256) {
+        err->append(path);
+        err->append(": a column it reads comes after the 256th");
+        return false;
+    }
     return true;
 }
 
@@ -197,7 +213,7 @@ bool ProfileReader::next(ProfileRow* r) {
         return false;
     Str f[256];
     const u32 n = csv_split(line, f, 256);
-    if (n < fields_ && n < 256) {
+    if ((n < fields_ && n < 256) || n <= static_cast<u32>(max_col_)) {
         snprintf(err_, sizeof err_, "row %llu: %u fields, the header has %u", static_cast<unsigned long long>(rows_ + 2),
                  n, fields_);
         return false;
@@ -282,6 +298,7 @@ bool load_arrivals(const char* dir, Array<ArrivalRecord>* out, TextBuf* err) {
         bool ok = n >= h.count() && get_u64(f[c[0]], &a.tick) && get_u32(f[c[1]], &a.node) &&
                   get_u32(f[c[2]], &a.src) && parse_lineage_id(f[c[3]], &a.lineage) &&
                   parse_hex(f[c[4]], &a.genotype) && get_u32(f[c[5]], &a.len) && get_u32(f[c[6]], &a.dormant);
+        ok = ok && a.node < 1000000; // world.nodes' most (the groups' counting sort sizes by it)
         if (!ok) {
             err->append("arrivals.csv: row ");
             err->append_u64(row);
@@ -564,11 +581,20 @@ bool roles_build(const Array<ProfileRow>& rows, const RolesOptions& o, RolesRepo
               "action_kinds_mean,action_kinds_median,action_kinds_p90,action_kinds_max\n");
     Array<u32> in_w;
     Array<double> wl, dops, ak;
-    for (u64 w = first_w; w <= last_w && first_w != ~0ull; ++w) {
+    // The rows bucketed by window in one sort -- the window (from the first)
+    // in the high 32 bits, the row in the low, so a window's rows keep their
+    // file order -- rather than a pass over every row per window, which a
+    // long run with a short --window made hours long.
+    Array<u64> by_w;
+    by_w.resize(rows.size());
+    for (usize i = 0; i < rows.size(); ++i)
+        by_w[i] = ((rows[i].tick / win - first_w) << 32) | static_cast<u64>(i);
+    sort_u64(by_w.data(), by_w.size());
+    for (usize at = 0; at < by_w.size();) {
+        const u64 w = (by_w[at] >> 32) + first_w;
         in_w.clear();
-        for (usize i = 0; i < rows.size(); ++i)
-            if (rows[i].tick / win == w)
-                in_w.push(static_cast<u32>(i));
+        while (at < by_w.size() && (by_w[at] >> 32) + first_w == w)
+            in_w.push(static_cast<u32>(by_w[at++] & 0xFFFFFFFFull));
         if (in_w.empty())
             continue;
         const double ns = static_cast<double>(in_w.size());

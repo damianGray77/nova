@@ -429,16 +429,10 @@ void Profiles::on_tick_end(const Soup& s, u64 tick) {
                 x.founder_origin = L ? L->founder_origin : kOriginUnknown;
             }
         }
-        // Warps: where their lanes stand now (the host's copy only).
-        for (u32 w = s.warp_head(x.body); w != kNone; w = s.warp(w).next) {
-            if (s.lane_state(w) == Soup::kLanesDevice)
-                continue;
-            for (u32 l = 0; l < s.lanes_per_warp(); ++l) {
-                const Lane& ln = s.lane(w, l);
-                if (!ln.halted && ln.ip < s.size())
-                    mark(x, s.owner_block(ln.ip), ln.ip);
-            }
-        }
+        // (Warps' lanes aren't marked in the bitmap: where they stand is only on
+        // the host when they didn't run on the GPU, which warp.device = auto
+        // decides by timing, so marking them made the file depend on the
+        // machine and the threads. Their work is lane_instr.)
         if (tick + 1 >= x.start + (p_ ? p_->ticks : 1))
             finish(i, kProfileDone, tick);
     }

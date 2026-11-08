@@ -14,6 +14,8 @@
 
 using namespace nova;
 
+extern const char* const kLegacyDefaults; // test_main.cpp
+
 namespace {
 
 const char* const kDir = "nova_test_disk_files";
@@ -185,6 +187,44 @@ void test_disk_budget() {
     CHECK(!r.init(1, &e) && strstr(e.c_str(), "disk.path") != nullptr);
 }
 
+// The disk budget is the whole disk tier, on the engine's own defaults (the
+// test runner's legacy ones have no salvage and no archive): salvage stamps
+// counted, as salvage.ratio's default 4 makes them, and the archive inside the
+// budget, both the default quarter of world.disk and a world.archive given.
+// (Before this, budget.disk = 20GB made a tier of about 44 GB.)
+void test_disk_budget_whole_tier() {
+    CreateDirectoryA(kDir, nullptr);
+    const double bytes = 8.0 * 1024 * 1024;
+    const u64 per_node = static_cast<u64>(bytes / disk_bytes_per_codon(true) / 24);
+    for (u32 given = 0; given < 2; ++given) {
+        CHECK(Config::set_fallback(nullptr, nullptr));
+        TextBuf t;
+        t.append(kSoupWorldProc);
+        t.append("accel.gpu = cpu\naccel.npu = cpu\nwarp.device = cpu\nbudget.disk = 8MB\ndisk.path = ");
+        t.append(kDir);
+        t.append_char('\n');
+        if (given)
+            t.append("world.archive = 1000\n");
+        Config c;
+        Config::ParseError pe;
+        CHECK(c.parse(t.view(), &pe));
+        TextBuf notes, err;
+        CHECK(resolve_budgets(c, 1, &notes, &err));
+        const u64 disk = c.get_u64("world.disk", 0);
+        if (given)
+            CHECK_EQ_U64(disk, per_node - 1000);
+        else
+            CHECK(disk + disk / 4 <= per_node && disk + 1 + (disk + 1) / 4 > per_node);
+        WorldFootprint fp;
+        world_footprint(c, &fp);
+        CHECK(fp.in_file && fp.disk_file <= bytes && fp.disk_file > 0.999 * bytes);
+        printf("  budget.disk = 8MB, archive %s: world.disk %llu, archive %.0f, tier %.0f bytes\n",
+               given ? "given" : "by default", static_cast<unsigned long long>(disk), fp.archive, fp.disk_file);
+        CHECK(Config::set_fallback(kLegacyDefaults, nullptr));
+    }
+    RemoveDirectoryA(kDir);
+}
+
 // budget.gpu and budget.npu: async only; with the devices, a calibration
 // sizes gpu.elements and npu.macs.
 void test_device_budgets() {
@@ -242,5 +282,6 @@ void suite_budget() {
     test_disk_in_files();
     test_memory_budget();
     test_disk_budget();
+    test_disk_budget_whole_tier();
     test_device_budgets();
 }

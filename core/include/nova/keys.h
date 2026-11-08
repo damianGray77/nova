@@ -189,11 +189,14 @@ u64 key_peek_u64(Config& cfg, Str name);
 double key_peek_f64(Config& cfg, Str name);
 Str key_peek_str(Config& cfg, Str name);
 // The same with the estimate's own assumption for a setting not given, in
-// place of the entry's default. Only the budgets use it, for two settings
-// whose estimates predate the registry (docs/results/registry.md); don't add
-// more.
+// place of the entry's default. Only the GPU and NPU budgets use it, for
+// cpu.instr_per_core, whose estimate predates the registry
+// (docs/results/registry.md); don't add more.
 u64 key_peek_u64_assuming(Config& cfg, Str name, u64 assume);
-double key_peek_f64_assuming(Config& cfg, Str name, double assume);
+// Whether the config, or the fallback defaults, gives this key a value, so a
+// computed default won't apply (the disk budget asks it of world.archive).
+// Checks the entry exists; doesn't read or check the value.
+bool key_given(Config& cfg, Str name);
 
 // Checks a value's text against the entry, as a reader would (the live
 // knobs): false if malformed or out of range. A flag gives 0 or 1.

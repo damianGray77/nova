@@ -312,6 +312,12 @@ class LifeMap {
     const Matrix& axes() const { return comps_; }
     // The point for a genotype, or kNone.
     u32 find(u64 genotype) const;
+    // Forgets the genotypes not saved since `tick`, keeping the axes and every
+    // other position: a long live session keeps only the newest saves
+    // (Viewer::trim_logs), and the map follows them rather than growing for
+    // ever. Only once the axes are final (until then the held reference
+    // genomes follow the points).
+    void drop_before(u64 tick);
 
   private:
     bool fit_on(const Array<char>& text, const Array<u32>& off, const Array<u32>& len);
@@ -413,6 +419,11 @@ struct ViewFrame {
     // A5: a finished run's map of life, in its first frame (life_sent).
     bool life_sent = false;
     LifeMap life;
+    // A5: behaviour profiles' roles by genotype (A3's live rules, kRole...;
+    // the genotype's latest sample), new since the previous frame (a finished
+    // run's: all of them, in its first frame), for the map's colour by role.
+    Array<u64> role_genotype;
+    Array<u8> role_of;
 
     void clear_new();
 };
@@ -506,6 +517,13 @@ class ViewSession {
     Array<u8> cand_codons_;
     Array<NoveltyPick> closed_;
     Array<char> closed_text_;
+    // ... the open window's leaders as last scored, at this tick (~0: afresh)
+    Array<NoveltyPick> open_;
+    Array<char> open_text_;
+    u64 open_tick_ = ~0ull;
+    // A5: finished profile samples' roles since the last frame
+    Array<u64> role_genotype_;
+    Array<u8> role_of_;
     // A5: living members per genotype, last counted at this tick
     u64 pop_tick_ = ~0ull;
 };
@@ -584,6 +602,9 @@ class RunArchive {
     Array<NoveltyPick> picks_;
     Array<char> pick_text_;
     LifeMap life_;
+    // A5: profiles.csv's roles by genotype (each genotype's latest sample)
+    Array<u64> role_genotype_;
+    Array<u8> role_of_;
     TextBuf notes_;
 };
 

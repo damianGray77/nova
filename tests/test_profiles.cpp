@@ -478,7 +478,7 @@ void test_groups() {
         }
         GroupMeasure kl, kg;
         kin_clustering(rows, o, &kl, &kg);
-        CHECK(kl.n == 800 && kg.n == 800);
+        CHECK(kl.n == 400 && kg.n == 400); // one side a sample (the right): an adjacency counts once
         CHECK(pass == 0 ? (kl.found && kg.found) : (!kl.found && !kg.found));
         printf("  kin clustering, %s: lineage z %.1f, genome z %.1f\n", pass == 0 ? "planted" : "chance", kl.z,
                kg.z);

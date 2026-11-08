@@ -281,6 +281,7 @@ void test_live_picks() {
         s.after_step();
         if (t % 7 == 0 || t == 549) {
             ViewRequest q;
+            q.hash = t == 549; // the last frame as a paused one: the open window's leaders scored now
             s.build(q, &f);
             CHECK(f.novelty && f.novelty_window == 100);
             closed.append(f.picks.data(), f.picks.size());
@@ -1036,6 +1037,64 @@ void test_life_panel() {
     delete r;
 }
 
+// A5: the map coloured by role -- live from the frames' finished behaviour
+// samples (A3), and a finished run's from its profiles.csv.
+void test_life_roles() {
+    TextBuf cfg;
+    novelty_world(cfg);
+    cfg.append("profile.enabled = true\nprofile.every = 25\nprofile.ticks = 20\n");
+    Rig2* r = new Rig2;
+    CHECK(r->start(cfg.c_str(), 400));
+    r->viewer.set_life_mode(true);
+    UiInput none;
+    r->draw(none);
+    const u32 by_lineage = distinct_colors(r->canvas);
+    r->viewer.set_life_by_role(true);
+    r->draw(none);
+    const LifeMap& L = r->viewer.life();
+    u32 profiled = 0;
+    for (usize i = 0; i < L.points().size(); ++i)
+        profiled += r->viewer.genotype_role(L.points()[i].genotype) < kRoleCount ? 1u : 0u;
+    CHECK(r->viewer.roles_known() > 0 && profiled > 0 && L.points().size() > 8);
+    CHECK(r->viewer.genotype_role(0x123456789ull) == kRoleCount); // never profiled
+    CHECK(png_ok(r->canvas, "nova_test_viewer_roles.png"));
+    printf("  map of life by role: %u genotypes profiled live, %u of %u points (%u colours by lineage, %u by role)\n",
+           static_cast<unsigned>(r->viewer.roles_known()), profiled, static_cast<unsigned>(L.points().size()),
+           by_lineage, distinct_colors(r->canvas));
+    delete r;
+    // A finished run's roles, from its profiles.csv.
+    const char* dir = "nova_test_roles_run";
+    CreateDirectoryA(dir, nullptr);
+    u64 samples = 0;
+    {
+        Run run;
+        CHECK(make_run(run, cfg.c_str(), 4));
+        TextBuf err;
+        CHECK(run.open_genebank("nova_test_roles_run/genebank.txt", &err));
+        CHECK(run.open_profiles("nova_test_roles_run/profiles.csv", &err));
+        run.run_until(300);
+        run.finish();
+    }
+    {
+        Array<ProfileRow> rows;
+        TextBuf err;
+        CHECK(load_profiles(dir, &rows, &err) && rows.size() > 0);
+        samples = rows.size();
+    }
+    RunArchive ar;
+    TextBuf err;
+    CHECK(ar.load(dir, &err));
+    ViewFrame af;
+    ar.build(0, ViewRequest{}, &af);
+    bool roles_ok = af.role_genotype.size() > 0 && af.role_genotype.size() == af.role_of.size() &&
+                    af.role_genotype.size() <= samples;
+    for (usize i = 0; i < af.role_of.size(); ++i)
+        roles_ok = roles_ok && af.role_of[i] < kRoleCount;
+    CHECK(roles_ok);
+    const char* files[] = {"genebank.txt", "profiles.csv"};
+    remove_dir(dir, files, 2);
+}
+
 } // namespace
 
 void viewer_more_view_tests() {
@@ -1053,4 +1112,5 @@ void viewer_more_viewer_tests() {
     test_fast_region();
     test_series_picker();
     test_life_panel();
+    test_life_roles();
 }

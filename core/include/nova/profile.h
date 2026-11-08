@@ -133,7 +133,7 @@ struct ProfileSample {
     u32 node_bodies, lin_alive, geno_alive, nb_left, nb_right;
     u32 lt_wait, lt_class; // working: a LISTEN waiting for its branch (instructions since, 0 none)
     u32 ops[kOpCount];     // instructions run, by op
-    u8 bits[kProfileGenomeMax / 8]; // genome codons that ran (codon i: bit i % 8 of byte i / 8)
+    u8 bits[kProfileGenomeMax / 8]; // genome codons its CPUs ran (codon i: bit i % 8 of byte i / 8; lanes not)
 };
 
 // --- the live census's fixed rules ------------------------------------------
@@ -204,8 +204,8 @@ class Profiles {
     // Body b goes dormant (Soup::go_dormant, before it lets go of anything).
     void on_dormant(const Soup& s, u32 b);
     // Body b's warps ran lane instructions (Soup::warp_unpack).
-    void on_lanes(u32 b, u64 lane_instr) {
-        if (ProfileSample* x = slot_of(b))
+    void on_lanes(const Soup& s, u32 b, u64 lane_instr) {
+        if (ProfileSample* x = watching(s, b))
             x->lane_instr += lane_instr;
     }
     // The sample following body b, or nullptr (the interpreter asks once per
