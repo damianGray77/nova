@@ -262,7 +262,7 @@ const char* strip_by_name(u32 s) {
 const char* event_kind_name(u32 k) {
     static const char* const n[kEvCount] = {"replicator", "gpu_replicator", "npu_user",   "colonist",
                                             "disk_user",  "signaller",      "gpu_native", "defended",
-                                            "collapse",   "recovered",
+                                            "sleeper",    "collapse",       "recovered",
                                             // the disasters' strikes, as their events begin (X7)
                                             "surge", "crash", "burnout", "diskfail", "lightning", "event"};
     return k < kEvCount ? n[k] : "?";

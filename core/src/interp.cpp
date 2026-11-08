@@ -721,6 +721,23 @@ struct Exec {
     // (docs/world-plan.md W4).
     u32 resource() const { return c.bx < p.sel.res_n ? p.sel.res[c.bx] : 99u; }
 
+    // docs/lifehistory-plan.md V1: YIELD with BX picking 1 (rest here) or 2
+    // (drift) through the same map, and CX = N > 0, asks for a sleep of N
+    // ticks (capped at dormant.sleep_max); the body goes at the death sweep.
+    // Its first such ask this tick holds.
+    void ask_sleep() {
+        const u32 v = resource();
+        if ((v != 1 && v != 2) || c.cx == 0 || c.body == kNone)
+            return;
+        Array<u32>& q = s.sleep_req_;
+        while (q.size() <= c.body)
+            q.push(0);
+        if (q[c.body] != 0)
+            return;
+        const u32 n = c.cx < p.sleep_max ? c.cx : p.sleep_max;
+        q[c.body] = n | (v == 2 ? Soup::kSleepDrift : 0u);
+    }
+
     // The unit ledger for resource r (2 GPU, 4 NPU), or nullptr if absent.
     UnitLedger* units_of(u32 r) const {
         if (r == 2 && p.gpus)
@@ -2571,6 +2588,8 @@ struct Exec {
             break;
         case Op::yield:
             c.yielded = 1;
+            if (p.sleep) // docs/lifehistory-plan.md V1: a sleep, with BX 1 or 2 and CX > 0
+                ask_sleep();
             break;
         case Op::release:
             ok = release();
@@ -3067,6 +3086,8 @@ bool Soup::host_step(u32 w, const Action* resolving) {
             x.rh = moved(x.rh, t.rh, e.c.rh);
         if (e.c.wh != t.wh)
             x.wh = moved(x.wh, t.wh, e.c.wh);
+        if (e.c.yielded) // V5: a YIELD run by the host (life.sleep) yields its lanes as a lane's does
+            x.yielded = 1;
         if (ok) {
             x.err = 0;
             x.errs = 0;

@@ -25,6 +25,7 @@ void Lineages::init(const DetectParams* p, u32 node) {
     next_id_ = 1;
     links_ = inject_links_ = gpu_links_ = founded_ = detections_ = gpu_detections_ = 0;
     npu_detections_ = colonisations_ = disk_detections_ = signal_detections_ = defended_detections_ = 0;
+    sleep_detections_ = 0;
     for (u32 i = 0; i < kOriginCount; ++i)
         founded_by_[i] = 0;
     max_depth_ever_ = 0;
@@ -268,6 +269,21 @@ void Lineages::on_disk_load(const Soup& s, u32 k, u64 tick) {
     ++disk_detections_;
     const Block& B = s.block(k);
     push_event(kEventDiskUser, tick, tags_[k].lineage, *L, tags_[k], s.mem() + B.start, B.len, kViaDivide);
+}
+
+// The first voluntary sleep by a member of a gated lineage
+// (docs/lifehistory-plan.md V7). Random code yields with BX 1 and some CX
+// often; the gate filters it, as for the other milestones.
+void Lineages::on_sleep(const Soup& s, u32 k, u64 tick) {
+    if (k == kNone || k >= tags_.size() || tags_[k].lineage == 0)
+        return;
+    LineageInfo* L = table_.find(tags_[k].lineage);
+    if (!L || !L->detected || L->sleep_detected)
+        return;
+    L->sleep_detected = 1;
+    ++sleep_detections_;
+    const Block& B = s.block(k);
+    push_event(kEventSleeper, tick, tags_[k].lineage, *L, tags_[k], s.mem() + B.start, B.len, kViaDivide);
 }
 
 // Sustained signal use (Phase 4): once a lineage has met the gate, count the

@@ -656,7 +656,7 @@ uint w_block_len(uint b, uint id) {
 bool w_host_op(uint op) {
     return op == OP_ALLOC || op == OP_DIVIDE || op == OP_ENGULF || op == OP_INJECT || op == OP_EMIT ||
            op == OP_LISTEN || op == OP_DISK || op == OP_GPU || op == OP_RELEASE || op == OP_T_MAL ||
-           op == OP_T_DIVIDE;
+           op == OP_T_DIVIDE || (op == OP_YIELD && CST(WC_SLEEP) != 0u); // (V5: the host may send it to sleep)
 }
 
 // One lane's instruction (never a host one) at ip, reading memory only: a

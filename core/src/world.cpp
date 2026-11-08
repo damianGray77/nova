@@ -3005,6 +3005,7 @@ void World::take_departures() {
             c.mem_reserve = dep.mem_reserve;
             c.hops = dep.hops;
             c.archive = dep.archive; // disk tiers (W4)
+            c.sleep = dep.sleep;     // voluntary dormancy (docs/lifehistory-plan.md V)
             c.ticks = static_cast<u32>(c.due - tick_);
             cargo_codons_.append(s.departure_codons() + dep.codon_off, dep.len);
             cargo_.push(c);
@@ -3067,11 +3068,21 @@ void World::deliver_dormant(Cargo& c) {
         }
         c.disk = dspend < c.disk ? static_cast<u32>(c.disk - dspend) : 0;
     }
+    // Voluntary dormancy (docs/lifehistory-plan.md V3): a sleeper's timer ran
+    // on the way too.
+    if (c.sleep & 0xFFFFu) {
+        const u32 left = c.sleep & 0xFFFFu;
+        c.sleep = (c.sleep & ~0xFFFFu) | (left > c.ticks ? left - c.ticks : 0u);
+    }
+    const bool sleeper = ((c.sleep >> 16) & kDormantVoluntary) != 0;
     if (c.mem_reserve == 0 && c.disk == 0 && c.archive == 0) {
         ++world_dormant_expired_;
+        world_sleep_expired_ += sleeper ? 1 : 0;
         return;
     }
     Dormant d = {};
+    d.flags = static_cast<u8>(c.sleep >> 16);
+    d.spare = static_cast<u16>(c.sleep & 0xFFFFu);
     d.mem_reserve = c.mem_reserve;
     d.disk_reserve = c.disk;
     d.archive_reserve = c.archive; // W4
@@ -3091,6 +3102,7 @@ void World::deliver_dormant(Cargo& c) {
     const u32 e = drift_edge(dst, c.seq, c.hops);
     if (e == kNone) {
         ++world_dormant_expired_;
+        world_sleep_expired_ += sleeper ? 1 : 0;
         return;
     }
     Cargo n = c;
@@ -3441,7 +3453,7 @@ void World::step(ThreadPool& pool) {
         // Then sum the tallies (arrivals count on their destination), in node
         // order.
         world_corrupted_ = world_transit_lost_ = 0;
-        world_dormant_expired_ = world_dormant_hops_ = 0;
+        world_dormant_expired_ = world_dormant_hops_ = world_sleep_expired_ = 0;
         if (accel_async_) {
             accel_barrier(pool);
             lap(prof_ ? &prof_->accel : nullptr);
@@ -3490,6 +3502,7 @@ void World::step(ThreadPool& pool) {
         soup_last_.transit_lost = world_transit_lost_;
         soup_last_.dormant_expired += world_dormant_expired_; // (those that died on the way)
         soup_last_.dormant_hops += world_dormant_hops_;       // (those that passed through)
+        soup_last_.sleep_expired += world_sleep_expired_;     // (V: sleepers among those that died on the way)
         soup_last_.collapses = lifecycle_ ? world_collapses_ : 0;
         soup_last_.recoveries = lifecycle_ ? world_recoveries_ : 0;
         lap(prof_ ? &prof_->tally : nullptr);
@@ -3596,6 +3609,8 @@ u64 World::hash() const {
                 }
                 if (soup_params_.archive) // disk tiers (W4): her archive share or reserve
                     h.word(c.archive);
+                if (soup_params_.sleep) // voluntary dormancy (docs/lifehistory-plan.md V): a sleeper's timer
+                    h.word(c.sleep);
                 h.bytes(cargo_codons_.data() + c.codon_off, c.len);
             }
             if (edge_failure_ > 0) // Phase 4: which links are down, until when
@@ -3681,6 +3696,8 @@ void World::save_state(ByteWriter& w) const {
                 }
                 if (soup_params_.archive) // disk tiers (W4, v4)
                     w.put_u32(c.archive);
+                if (soup_params_.sleep) // voluntary dormancy (v5)
+                    w.put_u32(c.sleep);
                 w.put_bytes(cargo_codons_.data() + c.codon_off, c.len);
             }
             if (edge_failure_ > 0)
@@ -3836,8 +3853,11 @@ bool World::load_state(ByteReader& r, TextBuf* err, u32 version) {
                 }
                 if (soup_params_.archive && version >= 4) // disk tiers (W4; before v4 no archive: run.cpp)
                     r.get_u32(&c.archive);
+                if (soup_params_.sleep && version >= 5) // voluntary dormancy (v5; the key came with it)
+                    r.get_u32(&c.sleep);
                 if (!r.ok() || c.edge >= edge_src_.size() || c.len == 0 || c.len > r.remaining() ||
-                    c.due < tick || c.seq >= next_seq_ || c.form > kFormGpu || c.kind > kKindE || c.dormant > 1) {
+                    c.due < tick || c.seq >= next_seq_ || c.form > kFormGpu || c.kind > kKindE || c.dormant > 1 ||
+                    (c.sleep && !c.dormant)) {
                     err->append("snapshot: cargo out of range");
                     return false;
                 }

@@ -5,6 +5,7 @@
 
 #include "check.h"
 #include "helpers.h"
+#include "nova/accel.h"
 #include "nova/hash.h"
 #include "nova/snapshot.h"
 #include "soup_helpers.h"
@@ -24,6 +25,14 @@ struct LFix {
         cfg.append("cost.table = classic\n");
         cfg.append(extra);
         if (!make_params(&p, cfg.c_str(), size))
+            return false;
+        s.init(&p, 31, 0);
+        s.begin_tick(0);
+        return true;
+    }
+    // The same from a whole config of its own (no kQuiet).
+    bool init_raw(const char* text, u32 size = 1024) {
+        if (!make_params(&p, text, size))
             return false;
         s.init(&p, 31, 0);
         s.begin_tick(0);
@@ -542,6 +551,230 @@ void test_wipe_world() {
            static_cast<unsigned long long>(pending_at_snap));
 }
 
+// --- Voluntary dormancy (V) --------------------------------------------------
+
+// A body at 100 that ALLOCs a memory reserve of `reserve` codons (BX 0), then
+// runs YIELD with BX = sel and CX = n; then the death sweep.
+u32 sleeper(LFix& f, u32 reserve, u32 sel, u32 n, u32 units = 1000) {
+    const u32 b = plant(f.s, 100, "ALLOC YIELD INC INC", units);
+    if (b == kNone)
+        return kNone;
+    const u32 c = f.s.body(b).cpus;
+    f.s.cpu_mut(c).bx = 0;
+    f.s.cpu_mut(c).cx = reserve;
+    if (reserve)
+        f.s.run_cpu(c, 1);
+    else
+        f.s.cpu_mut(c).ip = 101; // (no ALLOC: straight to the YIELD)
+    f.s.cpu_mut(c).bx = sel;
+    f.s.cpu_mut(c).cx = n;
+    f.s.run_cpu(c, 1);
+    f.s.death_sweep();
+    return b;
+}
+
+// V1-V3: YIELD with BX 1 and CX 10 sleeps 10 ticks where it is, on its
+// reserve, and wakes then, not before -- though its own cores were free all
+// along -- with its cores again.
+void test_sleep_wakes() {
+    LFix f;
+    CHECK(f.init("life.sleep = true\nworld.millicores = 2000\n"));
+    const u32 b = sleeper(f, 64, 1, 10);
+    CHECK(b != kNone && f.s.dormant(b) && f.s.tally().sleeps == 1 && f.s.body(b).units == 0);
+    const Dormant& d = f.s.dormant_state(b);
+    CHECK((d.flags & kDormantVoluntary) && (d.flags & kDormantStays) && d.spare == 10 && d.mem_reserve == 64);
+    bool slept = true;
+    for (u64 t = 1; t < 10; ++t) {
+        f.s.begin_tick(t);
+        f.s.death_sweep();
+        slept = slept && f.s.dormant(b);
+    }
+    CHECK(slept && f.s.dormant_state(b).mem_reserve == 64 - 9);
+    f.s.begin_tick(10);
+    f.s.death_sweep();
+    CHECK(!f.s.dormant(b) && f.s.body(b).alive && f.s.body(b).units == 1000 && f.s.tally().sleep_woke == 1);
+    CHECK(soup_ok(f.s));
+    // CX above dormant.sleep_max is cut to it; CX 0, or another BX, is a plain YIELD.
+    LFix g;
+    CHECK(g.init("life.sleep = true\ndormant.sleep_max = 7\n"));
+    const u32 c = sleeper(g, 16, 1, 1000000);
+    CHECK(g.s.dormant(c) && g.s.dormant_state(c).spare == 7);
+    for (u32 v = 0; v < 2; ++v) {
+        LFix h;
+        CHECK(h.init("life.sleep = true\n"));
+        const u32 x = sleeper(h, 16, v ? 3 : 1, v ? 10 : 0);
+        CHECK(h.s.body(x).alive && !h.s.dormant(x) && h.s.tally().sleeps == 0);
+    }
+    printf("  sleep: YIELD BX 1 CX 10 slept 10 ticks on its reserve with its cores free, then woke with them\n");
+}
+
+// V2: a sleep without a reserve dies (it has nothing to sleep on); BX 2
+// drifts, its timer going with it; with life.sleep off YIELD is as before.
+void test_sleep_bare_drift_off() {
+    LFix f;
+    CHECK(f.init("life.sleep = true\n"));
+    const u32 b = sleeper(f, 0, 1, 5);
+    CHECK(!f.s.body(b).alive && f.s.tally().sleeps == 1 && f.s.tally().sleep_expired == 1);
+    LFix g;
+    CHECK(g.init("life.sleep = true\n"));
+    const u32 edges[1] = {0};
+    const u32 in_flight[1] = {0};
+    DispersalPorts ports;
+    ports.edges = edges;
+    ports.in_flight = in_flight;
+    ports.degree = 1;
+    ports.capacity = 2;
+    g.s.set_ports(ports);
+    const u32 d = sleeper(g, 32, 2, 12);
+    CHECK(!g.s.body(d).alive && g.s.departures().size() == 1);
+    if (g.s.departures().size() == 1) {
+        const Departure& dep = g.s.departures()[0];
+        CHECK(dep.dormant == 1 && dep.sleep == ((static_cast<u32>(kDormantVoluntary) << 16) | 12u) &&
+              dep.mem_reserve == 32);
+    }
+    LFix h;
+    CHECK(h.init(""));
+    const u32 x = sleeper(h, 16, 1, 10);
+    CHECK(h.s.body(x).alive && !h.s.dormant(x) && h.s.tally().sleeps == 0);
+}
+
+// V4: life.dormancy (the automatic rule) and life.sleep (the instruction)
+// apart: with only the instruction a frozen body dies, as before dormancy;
+// with both it goes dormant; and the instruction works either way.
+void test_sleep_modes() {
+    for (u32 m = 0; m < 4; ++m) {
+        const bool autom = (m & 1) != 0, sleep = (m & 2) != 0;
+        TextBuf cfg;
+        cfg.append("heat.enabled = false\nhazard.copy = 0\nhazard.flaw = 0\nhazard.rot = 0\nmem.upkeep = 1000000\n"
+                   "world.millicores = 2000\nworld.disk = 4096\nlife.frozen_ticks = 5\ncost.table = classic\n");
+        cfg.append(autom ? "life.dormancy = true\n" : "life.dormancy = false\n");
+        cfg.append(sleep ? "life.sleep = true\n" : "life.sleep = false\n");
+        LFix f;
+        CHECK(f.init_raw(cfg.c_str()));
+        const u32 b = plant(f.s, 100, "ALLOC INC INC INC", 1000);
+        Cpu& c = f.s.cpu_mut(f.s.body(b).cpus);
+        c.bx = 3; // a disk reserve
+        c.cx = 16;
+        f.s.run_cpu(f.s.body(b).cpus, 1);
+        for (u64 t = 0; t <= 5; ++t)
+            f.s.tick(t);
+        CHECK(autom ? (f.s.body(b).alive && f.s.dormant(b)) : !f.s.body(b).alive);
+    }
+}
+
+// V5: a warp's YIELD with BX 1 and CX > 0 (the first lane's) is a host
+// instruction with life.sleep on, and sends the GPU-born body to sleep.
+void test_sleep_warp() {
+    LFix f;
+    CHECK(f.init("life.sleep = true\ndormant.sleep_max = 8\ndormant.mem_loss = 0\nworld.millicores = 1000\n"
+                 "world.gpus = 64\ngpu.warps = true\nwarp.lanes = 4\nwarp.step_cost = 1\nwarp.lane_cost = 0\n"
+                 "warp.capacity = 50\n"));
+    // CX 4, ALLOC a reserve of 4; then BX 1 (ROTB: CX into BX) and CX 5.
+    Array<u8> code;
+    TextBuf err;
+    CHECK(genome_from_names(f.p.table, "INC INC INC INC ALLOC ZERO INC ROTB INC INC INC INC INC YIELD INC INC",
+                            &code, &err));
+    for (usize i = 0; i < code.size(); ++i)
+        f.s.mem_mut()[100 + i] = code[i];
+    const u32 b = f.s.create_body_form(100, static_cast<u32>(code.size()), 0, 1, kFormGpu);
+    CHECK(b != kNone);
+    u64 t = 0, sleeps = 0;
+    for (; t < 30 && !f.s.dormant(b); ++t) {
+        f.s.tick(t);
+        sleeps += f.s.tally().sleeps;
+    }
+    CHECK(f.s.dormant(b) && sleeps == 1);
+    if (f.s.dormant(b)) {
+        const Dormant& d = f.s.dormant_state(b);
+        CHECK((d.flags & kDormantVoluntary) && (d.flags & kDormantStays) && d.spare == 5 && d.form == kFormGpu);
+        CHECK(d.gpus == 1 && f.s.warp_count(b) == 0);
+    }
+    printf("  sleep: a warp's YIELD went to the host, which sent its GPU-born body to sleep at tick %llu\n",
+           static_cast<unsigned long long>(t - 1));
+}
+
+// A busy warp world with sleep on (random code yields with BX 1 or 2 and CX
+// > 0 often): the same at 1, 4 and 20 threads and through a snapshot, not the
+// world without sleep; and on the real GPU, every round verified against
+// the reference, the reference's world.
+const char* sleep_world(bool sleep) {
+    static TextBuf t[2];
+    TextBuf& w = t[sleep ? 1 : 0];
+    if (w.size())
+        return w.c_str();
+    w.append("seed = 11\nworld.model = soup\nworld.graph = procedural\nworld.nodes = 16\nworld.soup_size = 2048\n"
+             "world.millicores = 300\nworld.gpus = 300\ngpu.warps = true\n"
+             "edge.bandwidth = 8\ncpu.instr_per_core = 2500\ncpu.wear = 0.002\ngpu.wear = 0.002\n"
+             "spark.timing = last\nspark.initial = 20\nspark.rate = 0.5\nspark.grant = 20\nspark.gpu_grant = 6\n"
+             "spark.min_len = 8\nspark.max_len = 32\nhazard.copy = 0.005\nhazard.flaw = 0.001\n"
+             "hazard.rot = 0.00005\nworld.disk = 512\nlife.dormancy = true\nlife.frozen_ticks = 40\n"
+             "seed.at = 600\nseed.form = gpu\nseed.millicores = 0\nseed.gpus = 64\nseed.genome = "
+             "SENSE ALLOC SHR SHR SHR SHR SHR NOP1 COPY DJNZ NOP0 ZERO INC INC ROTB "
+             "ZERO INC SHL SHL SHL ALLOC ZERO ROTB INC SHL SHL SHL SHL SHL DIVIDE ZERO ZERO\n");
+    if (sleep) // (short sleeps, so some end within the run)
+        w.append("life.sleep = true\ndormant.sleep_max = 20\n");
+    return w.c_str();
+}
+
+void test_sleep_world() {
+    const u64 ticks = 200;
+    const u32 threads[4] = {1, 4, 20, 1};
+    u64 hashes[4] = {};
+    SoupTally sum = {};
+    ByteWriter snap;
+    for (u32 v = 0; v < 4; ++v) {
+        Run run;
+        CHECK(make_run(run, sleep_world(v < 3), threads[v]));
+        for (u64 t = 1; t <= ticks; ++t) {
+            run.run_until(t);
+            if (v != 0)
+                continue;
+            const u64* s = reinterpret_cast<const u64*>(&run.world().last_soup_tick());
+            u64* d = reinterpret_cast<u64*>(&sum);
+            for (usize i = 0; i < sizeof(SoupTally) / sizeof(u64); ++i)
+                d[i] += s[i];
+            if (t == ticks / 2)
+                run.snapshot(snap);
+        }
+        hashes[v] = run.world().hash();
+    }
+    CHECK_EQ_U64(hashes[1], hashes[0]);
+    CHECK_EQ_U64(hashes[2], hashes[0]);
+    CHECK(hashes[3] != hashes[0]);
+    CHECK(sum.sleeps > 0); // (random code mostly sleeps with no reserve, and dies: the unit tests wake)
+    if (snap.size() > 0) {
+        Run b;
+        TextBuf err;
+        CHECK(b.init_from_snapshot(snap.data(), snap.size(), 4, &err));
+        b.run_until(ticks);
+        CHECK_EQ_U64(b.world().hash(), hashes[0]);
+    }
+    printf("  sleep: %llu sleeps (%llu woke, %llu expired) in %llu ticks of a busy warp world; the same at 1, 4 and "
+           "20 threads and through a snapshot\n",
+           static_cast<unsigned long long>(sum.sleeps), static_cast<unsigned long long>(sum.sleep_woke),
+           static_cast<unsigned long long>(sum.sleep_expired), static_cast<unsigned long long>(ticks));
+    AccelDevice devs[16];
+    const u32 n = accel_list(devs, 16);
+    bool gpu = false;
+    for (u32 i = 0; i < n; ++i)
+        gpu = gpu || (devs[i].gpu && devs[i].hardware);
+    if (!gpu) {
+        printf("  sleep: no hardware GPU, the device check skipped\n");
+        return;
+    }
+    TextBuf cfg;
+    cfg.append(sleep_world(true));
+    cfg.append("warp.device = gpu\nwarp.verify = 1\n");
+    Run run;
+    CHECK(make_run(run, cfg.c_str(), 4));
+    run.run_until(ticks);
+    const World& w = run.world();
+    CHECK(w.warp_gpu_rounds() > 0 && w.warp_verified() == w.warp_gpu_rounds() && w.warp_mismatches() == 0);
+    CHECK_EQ_U64(w.hash(), hashes[0]);
+    printf("  sleep: on the GPU (%s), %llu rounds verified, %llu differed; the reference's world\n", w.warp_kernel(),
+           static_cast<unsigned long long>(w.warp_verified()), static_cast<unsigned long long>(w.warp_mismatches()));
+}
+
 } // namespace
 
 void suite_lifehistory() {
@@ -559,4 +792,9 @@ void suite_lifehistory() {
     test_wipe_symptoms();
     test_wipe_false_alarms();
     test_wipe_world();
+    test_sleep_wakes();
+    test_sleep_bare_drift_off();
+    test_sleep_modes();
+    test_sleep_warp();
+    test_sleep_world();
 }

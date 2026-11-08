@@ -9,7 +9,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 - **Families:** a key with a `<placeholder>` stands for one setting per member listed.
 - **Needs:** the switch the setting depends on; it does nothing while that is off.
 
-375 settings, 83 of them from 14 families; 11 hidden (tests and demos).
+377 settings, 83 of them from 14 families; 11 hidden (tests and demos).
 
 ## Contents
 
@@ -343,6 +343,8 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `dormant.mem_loss` | whole | 1 | 0 to 16777216 | **Memory reserve loss**. Codons of its memory reserve a dormant program loses a tick. Needs `life.dormancy`. |
 | `dormant.disk_loss` | whole | 1 | 0 to 16777216 | **Disk reserve loss**. Codons of its disk reserve it loses a tick, once its memory reserve is gone. Needs `life.dormancy`. |
 | `dormant.dwell` | whole | 15 | 1 to 1000000000 | **Dwell**. Ticks a resting program stays on a node before it moves on. Needs `life.dormancy`. |
+| `life.sleep` | switch | false | true or false | **Voluntary sleep**. YIELD with BX 1 (rest here) or 2 (drift), through the resource selector, and CX = N &gt; 0 sends the program dormant for N ticks, on its reserves; it wakes when they're up and a core of its kind is free. With life.dormancy off too, frozen bodies die and only the instruction sleeps. |
+| `dormant.sleep_max` | whole | 5000 | 1 to 65535 | **Longest sleep**. A voluntary sleep lasts at most this many ticks (a longer CX is cut to it). Needs `life.sleep`. |
 
 ## Disasters
 

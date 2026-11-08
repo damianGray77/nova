@@ -141,7 +141,7 @@ struct LineageInfo {
     u32 native_detected;  // ... and then a GPU-born member made an inheriting daughter (Phase 8)
     u32 defences;         // actions aimed at members that failed because they changed in time, once gated (9)
     u32 founder_origin;   // how its founding body began (kOrigin..., W7)
-    u32 pad;
+    u32 sleep_detected;   // ... and then a member chose to sleep (docs/lifehistory-plan.md V7; was padding)
 };
 
 // An origin as a word: spark, daughter, arrival, wake or unknown (W7).
@@ -155,7 +155,8 @@ inline constexpr u32 kEventDiskUser = 4;      // a gated lineage's member loaded
 inline constexpr u32 kEventSignaller = 5;     // a gated lineage's members emitted on signal.sustained ticks
 inline constexpr u32 kEventGpuNative = 6;     // a gated lineage's GPU-born member made an inheriting daughter (8)
 inline constexpr u32 kEventDefended = 7;      // a gated lineage's members made detect.defended attacks fail (9)
-inline constexpr u32 kEventCount = 8;
+inline constexpr u32 kEventSleeper = 8;       // a gated lineage's member chose to sleep (docs/lifehistory-plan.md V7)
+inline constexpr u32 kEventCount = 9;
 
 // The first time a lineage meets the gate, first makes a GPU link after, first
 // has a member use the NPU, or first arrives on a node it wasn't founded on.
@@ -267,6 +268,10 @@ class Lineages {
     // `block` failed at its end because the body changed in time (its
     // surface, its place, its size).
     void on_defended(const Soup& s, u32 block, u64 tick);
+    // docs/lifehistory-plan.md V7: the body whose first block is `block` chose
+    // to sleep (YIELD BX 1 or 2, CX > 0); a gated lineage's first is the
+    // sleeper event.
+    void on_sleep(const Soup& s, u32 block, u64 tick);
 
     // --- inspection --------------------------------------------------------
     u32 node() const { return node_; }
@@ -279,6 +284,7 @@ class Lineages {
     u64 disk_detections() const { return disk_detections_; }
     u64 signal_detections() const { return signal_detections_; }
     u64 defended_detections() const { return defended_detections_; }
+    u64 sleep_detections() const { return sleep_detections_; }
     bool is_written(u32 a) const { return (written_[a >> 6] >> (a & 63)) & 1; }
     bool is_gpu_written(u32 a) const { return (gpu_written_[a >> 6] >> (a & 63)) & 1; }
     u64 founded() const { return founded_; } // lineages founded so far
@@ -325,7 +331,7 @@ class Lineages {
     u32 next_id_ = 1;
     u64 links_ = 0, inject_links_ = 0, gpu_links_ = 0, founded_ = 0, detections_ = 0;
     u64 gpu_detections_ = 0, npu_detections_ = 0, colonisations_ = 0, disk_detections_ = 0;
-    u64 signal_detections_ = 0, defended_detections_ = 0;
+    u64 signal_detections_ = 0, defended_detections_ = 0, sleep_detections_ = 0;
     u64 founded_by_[kOriginCount] = {};
     u32 max_depth_ever_ = 0;
     Array<BlockTag> tags_;   // by block slot

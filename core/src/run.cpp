@@ -249,7 +249,8 @@ void Run::drain_detection() {
             const char* const kinds[kEventCount] = {"replicator node=", "gpu_replicator node=",
                                                     "npu_user node=",   "colonist node=",
                                                     "disk_user node=",  "signaller node=",
-                                                    "gpu_native node=", "defended node="};
+                                                    "gpu_native node=", "defended node=",
+                                                    "sleeper node="};
             t.append(kinds[g.kind < kEventCount ? g.kind : 0]);
             t.append_u64(n);
             t.append(" lineage=");
@@ -284,7 +285,10 @@ void Run::drain_detection() {
                                                         ? disk_user_
                                                         : (g.kind == kEventGpuNative
                                                                ? gpu_native_
-                                                               : (g.kind == kEventDefended ? defended_ : signaller_)))));
+                                                               : (g.kind == kEventDefended
+                                                                      ? defended_
+                                                                      : (g.kind == kEventSleeper ? sleeper_
+                                                                                                 : signaller_))))));
                 if (!d.found) {
                     d.found = true;
                     d.tick = g.tick;

@@ -829,10 +829,12 @@ bool write_result(const char* path, const Run& run, const char* stop, double sec
         t.append_char('\n');
         // Phase 8: with warps, the first replication on the GPU alone too.
         // Phase 9: with a timed cost table, the first lineage to defend itself.
-        const Detection* const milestones[] = {&run.disk_user(), &run.signaller(), &run.gpu_native(), &run.defended()};
-        const char* const names[] = {"disk_user", "signaller", "gpu_native", "defended"};
-        const bool on[] = {true, true, w.soup_params().warps, w.soup_params().cost.timed != 0};
-        for (int i = 0; i < 4; ++i) {
+        // docs/lifehistory-plan.md V7: with voluntary sleep, the first gated lineage to sleep.
+        const Detection* const milestones[] = {&run.disk_user(), &run.signaller(), &run.gpu_native(),
+                                               &run.defended(), &run.sleeper()};
+        const char* const names[] = {"disk_user", "signaller", "gpu_native", "defended", "sleeper"};
+        const bool on[] = {true, true, w.soup_params().warps, w.soup_params().cost.timed != 0, w.soup_params().sleep};
+        for (int i = 0; i < 5; ++i) {
             if (!on[i])
                 continue;
             const Detection& m = *milestones[i];

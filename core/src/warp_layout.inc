@@ -20,7 +20,9 @@
 #define WC_OPTIME 102u    // 96 words (Phase 9b): a step's time by its Op, then for a lane that
                           // can't run the code (all 0: no clock)
 #define WC_SCAN 198u      // a place a lane's template search looks at (Phase 9c; 0: free)
-#define WC_COUNT 199u
+#define WC_SLEEP 199u     // 1: YIELD is a host instruction, which may send the body to sleep
+                          // (docs/lifehistory-plan.md V5, life.sleep); 0: a lane's, as before
+#define WC_COUNT 200u
 
 // --- a body's record in the image (offsets from the record) -------------------
 #define WB_NBLK 0u        // blocks

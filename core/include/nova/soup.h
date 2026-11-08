@@ -273,8 +273,11 @@ struct SoupParams {
     // Dormancy and drift (docs/dormancy-plan.md): a frozen body with reserves
     // goes dormant instead of dying, drifts from node to node, and wakes where
     // a core of its kind is free.
-    bool dormancy;        // life.dormancy
-    u32 dormant_mem_loss;  // dormant.mem_loss: codons of its memory reserve lost a tick
+    bool dormancy;        // dormancy's machinery: life.dormancy or life.sleep
+    bool dormancy_auto;   // life.dormancy: frozen bodies (and a burnout's victims) go dormant
+    bool sleep;           // life.sleep (docs/lifehistory-plan.md V): YIELD BX 1/2, CX = N sleeps N ticks
+    u32 sleep_max;        // dormant.sleep_max: the longest sleep (at most 65,535: Dormant::spare)
+    u32 dormant_mem_loss; // dormant.mem_loss: codons of its memory reserve lost a tick
     u32 dormant_disk_loss; // dormant.disk_loss: disk codons of its disk reserve lost a tick, once memory is gone
     u32 dormant_dwell;     // dormant.dwell: ticks it rests on a node before moving on
     // --- a varied world (docs/world-plan.md W1, W5) ---------------------------
@@ -708,6 +711,9 @@ struct Departure {
     // arrival (`disk` is then her fast disk's); a dormant program's archive
     // reserve.
     u32 archive;
+    // Voluntary dormancy (docs/lifehistory-plan.md V): a sleeper's flags << 16
+    // | its timer (Dormant::flags, Dormant::spare); 0 for anything else.
+    u32 sleep;
 };
 
 // A dormant program resting on this node (docs/dormancy-plan.md): a body with
@@ -726,8 +732,8 @@ struct Dormant {
     u32 millicores, emillicores, gpus, npus; // what it held at home (P, E, GPU, NPU)
     u32 form;         // kFormCpu or kFormGpu
     u8 kind;          // its thread's preferred kind of core (kKindP or kKindE; was the low byte of a u32)
-    u8 flags;         // disasters (X4, X9): kDormantBurnt, kDormantGraced (0 otherwise; was always 0)
-    u16 spare;        // (0: the rest of the old u32 kind)
+    u8 flags;         // disasters (X4, X9): kDormantBurnt, kDormantGraced; V: kDormantVoluntary, kDormantStays
+    u16 spare;        // V6: a voluntary sleep's ticks left (0: the rest of the old u32 kind, in older files)
     u32 hops;         // hops it has drifted
     u32 archive_reserve; // disk tiers (W4): its archive holding, spent last (was padding: 0 without one)
 };
@@ -737,6 +743,10 @@ static_assert(offsetof(Dormant, kind) == 36 && offsetof(Dormant, flags) == 37 &&
               "Dormant's bytes are its snapshot format (v3 files hold kind as a u32 at 36)");
 inline constexpr u8 kDormantBurnt = 1;  // sent dormant by a burnout (resting at home first)
 inline constexpr u8 kDormantGraced = 2; // ... with a grace reserve: it had none of its own
+// Voluntary dormancy (docs/lifehistory-plan.md V6): it chose to sleep, its
+// timer in `spare` (ticks left; 0: up, or never set); and BX 1's rest in place.
+inline constexpr u8 kDormantVoluntary = 4;
+inline constexpr u8 kDormantStays = 8;
 
 // --- Disasters (docs/disasters-plan.md; disaster.cpp) ------------------------
 // A core offline for repair after a burnout (X4): neither held nor free, back
@@ -1423,6 +1433,11 @@ class Soup {
     // open neighbour from this node's stream, or kNone.
     Array<Dormant> dorm_;
     Array<CargoTag> dorm_tag_;
+    // docs/lifehistory-plan.md V1: per body slot, a sleep asked for this tick
+    // (YIELD), taken at the death sweep: ticks | kSleepDrift, 0 = none. Lives
+    // within a tick, so neither hashed nor saved (the sweep clears it).
+    Array<u32> sleep_req_;
+    static constexpr u32 kSleepDrift = 0x80000000u;
     // W7: per body slot, how it began (kOrigin...): detector data like
     // dorm_tag_, not hashed or saved (a resumed run's bodies read as unknown).
     Array<u8> origin_;
@@ -1430,7 +1445,9 @@ class Soup {
     // Disasters X4: offline_until > 0 is a burnout -- its cores go offline
     // until then, not to the pools, and it rests here first; grace > 0 gives
     // a bare one a memory reserve of that many codons.
-    bool go_dormant(u32 b, u64 offline_until = 0, u32 grace = 0);
+    // V: `sleep` > 0 is a voluntary sleep of that many ticks (resting in
+    // place unless `drift`).
+    bool go_dormant(u32 b, u64 offline_until = 0, u32 grace = 0, u32 sleep = 0, bool drift = true);
     void rest_tick(u32 b);
     void depart_dormant(u32 b, u32 nbr);
     u32 drift_port();

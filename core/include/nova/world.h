@@ -506,7 +506,9 @@ class World {
         // arrival in the archive (`disk` is then her fast disk's); a dormant
         // program's archive reserve.
         u32 archive;
-        u32 pad;
+        // Voluntary dormancy (docs/lifehistory-plan.md V): a drifting sleeper's
+        // flags << 16 | timer (Departure::sleep); 0 otherwise (was padding).
+        u32 sleep;
     };
     static_assert(sizeof(Cargo) == 112, "Cargo must have no implicit padding");
 
@@ -530,6 +532,7 @@ class World {
     Array<Cargo> drift_out_;   // scratch: dormant programs passing through this barrier
     Array<u8> drift_codons_;   // ... and their codons
     u64 world_dormant_expired_ = 0, world_dormant_hops_ = 0; // this tick, added to the tally
+    u64 world_sleep_expired_ = 0; // ... of the expired, sleepers (docs/lifehistory-plan.md V7)
     void apply_spark_rate(double rate);
     // Phase 4
     void corrupt(Cargo& c);          // transit corruption of one cargo, at delivery

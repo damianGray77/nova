@@ -674,6 +674,9 @@ void Soup::build_warp_consts() {
         wcst_[WC_OPTIME + i] = p_->cost.timed ? p_->cost.gpu_op[i] : 0;
     // Phase 9c: a place searched (classic: searches are free, as in Phase 8).
     wcst_[WC_SCAN] = p_->cost.timed ? static_cast<u32>(p_->cost.gpu_scan) : 0;
+    // docs/lifehistory-plan.md V5: with voluntary sleep, YIELD stops a warp in
+    // front of it as a host instruction (host_step runs it as a CPU's YIELD).
+    wcst_[WC_SLEEP] = p_->sleep ? 1u : 0u;
 }
 
 // --- a round ----------------------------------------------------------------------

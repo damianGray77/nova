@@ -359,7 +359,12 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     p->gestation_per_codon = key_f64(cfg, "life.gestation_per_codon");
     // Dormancy and drift (docs/dormancy-plan.md): the watchdog's frozen body
     // goes dormant instead of dying, if it has reserves to spend.
-    p->dormancy = key_flag(cfg, "life.dormancy");
+    // Voluntary dormancy (docs/lifehistory-plan.md V4): life.dormancy is the
+    // automatic rule, life.sleep the instruction; either needs the machinery.
+    p->dormancy_auto = key_flag(cfg, "life.dormancy");
+    p->sleep = key_flag(cfg, "life.sleep");
+    p->sleep_max = key_u32(cfg, "dormant.sleep_max");
+    p->dormancy = p->dormancy_auto || p->sleep;
     p->dormant_mem_loss = key_u32(cfg, "dormant.mem_loss");
     p->dormant_disk_loss = key_u32(cfg, "dormant.disk_loss");
     p->dormant_dwell = key_u32(cfg, "dormant.dwell");
@@ -732,6 +737,7 @@ void Soup::init(const SoupParams* p, u64 seed, u32 node, u32 life, const Ruins* 
     last_ran_.clear();
     dorm_.clear();
     dorm_tag_.clear();
+    sleep_req_.clear();
     origin_.clear();
     offline_.clear(); // disasters: every core online, nothing brewing
     pending_wipes_.clear(); // docs/lifehistory-plan.md W: no wipe coming
@@ -946,6 +952,8 @@ u32 Soup::new_body() {
     B.alive = 1;
     B.err = 1.0f;
     order_.push(b);
+    if (b < sleep_req_.size()) // (V1: nothing asked yet)
+        sleep_req_[b] = 0;
     if (p_->gpus)
         gpu_.body_slot(b, bodies_.size());
     if (p_->npus)
@@ -1166,6 +1174,8 @@ void Soup::kill(u32 b) {
     B.alive = 0;
     if (b < dorm_.size())
         dorm_[b].on = 0;
+    if (b < sleep_req_.size()) // (V1: a sleep it asked for dies with it)
+        sleep_req_[b] = 0;
     ++tally_.deaths;
 }
 
@@ -1196,7 +1206,13 @@ u32 Soup::drift_port() {
 // fossils, its warps and threads. Then it drifts to a random neighbour, or
 // rests here with nowhere to go. With no reserves it has no time to search:
 // false, and it dies as before.
-bool Soup::go_dormant(u32 b, u64 offline_until, u32 grace) {
+//
+// Voluntary dormancy (docs/lifehistory-plan.md V1-V2, V6): with `sleep` > 0
+// it chose this, for that many ticks (its timer in Dormant::spare); with
+// `drift` it drifts as above, else it rests here throughout (kDormantStays).
+// Without reserves it dies all the same: to sleep usefully a program sets
+// memory aside first.
+bool Soup::go_dormant(u32 b, u64 offline_until, u32 grace, u32 sleep, bool drift) {
     Body& B = bodies_[b];
     const u32 k = B.blocks;
     if (k == kNone)
@@ -1206,12 +1222,14 @@ bool Soup::go_dormant(u32 b, u64 offline_until, u32 grace) {
     const u32 disk_reserve = disk_on() ? disk_.total[b] : 0; // (W4: both tiers)
     const bool bare = mem_reserve == 0 && disk_reserve == 0;
     if (code == 0 || (bare && grace == 0)) {
-        if (offline_until == 0) // (a burnout's victims aren't frozen)
+        if (offline_until == 0 && sleep == 0) // (a burnout's victims aren't frozen, nor are sleepers)
             ++frozen_bare_;
         return false;
     }
     if (prof_) // behaviour profiles (A3): a followed body's sample ends here, holdings read first
         prof_->on_dormant(*this, b);
+    if (sleep && obs_) // V7: the sleeper milestone, while its lineage still holds it
+        obs_->on_sleep(*this, k, tick_);
     Dormant d = {};
     d.on = 1;
     d.dwell = p_->dormant_dwell;
@@ -1221,6 +1239,10 @@ bool Soup::go_dormant(u32 b, u64 offline_until, u32 grace) {
     d.archive_reserve = disk_.tiered() ? disk_.held_in(b, true) : 0;
     d.disk_reserve = disk_reserve - d.archive_reserve;
     d.flags = static_cast<u8>((offline_until ? kDormantBurnt : 0) | (bare ? kDormantGraced : 0)); // (disasters X4)
+    if (sleep) { // V6
+        d.flags = static_cast<u8>(d.flags | kDormantVoluntary | (drift ? 0 : kDormantStays));
+        d.spare = static_cast<u16>(sleep < 65535u ? sleep : 65535u);
+    }
     const u32 e = e_units(b);
     d.millicores = B.units - e;
     d.emillicores = e;
@@ -1285,6 +1307,8 @@ bool Soup::go_dormant(u32 b, u64 offline_until, u32 grace) {
     dormant_disk_sum_ += disk_reserve;
     if (offline_until) // disasters X4: a burnout's victim rests here for its dwell first
         return true;
+    if (sleep && !drift) // V2: BX 1 rests where it is
+        return true;
     const u32 nbr = drift_port();
     if (nbr != kNone)
         depart_dormant(b, nbr);
@@ -1316,6 +1340,8 @@ void Soup::depart_dormant(u32 b, u32 nbr) {
     dep.dormant = 1;
     dep.mem_reserve = d.mem_reserve;
     dep.hops = d.hops + 1;
+    if (d.flags & kDormantVoluntary) // V: a drifting sleeper's timer travels with it
+        dep.sleep = (static_cast<u32>(d.flags & (kDormantVoluntary | kDormantStays)) << 16) | d.spare;
     stamp_block(k, K.len);
     free_block(k);
     B.blocks = B.latest = kNone;
@@ -1373,6 +1399,7 @@ void Soup::wake(u32 b) {
     if (obs_)
         obs_->on_arrive(*this, B.blocks, dorm_tag_[b], tick_);
     ++tally_.dormant_woke;
+    tally_.sleep_woke += (d.flags & kDormantVoluntary) ? 1 : 0; // V7
 }
 
 // A resting dormant program's end of tick (the death sweep, in schedule
@@ -1380,14 +1407,23 @@ void Soup::wake(u32 b) {
 // memory reserve, then its disk reserve, and with neither left (or its code
 // gone to bites or heat) it dies; else, its stay over, it moves on to a random
 // neighbour (staying with nowhere to go).
+//
+// Voluntary dormancy (docs/lifehistory-plan.md V2-V3): a sleeper's timer runs
+// down first, and it never wakes before it's up; then it wakes as any dormant
+// program does, or waits on its reserves. Resting in place (BX 1), it never
+// moves on.
 void Soup::rest_tick(u32 b) {
     Dormant& d = dorm_[b];
+    const bool vol = (d.flags & kDormantVoluntary) != 0;
     if (bodies_[b].mem == 0) {
         ++tally_.dormant_expired;
+        tally_.sleep_expired += vol ? 1 : 0;
         kill(b);
         return;
     }
-    if (can_wake(b)) {
+    if (d.spare > 0) // (0 for every program that didn't choose to sleep)
+        --d.spare;
+    if (d.spare == 0 && can_wake(b)) {
         wake(b);
         return;
     }
@@ -1399,9 +1435,12 @@ void Soup::rest_tick(u32 b) {
         d.archive_reserve -= d.archive_reserve < p_->dormant_disk_loss ? d.archive_reserve : p_->dormant_disk_loss;
     if (d.mem_reserve == 0 && d.disk_reserve == 0 && d.archive_reserve == 0) {
         ++tally_.dormant_expired;
+        tally_.sleep_expired += vol ? 1 : 0;
         kill(b);
         return;
     }
+    if (d.flags & kDormantStays) // V2: resting where it chose to
+        return;
     if (d.dwell > 1) {
         --d.dwell;
         return;
@@ -3465,8 +3504,19 @@ void Soup::death_sweep() {
         Body& B = bodies_[b];
         if (!B.alive)
             continue;
+        const u32 sleep = b < sleep_req_.size() ? sleep_req_[b] : 0;
+        if (sleep)
+            sleep_req_[b] = 0;
         if (p_->dormancy && dorm_[b].on) { // resting: it doesn't run, so it isn't swept as dead
             rest_tick(b);
+            continue;
+        }
+        if (sleep) { // docs/lifehistory-plan.md V1-V2: a sleep it asked for this tick
+            ++tally_.sleeps;
+            if (!go_dormant(b, 0, 0, sleep & ~kSleepDrift, (sleep & kSleepDrift) != 0)) {
+                ++tally_.sleep_expired; // (no reserve to sleep on: it dies)
+                kill(b);
+            }
             continue;
         }
         if (p_->threads_end)
@@ -3490,7 +3540,7 @@ void Soup::death_sweep() {
             running = running || warp_runs(b);
         }
         if (running && frozen_on && tick_ >= last_ran_[b] + p_->frozen_ticks) {
-            if (!(p_->dormancy && go_dormant(b))) { // dormancy: it goes dormant instead, if it can
+            if (!(p_->dormancy_auto && go_dormant(b))) { // dormancy: it goes dormant instead, if it can
                 ++tally_.died_frozen;
                 kill(b);
             }
@@ -4065,6 +4115,7 @@ bool Soup::load(ByteReader& r, TextBuf* err, u32 version) {
     }
     dorm_.clear();
     dorm_tag_.clear();
+    sleep_req_.clear(); // (V1: within a tick; a snapshot is at the barrier)
     if (p_->dormancy) { // (none before v3: no one dormant)
         if (version >= 3) {
             if (!get_array(r, &dorm_, nb) || dorm_.size() != nb) {

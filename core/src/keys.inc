@@ -588,6 +588,13 @@ NOVA_WHOLE("dormant.disk_loss", 1, 0, 1u << 24, 0, "Dormancy", "Disk reserve los
            "Codons of its disk reserve it loses a tick, once its memory reserve is gone.")
 NOVA_WHOLE("dormant.dwell", 15, 1, 1000000000, 0, "Dormancy", "Dwell", "life.dormancy",
            "Ticks a resting program stays on a node before it moves on.")
+// Voluntary dormancy (docs/lifehistory-plan.md V)
+NOVA_FLAG("life.sleep", false, 0, "Dormancy", "Voluntary sleep", "",
+          "YIELD with BX 1 (rest here) or 2 (drift), through the resource selector, and CX = N > 0 sends the "
+          "program dormant for N ticks, on its reserves; it wakes when they're up and a core of its kind is free. "
+          "With life.dormancy off too, frozen bodies die and only the instruction sleeps.")
+NOVA_WHOLE("dormant.sleep_max", 5000, 1, 65535, 0, "Dormancy", "Longest sleep", "life.sleep",
+           "A voluntary sleep lasts at most this many ticks (a longer CX is cut to it).")
 
 // ---------------------------------------------------------------------------
 // Disasters (docs/disasters-plan.md X8; core/src/disaster.cpp): set before a

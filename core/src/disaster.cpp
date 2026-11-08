@@ -226,7 +226,7 @@ DisasterCount Soup::burnout(const u32* units, u32 n, u64 until, double grace_cha
         const u32 code = B.blocks == kNone ? 0 : blocks_[B.blocks].owned;
         const bool bare = B.mem <= code && disk_held(b) == 0;
         const u32 g = bare && grace > 0 && r.chance(grace_chance) ? grace : 0;
-        if (p_->dormancy && go_dormant(b, until, g)) {
+        if (p_->dormancy_auto && go_dormant(b, until, g)) { // (the automatic rule: life.dormancy)
             ++out.b;
             out.c += bare ? 1 : 0;
             continue;
