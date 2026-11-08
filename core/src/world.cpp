@@ -1336,7 +1336,7 @@ void World::warp_open(Config& cfg) {
     warp_cost_ = 0;
     warp_cost_tick_ = 0;
     warp_climb_fresh_ = true;
-    warp_gstep_ = warp_hstep_ = 0;
+    warp_gstep_ = warp_hstep_ = warp_gfix_ = 0;
     warp_auto_ticks_ = warp_plain_ticks_ = 0;
     warp_tick_s_[0] = warp_tick_s_[1] = 0;
     warp_last_plain_ = 2;
@@ -1676,7 +1676,10 @@ bool World::warp_model_pick(u32 threads, double rest, u32* limit) {
     double sum = 0, best = 1e300;
     usize best_k = 0;
     for (usize k = 0; k <= nb; ++k) {
-        const double gpu = (k < nb ? at(k) : rest) * g;
+        // The GPU's side: its longest body's chain at its time a step, and its
+        // fixed costs (warp_gfix_) while it has any body at all.
+        const bool any = k < nb || rest > 0;
+        const double gpu = any ? (k < nb ? at(k) : rest) * g + warp_gfix_ : 0.0;
         const double cpu = k > 0 ? (at(0) * h > sum * h / t ? at(0) * h : sum * h / t) : 0.0;
         const double slower = gpu > cpu ? gpu : cpu;
         if (slower < best) {
@@ -1710,6 +1713,21 @@ void World::warp_model_measure(u32 round, bool cpu_ran, double kernel_ms) {
         if (ms > 0 && per >= 200) { // (a short longest body would be mostly fixed costs)
             const double g = ms / 1000.0 / static_cast<double>(per);
             warp_gstep_ = warp_gstep_ > 0 ? warp_gstep_ * 0.75 + g * 0.25 : g;
+        }
+        // ... and what its side costs beyond the kernel, whatever bodies it
+        // takes: the image's transfers to and from the GPU, which run while
+        // the CPU threads run their share (2026-11-08: about 5 ms a round on
+        // a mature world, against a 5.5 ms kernel, so a split that balanced
+        // the kernel alone left the CPU threads idle half the round). On the
+        // device's clock: the host's wait would count the CPU's share too
+        // whenever that's the longer side. The copies into and out of the
+        // upload and readback buffers come before and after both sides, so
+        // they don't move the balance. One batch's (a grouped round's two
+        // overlap: their span is the kernel's measure).
+        const double side = kernel_ms >= 0 ? 0.0 : warp_gpu_.last_ms();
+        if (ms > 0 && side > ms) {
+            const double f = (side - ms) / 1000.0;
+            warp_gfix_ = warp_gfix_ > 0 ? warp_gfix_ * 0.75 + f * 0.25 : f;
         }
     }
     if (cpu_ran && warp_ref_time_.size() == warp_ref_list_.size()) { // the reference's, a step on a thread

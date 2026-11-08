@@ -858,6 +858,7 @@ class World {
     // and the reference's a warp step on one thread (0 until measured), the
     // limit they give, and their measuring after a round.
     double warp_gstep_ = 0, warp_hstep_ = 0, warp_ref_wall_ = 0;
+    double warp_gfix_ = 0; // ... and the GPU side's seconds beyond its kernel (its transfers), a round
     u32 warp_gpu_guess_ = 0; // the longest chain guessed among the bodies the GPU took this tick
     Array<u64> warp_chains_; // scratch: the bodies' chains
     u32 warp_model_limit(u32 threads);
