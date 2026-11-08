@@ -1360,6 +1360,12 @@ void World::warp_open(Config& cfg) {
     TextBuf why;
     WarpKernelOptions kopt;
     kopt.fxc = kern.eq("fxc");
+    // DXC's records in video memory, the long bodies first (2026-11-08: with
+    // overlapping blocks indexed, quicker than the groupshared tiers on a
+    // mature round and a young one alike); dxctiers keeps the tiers.
+    if (!kern.eq("dxctiers"))
+        for (u32 k = 0; k < 4; ++k)
+            kopt.lds[k] = 0;
     if (pick == kNone) {
         warp_notes_.append("no hardware GPU found: warps run on the CPU reference\n");
     } else if (!warp_gpu_.open(pick, soup_params_.warp_lanes, &why, &warp_compile_ms_, &kopt)) {
@@ -1749,7 +1755,8 @@ void World::warp_second_task(void* ctx, u32 node) {
 }
 
 // set_warp_dump's file, little-endian 32-bit words: "NWRD" (0x4452574E), the
-// version (2: memory tiers' record words, W3; 1 before), lanes a warp, the constants' count, the jobs' count, the
+// version (3: the block index's pair count, and overlapping blocks indexed;
+// 2: memory tiers' record words, W3; 1 before), lanes a warp, the constants' count, the jobs' count, the
 // constants; then per job its node, image words, records and lanes (Lane
 // count), the image, the record offsets, each record's words, and the lanes.
 bool World::warp_write_dump(const Array<u32>& cst) {
@@ -1760,7 +1767,7 @@ bool World::warp_write_dump(const Array<u32>& cst) {
     auto put = [&](const void* p, usize words) {
         ok = ok && (words == 0 || fwrite(p, 4, words, f) == words);
     };
-    const u32 head[5] = {0x4452574Eu, 2u, soup_params_.warp_lanes, static_cast<u32>(cst.size()),
+    const u32 head[5] = {0x4452574Eu, 3u, soup_params_.warp_lanes, static_cast<u32>(cst.size()),
                          static_cast<u32>(warp_jobs_.size())};
     put(head, 5);
     put(cst.data(), cst.size());

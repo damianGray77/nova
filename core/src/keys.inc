@@ -405,8 +405,9 @@ NOVA_CHOICE("warp.device", "auto", "auto gpu cpu mixed", 0, "GPU", "Warp device"
             "(a test). Every choice gives the same world.")
 NOVA_WHOLE("warp.verify", 0, 0, 1000000000, 0, "GPU", "Verify warps every", "gpu.warps",
            "Check every Nth GPU round against the CPU reference (0 = off).")
-NOVA_CHOICE("warp.kernel", "dxc", "dxc fxc", 0, "GPU", "Warp kernel", "gpu.warps",
-            "dxc: the kernel compiled at build time where it can run, else FXC's; fxc: FXC's always.")
+NOVA_CHOICE("warp.kernel", "dxc", "dxc dxctiers fxc", 0, "GPU", "Warp kernel", "gpu.warps",
+            "dxc: the kernel compiled at build time where it can run (every record in video memory, the long "
+            "bodies first), else FXC's; dxctiers: DXC's with small records in groupshared tiers; fxc: FXC's always.")
 NOVA_WHOLE("warp.groups", 1, 1, 2, 0, "GPU", "Overlap groups", "gpu.warps",
            "2: a tick's GPU round in two node groups, one group's CPU work while the other's warps are on the GPU "
            "(quicker with warp.device = gpu; auto already keeps the CPU busy during the round); 1: every node in one "

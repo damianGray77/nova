@@ -54,11 +54,11 @@ bool load_dump(const char* path, Dump* d, TextBuf* err) {
         return false;
     }
     u32 head[5] = {};
-    // (version 2: the memory tiers' record words, docs/world-plan.md W3; a version 1 dump's records are laid out otherwise)
-    bool ok = read_words(f, head, 5) && head[0] == 0x4452574Eu && head[1] == 2u && head[2] >= 1 && head[2] <= kMaxLanes;
+    // (version 3: the block index's pair count; earlier dumps' records are laid out otherwise)
+    bool ok = read_words(f, head, 5) && head[0] == 0x4452574Eu && head[1] == 3u && head[2] >= 1 && head[2] <= kMaxLanes;
     if (!ok) {
         fclose(f);
-        err->append("not a warp round dump (version 2)");
+        err->append("not a warp round dump (version 3: dump the round again)");
         return false;
     }
     d->lanes = head[2];
@@ -209,9 +209,12 @@ bool find_variant(Str name, Variant* v) {
         {"fxclong", "FXC's kernel, the long bodies first", {2048, 0, 0, 0}, true, true},
         {"dxc2k", "DXC's kernel, groupshared images up to 2,048 words", {2048, 0, 0, 0}, false, false},
         {"dxcplain", "DXC's kernel, every record in video memory", {0, 0, 0, 0}, false, false},
+        {"dxcplainlong", "DXC's kernel, every record in video memory, the long bodies first (the world's)", {0, 0, 0, 0}, false,
+         true},
         {"dxctiers", "DXC's kernel, groupshared tiers of 256, 512, 1,024 and 2,048 words", {256, 512, 1024, 2048},
          false, false},
-        {"dxc", "DXC's kernel, the tiers, the long bodies first (the world's)", {256, 512, 1024, 2048}, false, true},
+        {"dxc", "DXC's kernel, the tiers, the long bodies first (warp.kernel = dxctiers)", {256, 512, 1024, 2048}, false,
+         true},
     };
     for (const auto& a : kAll)
         if (name.eq(a.name)) {
@@ -233,7 +236,7 @@ int cmd_bench_warp(int argc, char** argv) {
     // nova bench warp DUMP [--repeats N] [--threads N] [--variants a,b,...] [--ops]
     if (argc < 4) {
         fprintf(stderr, "usage: nova bench warp DUMP [--repeats N] [--threads N] [--ops] [--variants "
-                        "fxc,fxclong,dxc2k,dxcplain,dxctiers,dxc]\n");
+                        "fxc,fxclong,dxc2k,dxcplain,dxcplainlong,dxctiers,dxc]\n");
         return 2;
     }
     const char* path = argv[3];
@@ -271,7 +274,7 @@ int cmd_bench_warp(int argc, char** argv) {
         return 2;
     }
     if (nvar == 0) {
-        find_variant(Str("fxc"), &vars[nvar++]);
+        find_variant(Str("dxcplainlong"), &vars[nvar++]); // (the world's, then the tiers)
         find_variant(Str("dxc"), &vars[nvar++]);
     }
     Dump d;

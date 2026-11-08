@@ -204,18 +204,21 @@ uint w_range(uint b, uint a) {
     uint hi = 0u;
     uint mid = 0u;
     if (s != 0u) {
-        // Blocks that don't overlap (the packer checked), indexed by start
-        // (pairs of start, entry): at most one can hold a, the last that
-        // starts at or before it -- the same answer as the scan below.
-        hi = n;
+        // The packer's index: a count, then (start, entry) pairs by start --
+        // the blocks themselves when no two overlap, else the stretches
+        // between blocks' starts and ends, each with the block the scan
+        // below finds there (or, between blocks, one that holds none of it).
+        // The last pair that starts at or before a names the only candidate:
+        // the same answer as the scan.
+        hi = IMG(s);
         W_LOOP while (hi - lo > 1u) {
             mid = (lo + hi) >> 1;
-            if (IMG(s + 2u * mid) <= a)
+            if (IMG(s + 1u + 2u * mid) <= a)
                 lo = mid;
             else
                 hi = mid;
         }
-        e = IMG(s + 2u * lo + 1u);
+        e = IMG(s + 2u + 2u * lo);
         if (a - IMG(e + WK_START) < IMG(e + WK_LEN))
             return e;
         return W_NONE;

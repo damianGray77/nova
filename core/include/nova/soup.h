@@ -1248,6 +1248,11 @@ class Soup {
     Array<u8> wagain_;          // per warp slot: its host instruction was done, run it again this tick
     Array<u64> wkeys_;          // scratch: a body's blocks by start
     Array<u32> wlens_;
+    // scratch (warp_pack's block index): its (start, place) pairs, and for
+    // overlapping blocks the sweep's ends, each block's end, its open blocks
+    Array<u32> wseg_;
+    Array<u64> wends_, wendj_;
+    Array<u32> wheap_;
     Array<u32> wlive_, wact_;   // per warp slot: lanes not halted / nor yielded (follow the lanes)
     Array<u8> wstate_;          // per warp slot: kLanesHost, kLanesDevice or kLanesBoth
     u32 wchain_ = 0;            // the last round's longest body, in steps

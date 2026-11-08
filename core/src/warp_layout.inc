@@ -42,7 +42,8 @@
 #define WO_GARBLED 2u
 #define WO_HALTS 3u
 #define WO_WRITES 4u
-#define WB_SORT 45u       // where the blocks' sorted index starts (0: none, look them up in order)
+#define WB_SORT 45u       // where the blocks' index starts: its pair count, then (start, entry) pairs
+                          // (0: none, look them up in order; warp.cpp's warp_pack, w_range)
 // Memory tiers (docs/world-plan.md W3), the record's node's: codons [0, WB_FAST)
 // are fast memory (0: one tier, every step as before); then a lane's price
 // of each in the fast tier and the slow one, already divided by the node's

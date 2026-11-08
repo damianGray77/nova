@@ -639,8 +639,15 @@ bool Soup::warp_pack(u32 round) {
         if (nblk == 0)
             continue;
         // A body of many blocks gets them indexed by start (binary search on
-        // the GPU, instead of a scan per address), if no two overlap.
+        // the GPU, instead of a scan per address): (start, block) pairs if no
+        // two overlap; if some do, the stretches between every block's start
+        // and end, each with the block the scan finds there -- the first in
+        // the body's list that holds it -- or, between blocks, one that
+        // doesn't (any: none does), so a lookup fails as the scan would.
+        // (Without it, a body of 500 overlapping blocks scanned them all at
+        // every address on the GPU: one held a mature world's round at 130 ms.)
         bool sorted = false;
+        u32 npairs = 0;
         if (nblk > 8) {
             Array<u64>& keys = wkeys_;
             Array<u32>& lens = wlens_;
@@ -662,13 +669,111 @@ bool Soup::warp_pack(u32 round) {
             } else {
                 sort_u64(keys.data(), keys.size());
             }
-            sorted = true;
+            bool disjoint = true;
             u64 prev_end = 0;
-            for (usize i = 0; i < keys.size() && sorted; ++i) {
+            for (usize i = 0; i < keys.size() && disjoint; ++i) {
                 const u64 s = keys[i] >> 32;
-                sorted = i == 0 || s >= prev_end;
+                disjoint = i == 0 || s >= prev_end;
                 prev_end = s + lens[static_cast<u32>(keys[i] & 0xFFFFFFFFu)];
             }
+            Array<u32>& seg = wseg_; // (start, block's place in the list) pairs
+            seg.clear();
+            if (disjoint) {
+                for (usize i = 0; i < keys.size(); ++i) {
+                    seg.push(static_cast<u32>(keys[i] >> 32));
+                    seg.push(static_cast<u32>(keys[i] & 0xFFFFFFFFu));
+                }
+            } else {
+                // Every block's end, sorted, beside the starts (keys); a sweep
+                // over the starts and ends, the blocks open at each point in a
+                // min-heap by their place in the list (closed ones dropped when
+                // they reach its top).
+                Array<u64>& ends = wends_;
+                Array<u64>& end_of = wendj_; // by place in the list
+                Array<u32>& heap = wheap_;
+                ends.clear();
+                heap.clear();
+                end_of.resize(keys.size());
+                for (usize i = 0; i < keys.size(); ++i) {
+                    const u32 q = static_cast<u32>(keys[i] & 0xFFFFFFFFu);
+                    end_of[q] = (keys[i] >> 32) + lens[q];
+                    if (lens[q])
+                        ends.push(end_of[q] << 32 | q);
+                }
+                sort_u64(ends.data(), ends.size());
+                usize is = 0, ie = 0;
+                u32 last = 0xFFFFFFFFu; // the last pair's block (adjacent stretches with one block merge)
+                while (ie < ends.size()) {
+                    // The next point: the lower of the next start and the next end.
+                    u64 x = ends[ie] >> 32;
+                    if (is < keys.size() && (keys[is] >> 32) < x)
+                        x = keys[is] >> 32;
+                    for (; is < keys.size() && (keys[is] >> 32) == x; ++is) {
+                        const u32 q = static_cast<u32>(keys[is] & 0xFFFFFFFFu);
+                        if (!lens[q])
+                            continue;
+                        heap.push(q); // (sift up: the smallest place on top)
+                        for (usize c = heap.size() - 1; c > 0 && heap[(c - 1) / 2] > heap[c]; c = (c - 1) / 2) {
+                            const u32 t = heap[c];
+                            heap[c] = heap[(c - 1) / 2];
+                            heap[(c - 1) / 2] = t;
+                        }
+                    }
+                    for (; ie < ends.size() && (ends[ie] >> 32) == x; ++ie) {
+                    }
+                    // Drop closed blocks from the top (ends at or before x).
+                    while (!heap.empty() && end_of[heap[0]] <= x) {
+                        heap[0] = heap[heap.size() - 1];
+                        heap.resize(heap.size() - 1);
+                        for (usize c = 0;;) { // (sift down)
+                            const usize l = 2 * c + 1, r = l + 1;
+                            usize m = c;
+                            if (l < heap.size() && heap[l] < heap[m])
+                                m = l;
+                            if (r < heap.size() && heap[r] < heap[m])
+                                m = r;
+                            if (m == c)
+                                break;
+                            const u32 t = heap[c];
+                            heap[c] = heap[m];
+                            heap[m] = t;
+                            c = m;
+                        }
+                    }
+                    const u32 q = heap.empty() ? 0u : heap[0]; // (a gap: block 0 holds none of it)
+                    if (q != last || seg.empty()) {
+                        seg.push(static_cast<u32>(x));
+                        seg.push(q);
+                        last = q;
+                    }
+                }
+            }
+            sorted = true;
+            npairs = static_cast<u32>(seg.size() / 2);
+#ifndef NDEBUG
+            if (!disjoint) { // the stretches give the scan's answer at every address of the span
+                u32 lo_a = 0xFFFFFFFFu, hi_a = 0;
+                for (usize i = 0; i < keys.size(); ++i) {
+                    const u32 q = static_cast<u32>(keys[i] & 0xFFFFFFFFu);
+                    lo_a = min_of(lo_a, static_cast<u32>(keys[i] >> 32));
+                    hi_a = max_of(hi_a, static_cast<u32>(wendj_[q]));
+                }
+                for (u32 a = lo_a > 0 ? lo_a - 1 : 0; a <= hi_a; ++a) {
+                    u32 scan = 0xFFFFFFFFu, q = 0;
+                    for (u32 kb = bodies_[b].blocks; kb != kNone && scan == 0xFFFFFFFFu; kb = blocks_[kb].next, ++q)
+                        if (a - blocks_[kb].start < blocks_[kb].len)
+                            scan = q;
+                    usize p = 0; // the last stretch starting at or before a
+                    for (usize i = 1; i < npairs; ++i)
+                        if (seg[2 * i] <= a)
+                            p = i;
+                    const u32 k = seg[2 * p + 1];
+                    const u32 start_k = static_cast<u32>(wendj_[k] - lens[k]);
+                    const u32 hit = a - start_k < lens[k] ? k : 0xFFFFFFFFu;
+                    NOVA_ASSERT(hit == scan);
+                }
+            }
+#endif
         }
         const u32 rec = static_cast<u32>(wimg_.size());
         const u32 nw = static_cast<u32>(run.size());
@@ -677,7 +782,7 @@ bool Soup::warp_pack(u32 round) {
         const u32 page = code + codons;
         const u32 stamp = page + pages * WP_SIZE;
         const u32 sort_at = stamp + (stamps ? codons : 0);
-        wimg_.resize_unfilled(static_cast<usize>(sort_at) + (sorted ? 2 * nblk : 0));
+        wimg_.resize_unfilled(static_cast<usize>(sort_at) + (sorted ? 1 + 2 * npairs : 0));
         u32* I = wimg_.data();
         // Only the header and the warp entries start as zeros: everything
         // after them is written in full below (Phase 10 profiling: zeroing
@@ -706,11 +811,12 @@ bool Soup::warp_pack(u32 round) {
             for (u32 t = 0; t < 6; ++t)
                 I[rec + WB_TLOAD + t] = tier_ps[t];
         }
-        if (sorted) {
+        if (sorted) { // the pairs' count, then (start, block table entry) pairs
             I[rec + WB_SORT] = sort_at;
-            for (u32 i = 0; i < nblk; ++i) {
-                I[sort_at + 2 * i] = static_cast<u32>(wkeys_[i] >> 32);
-                I[sort_at + 2 * i + 1] = blk + static_cast<u32>(wkeys_[i] & 0xFFFFFFFFu) * WK_SIZE;
+            I[sort_at] = npairs;
+            for (u32 i = 0; i < npairs; ++i) {
+                I[sort_at + 1 + 2 * i] = wseg_[2 * i];
+                I[sort_at + 2 + 2 * i] = blk + wseg_[2 * i + 1] * WK_SIZE;
             }
         }
         u32 ok_bits = 0;
