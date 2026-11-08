@@ -51,6 +51,13 @@ inline constexpr const char* kLegacyLifeDefaults = //
     "mem.wipe_warning = 0\n"                         // wipe warnings (W)
     "life.sleep = false\n";                          // voluntary sleep (V)
 
+// The third (2026-11-08, after long3 began recording v6 snapshots and v4
+// logs: so its own bump, as above): cheaper bites of fresh corpses.
+inline constexpr u32 kSnapshotCorpseBefore = 7;
+inline constexpr u32 kReplayCorpseBefore = 5;
+inline constexpr const char* kLegacyCorpseDefaults = //
+    "engulf.corpse_cost = 1\n";                      // cheaper corpses
+
 // Sets each line of kLegacyFormatDefaults that cfg doesn't name, where the
 // world will read it, so no unused entry is added: every line is a soup
 // world's setting, and one whose registry entry needs a choice

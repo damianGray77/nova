@@ -252,6 +252,7 @@ struct SoupParams {
     double plain;       // a plain instruction (an add): 1 (classic) or its picoseconds
     double tick_units;    // what 1,000 millicores give a tick: instr_per_core plain instructions
     u32 engulf_cpt;       // engulf.codons_per_tick: the prey's codons an ENGULF takes a tick (timed)
+    double corpse_cost;   // engulf.corpse_cost: a bite's charge per fresh corpse codon, x a raw codon's (2026-11-08)
     u32 inject_cpt;       // inject.codons_per_tick: codons an INJECT writes a tick (timed)
     // threads and cores (Phase 9c, design.md 6.15); off = exactly as before
     bool threads;         // cpu.threads: a thread runs on one core at a time; programs start threads
@@ -666,6 +667,7 @@ struct SoupTally {
     u64 sleep_expired;     // ... that died asleep, their reserves spent
     u64 ray_inserts;       // codons a cosmic ray copied in place, growing a block (R7)
     u64 ray_deletes;       // ... it deleted, shrinking a block
+    u64 corpse_codons;     // codons of fresh corpses (stamped, not INERT) bitten, at engulf.corpse_cost
 };
 
 // docs/lifehistory-plan.md W2-W5: a volatility wipe drawn and not yet landed

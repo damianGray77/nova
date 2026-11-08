@@ -163,7 +163,8 @@ const char* const kLegacyDefaults ="accel.mode = instant\n"
                                     "hazard.rays = false\n"
                                     "life.gestation = 0\n"
                                     "mem.wipe_warning = 0\n"
-                                    "life.sleep = false\n";
+                                    "life.sleep = false\n"
+                                    "engulf.corpse_cost = 1\n"; // cheaper corpses (2026-11-08): suite lifehistory
 
 int main(int argc, char** argv) {
     nova::Config::ParseError pe;

@@ -51,6 +51,8 @@ void apply_format_defaults(Config& cfg, bool snapshot, u32 version) {
         apply_text(cfg, kLegacyFormatDefaults);
     if (version < (snapshot ? kSnapshotLifeBefore : kReplayLifeBefore))
         apply_text(cfg, kLegacyLifeDefaults);
+    if (version < (snapshot ? kSnapshotCorpseBefore : kReplayCorpseBefore))
+        apply_text(cfg, kLegacyCorpseDefaults);
 }
 
 } // namespace nova

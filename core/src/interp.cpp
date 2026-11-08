@@ -1264,6 +1264,29 @@ struct Exec {
         return k2;
     }
 
+    // Cheaper corpses (Damian, 2026-11-08): a dead program's fresh remnant
+    // in the waste run through a, up to want codons -- codons stamped by the
+    // salvage rule (a dead program's code; vents, wipes and strikes leave none)
+    // that haven't decayed to INERT. A bite charges each of them
+    // engulf.corpse_cost of a raw codon: nothing is made, the same codons
+    // move, but a meal of corpse costs less time than one of vent material.
+    // (Counted before the claim, which clears the stamps. 0 without salvage.)
+    u32 corpse_codons(u32 a, u32 want) const {
+        if (s.stamp_.empty() || a == kNone)
+            return 0;
+        u32 lo = 0;
+        const u32 len = waste_run(a, want, &lo);
+        u32 k = 0;
+        for (u32 x = lo; x < lo + len; ++x)
+            k += s.stamp_[x] != 0 && p.table.op[s.mem_[x]] != Op::inert ? 1 : 0;
+        return k;
+    }
+    // A bite's charged codons: raw ones whole, corpse ones at the discount.
+    double bite_weight(u32 got, u32 corpse) const {
+        const u32 k = corpse < got ? corpse : got;
+        return static_cast<double>(got - k) + static_cast<double>(k) * p.corpse_cost;
+    }
+
     // A bite of raw material: the waste run through a, up to want codons,
     // claimed as the eater's latest block, contents and all. Returns codons.
     u32 bite_waste(u32 a, u32 want) {
@@ -1406,10 +1429,15 @@ struct Exec {
                 return cost;
             if (t != kNone && len > 0 && !(s.rng_.below(len) < match))
                 return cost; // the grip slipped: a failed contest still costs the attempt
+            // (Cheaper corpses: a dead program's remnant, or a dormant program whole.)
+            const bool dorm = t != kNone && s.dormant(t);
+            const u32 corpse = t == kNone ? corpse_codons(waste, want) : 0;
             const u32 got = bite_land(t, waste, want, ip);
             if (got == 0)
                 return cost;
-            cost += static_cast<u32>(p.contact_per_codon * got);
+            const u32 cheap = dorm ? got : (corpse < got ? corpse : got);
+            s.tally_.corpse_codons += cheap;
+            cost += static_cast<u32>(p.contact_per_codon * bite_weight(got, cheap));
             charge2(costs().move, moved_fast, got - moved_fast); // (W3: at their tiers)
             *ok = true;
             return cost;
@@ -1430,11 +1458,14 @@ struct Exec {
             }
         }
         u32 moved = engulf ? s.bodies_[target].mem : 0;
+        const bool dorm = engulf && s.dormant(target); // (cheaper corpses: a dormant program too)
         if (engulf)
             engulf_body(target);
         else
             moved = inject_into(target);
-        cost += static_cast<u32>(p.contact_per_codon * moved);
+        if (dorm)
+            s.tally_.corpse_codons += moved;
+        cost += static_cast<u32>(p.contact_per_codon * bite_weight(moved, dorm ? moved : 0));
         charge2(costs().move, moved_fast, moved - moved_fast); // (W3: at their tiers)
         *ok = true;
         return cost;
@@ -1477,7 +1508,12 @@ struct Exec {
             const u32 size = (t == kNone && waste == kNone) ? 0 : bite_extent(t, waste, want);
             if (size == 0)
                 return 1; // nothing in reach: fails at once
-            const u64 ticks = max_of<u64>(1, (static_cast<u64>(size) + p.engulf_cpt - 1) / p.engulf_cpt);
+            // Its time: its codons at engulf.codons_per_tick, a fresh corpse's
+            // or a dormant program's at engulf.corpse_cost of that.
+            const u32 cheap = t == kNone ? corpse_codons(waste, want) : (s.dormant(t) ? size : 0);
+            const double weight = bite_weight(size, cheap);
+            const double whole = ceil(weight / static_cast<double>(p.engulf_cpt));
+            const u64 ticks = max_of<u64>(1, static_cast<u64>(whole));
             Action a = {};
             a.end = s.tick_ + ticks;
             a.actor_serial = s.bodies_[c.body].serial;
@@ -1508,7 +1544,10 @@ struct Exec {
             return 1; // the payload doesn't fit: fails at once
         const u64 size = engulf ? s.bodies_[target].mem : (c.cx < s.blocks_[k].len ? c.cx : s.blocks_[k].len);
         const u64 pace = engulf ? p.engulf_cpt : p.inject_cpt;
-        const u64 ticks = max_of<u64>(1, (size + pace - 1) / pace);
+        u64 ticks = max_of<u64>(1, (size + pace - 1) / pace);
+        if (engulf && s.dormant(target)) // (cheaper corpses: a dormant program, swallowed whole)
+            ticks = max_of<u64>(1, static_cast<u64>(ceil(bite_weight(static_cast<u32>(size), static_cast<u32>(size)) /
+                                                         static_cast<double>(pace))));
         Action a = {};
         a.end = s.tick_ + ticks;
         a.actor_serial = s.bodies_[c.body].serial;
@@ -1535,9 +1574,11 @@ struct Exec {
         *ok = false;
         if (engulf && p.bites && a.target == kNone) { // Phase 10: a bite of raw material
             const u32 d = a.at > ip ? a.at - ip : ip - a.at;
+            const u32 corpse = d <= p.contact_range ? corpse_codons(a.at, a.bite) : 0;
             const u32 got = d <= p.contact_range ? bite_land(kNone, a.at, a.bite, ip) : 0;
             if (got == 0)
                 return 1; // claimed by another meanwhile (run_cpu counts it failed)
+            s.tally_.corpse_codons += corpse < got ? corpse : got;
             charge2(costs().move, moved_fast, got - moved_fast); // (W3: at their tiers)
             *ok = true;
             return 1;
@@ -1576,12 +1617,15 @@ struct Exec {
             return 1;
         }
         u32 moved = engulf ? T.mem : 0;
+        const bool dorm = engulf && s.dormant(t); // (cheaper corpses: counted as they land)
         if (engulf && p.bites) // Phase 10: whole if it's no bigger than the bite, else a piece
             moved = bite_land(t, kNone, a.bite, ip);
         else if (engulf)
             engulf_body(t);
         else
             moved = inject_into(t);
+        if (dorm)
+            s.tally_.corpse_codons += moved;
         charge2(costs().move, moved_fast, moved - moved_fast); // (W3: at their tiers)
         *ok = true;
         return 1;

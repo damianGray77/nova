@@ -4,7 +4,7 @@
 
 namespace nova {
 
-static_assert(kReplayLegacyBefore <= kReplayLifeBefore && kReplayLifeBefore <= kReplayVersion,
+static_assert(kReplayLegacyBefore <= kReplayLifeBefore && kReplayLifeBefore <= kReplayCorpseBefore && kReplayCorpseBefore <= kReplayVersion,
               "replay logs before kReplayLegacyBefore (kReplayLifeBefore) take the legacy defaults (legacy.h)");
 
 namespace {

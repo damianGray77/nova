@@ -2,7 +2,7 @@
 
 // Versioned binary snapshots (design.md 7.1 H).
 //
-// Format v6 (v5 back to v1 are read too, see kSnapshotVersion), all integers little-endian:
+// Format v7 (v6 back to v1 are read too, see kSnapshotVersion), all integers little-endian:
 //   "NOVASNAP"   8-byte magic
 //   u32          format version (kSnapshotVersion)
 //   u32          flags (0)
@@ -49,7 +49,9 @@ namespace nova {
 // v6 (2026-11-08) changes no section: rays came on by default, so a v5
 // snapshot or older resumes with hazard.rays = false unless its config names
 // it (legacy.h).
-inline constexpr u32 kSnapshotVersion = 6;
+// v7 (2026-11-08) changes no section either: cheaper corpses came on by default,
+// so a v6 snapshot or older resumes with engulf.corpse_cost = 1 (legacy.h).
+inline constexpr u32 kSnapshotVersion = 7;
 inline constexpr u32 kSnapshotOldest = 1;
 
 void snapshot_write(const World& world, const Config& cfg, ByteWriter& out);

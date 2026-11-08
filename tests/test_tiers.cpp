@@ -780,7 +780,7 @@ void test_old_snapshot() {
     with.append("world.archive = 0\nspark.activity = 0\ndisaster.enabled = false\n" // (nor the disasters,
                 "mem.fast_share = 0\n"                                             // nor memory tiers: W3,
                 "hazard.rays = false\nlife.gestation = 0\nmem.wipe_warning = 0\n"  // nor life history,
-                "life.sleep = false\n");                                           // 2026-11-08)
+                "life.sleep = false\nengulf.corpse_cost = 1\n");                                           // 2026-11-08)
     Run a;
     CHECK(make_run(a, with.c_str(), 2));
     a.run_until(30);

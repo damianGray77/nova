@@ -26,7 +26,7 @@ void Run::start_novelty() {
     }
 }
 
-static_assert(kSnapshotLegacyBefore <= kSnapshotLifeBefore && kSnapshotLifeBefore <= kSnapshotVersion,
+static_assert(kSnapshotLegacyBefore <= kSnapshotLifeBefore && kSnapshotLifeBefore <= kSnapshotCorpseBefore && kSnapshotCorpseBefore <= kSnapshotVersion,
               "snapshots before kSnapshotLegacyBefore (kSnapshotLifeBefore) take the legacy defaults (legacy.h)");
 
 void genome_names(const CodonTable& t, const u8* codons, u32 len, TextBuf& out) {

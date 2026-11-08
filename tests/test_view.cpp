@@ -216,7 +216,7 @@ void test_stats_header() {
                          // behaviour profiles (docs/analysis-plan.md A3), the last integer columns
                          "prof_samples,role_predator,role_parasite,role_repairer,role_signaller,role_wanderer,"
                          "role_copier,role_idle,work_len,action_kinds_x100,novelty,novel_share,novel_success,"
-                         "wipe_warnings,wipe_false_alarms,wipe_flickers,sleeps,sleep_woke,sleep_expired,ray_inserts,ray_deletes,compress,ambient\n";
+                         "wipe_warnings,wipe_false_alarms,wipe_flickers,sleeps,sleep_woke,sleep_expired,ray_inserts,ray_deletes,corpse_codons,compress,ambient\n";
     CHECK(bytes.size() > strlen(header) && memcmp(bytes.data(), header, strlen(header)) == 0);
     remove(path);
 }

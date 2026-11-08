@@ -9,7 +9,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 - **Families:** a key with a `<placeholder>` stands for one setting per member listed.
 - **Needs:** the switch the setting depends on; it does nothing while that is off.
 
-379 settings, 83 of them from 14 families; 11 hidden (tests and demos).
+380 settings, 83 of them from 14 families; 11 hidden (tests and demos).
 
 ## Contents
 
@@ -314,6 +314,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `contact.inject_key` | switch | true | true or false | **INJECT needs a key**. INJECT needs a key: a template matching a host surface. |
 | `contact.inject_room` | number | 1 | 0 to 1000000 | **INJECT room**. INJECT fails unless the host block is at least this x the payload (0 = off). |
 | `engulf.bite` | switch | true | true or false | **ENGULF bites**. ENGULF takes a bite of CX codons, of raw material or of a body; else it swallows whole prey (Phase 9). |
+| `engulf.corpse_cost` | number | 0.9 | 0 to 1 | **Corpse bite cost**. An ENGULF charges each codon of a dead program's fresh remnant (stamped by the salvage rule, not yet decayed to INERT), and each codon of a dormant program, this share of a raw codon's cost, in instructions per codon and, with a timed table, in the bite's time: scavenging pays a little better than vent material, and a sleeper is a little cheaper to eat than a waking program. Nothing is made (1 = the same, as before 2026-11-08: older files keep that, legacy.h). |
 | `salvage.ratio` | number | 4 | 0 to 1000000 | **Salvage ratio**. A program takes another's remnants intact only up to this x its own genome length; bigger code comes through in fragments (0 = off). |
 
 ## Signals

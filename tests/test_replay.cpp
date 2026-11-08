@@ -44,7 +44,7 @@ void test_log_and_verify() {
     ReplayLog log;
     TextBuf err;
     CHECK(log.load_file(kLogPath, &err));
-    CHECK(log.version() == kReplayVersion && kReplayVersion == 4); // new logs are v4 (legacy.h)
+    CHECK(log.version() == kReplayVersion && kReplayVersion == 5); // new logs are v5 (legacy.h)
     CHECK(log.knob_count() == 2);
     CHECK(log.knob_tick(0) == 100 && log.knob_key(0).eq("demo.send_rate") &&
           log.knob_value(0).eq("0.9"));
@@ -113,8 +113,8 @@ void test_parse_errors() {
     err.clear();
     CHECK(!log.parse("not a log\n", &err));
     err.clear();
-    CHECK(!log.parse("nova-replay 5\n", &err));
-    CHECK(strstr(err.c_str(), "unsupported replay version 5") != nullptr);
+    CHECK(!log.parse("nova-replay 6\n", &err));
+    CHECK(strstr(err.c_str(), "unsupported replay version 6") != nullptr);
     err.clear();
     CHECK(log.parse("nova-replay 3\nevent 5 replicator node=0\n", &err) && log.version() == 3);
     err.clear();
@@ -201,7 +201,8 @@ const char* const kDiskWorld = "seed = 11\nworld.model = soup\nworld.graph = pro
 const char* const kNewFeaturesOff = "spark.activity = 0\nsubstrate.enabled = false\nworld.archive = 0\n"
                                     "disaster.enabled = false\nmem.fast_share = 0\n" // (memory tiers: W3)
                                     // (life history: on by default since 2026-11-08)
-                                    "hazard.rays = false\nlife.gestation = 0\nmem.wipe_warning = 0\nlife.sleep = false\n";
+                                    "hazard.rays = false\nlife.gestation = 0\nmem.wipe_warning = 0\nlife.sleep = false\n"
+                                    "engulf.corpse_cost = 1\n"; // (cheaper corpses, the same day)
 
 // The logged config a parsed log gives to replay, as a Config.
 bool replayed_config(Str text, Config* out) {
@@ -229,18 +230,25 @@ void test_legacy_config() {
     for (usize i = 0; i < rays.count(); ++i)
         CHECK(key_find(rays.key(i)) != nullptr);
     const usize R = rays.count();
+    // The third (cheaper corpses, the same day): logs before v5.
+    Config corpse;
+    CHECK(corpse.parse(kLegacyCorpseDefaults, &pe) && corpse.count() == 1 && key_find(corpse.key(0)) != nullptr);
+    const usize C = corpse.count();
     Config c;
     CHECK(replayed_config("nova-replay 2\nconfig world.model = soup\nconfig world.graph = procedural\n", &c));
-    CHECK(c.count() == 2 + L + R && c.get_str("spark.activity", "").eq("0") &&
+    CHECK(c.count() == 2 + L + R + C && c.get_str("spark.activity", "").eq("0") &&
           c.get_str("substrate.enabled", "").eq("false") && c.get_str("world.archive", "").eq("0") &&
-          c.get_str("disaster.enabled", "").eq("false") && c.get_str("hazard.rays", "").eq("false"));
+          c.get_str("disaster.enabled", "").eq("false") && c.get_str("hazard.rays", "").eq("false") &&
+          c.get_str("engulf.corpse_cost", "").eq("1"));
     CHECK(replayed_config("nova-replay 1\nconfig world.model = soup\nconfig world.graph = landscape\n", &c));
-    CHECK(c.count() == 2 + L + R); // v1 too
+    CHECK(c.count() == 2 + L + R + C); // v1 too
     CHECK(replayed_config("nova-replay 3\nconfig world.model = soup\nconfig world.graph = procedural\n", &c));
-    CHECK(c.count() == 2 + R && !c.has("spark.activity") && !c.has("world.archive") && !c.has("disaster.enabled") &&
-          c.get_str("hazard.rays", "").eq("false")); // v3: only the second
+    CHECK(c.count() == 2 + R + C && !c.has("spark.activity") && !c.has("world.archive") &&
+          !c.has("disaster.enabled") && c.get_str("hazard.rays", "").eq("false")); // v3: the second and third
     CHECK(replayed_config("nova-replay 4\nconfig world.model = soup\nconfig world.graph = procedural\n", &c));
-    CHECK(c.count() == 2 && !c.has("hazard.rays")); // v4: neither
+    CHECK(c.count() == 2 + C && !c.has("hazard.rays") && c.get_str("engulf.corpse_cost", "").eq("1")); // v4: the third
+    CHECK(replayed_config("nova-replay 5\nconfig world.model = soup\nconfig world.graph = procedural\n", &c));
+    CHECK(c.count() == 2 && !c.has("engulf.corpse_cost")); // v5: none
     CHECK(replayed_config("nova-replay 3\nconfig world.model = soup\nconfig hazard.rays = true\n", &c));
     CHECK(c.get_str("hazard.rays", "").eq("true")); // a log that names it keeps it
     // A setting the log names keeps its value.
@@ -248,7 +256,7 @@ void test_legacy_config() {
     CHECK(c.get_str("world.archive", "").eq("256") && c.get_str("spark.activity", "").eq("0"));
     // A ring reads no substrate settings, and a demo world none of these.
     CHECK(replayed_config("nova-replay 2\nconfig world.model = soup\n", &c));
-    CHECK(c.count() == L + R && !c.has("substrate.enabled"));
+    CHECK(c.count() == L + R + C && !c.has("substrate.enabled"));
     CHECK(replayed_config("nova-replay 2\nconfig seed = 1\n", &c));
     CHECK(c.count() == 1);
 }

@@ -261,6 +261,7 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     p->plain = p->cost.timed ? static_cast<double>(p->cost.alu) : 1.0;
     p->tick_units = static_cast<double>(p->instr_per_core) * p->plain;
     p->engulf_cpt = key_u32(cfg, "engulf.codons_per_tick"); // Phase 10: halved, so prey can react
+    p->corpse_cost = key_f64(cfg, "engulf.corpse_cost");    // cheaper bites of fresh corpses (2026-11-08)
     p->inject_cpt = key_u32(cfg, "inject.codons_per_tick");
 
     SelectorMap& m = p->sel;

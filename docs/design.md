@@ -1804,6 +1804,17 @@ a gated lineage's first voluntary sleep; stats add `sleeps`, `sleep_woke`
 and `sleep_expired`, after `wipe_warnings`, `wipe_false_alarms` and
 `wipe_flickers` (and then the indels' two).
 
+**Cheaper corpses** (`engulf.corpse_cost`, Damian, the same day: "a pretty
+subtle difference", and "it should apply to dormant programs as well, as a
+counter to just going dormant"). A multiplier on what a meal gives would
+make codons a node doesn't have, so the discount is on its cost instead: an
+ENGULF charges each codon of a dead program's fresh remnant (stamped by the
+salvage rule, not yet INERT; vents, wipes and strikes leave none) and each
+codon of a dormant program 0.9 of a raw codon's charge, in instructions per
+codon and, on a timed table, in the bite's time. The same codons move.
+Stat `corpse_codons`. Snapshot v7 and replay v5, since long3 had begun
+writing v6 and v4 files: older ones keep 1 (legacy.h's third text).
+
 ## 7. Technical direction [decided via 7.1]
 
 - C++ (or Rust) core; Python only for analysis. *Superseded by 7.1 A and B: C++20, no STL, no third-party, no Python.*

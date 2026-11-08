@@ -692,7 +692,8 @@ void test_old_files() {
                         "accel.npu = cpu\nwarp.device = cpu\nspark.activity = 0\nsubstrate.enabled = false\n"
                         "world.archive = 0\ndisaster.enabled = false\n"
                         // (life history: on by default since 2026-11-08)
-                        "hazard.rays = false\nlife.gestation = 0\nmem.wipe_warning = 0\nlife.sleep = false\n";
+                        "hazard.rays = false\nlife.gestation = 0\nmem.wipe_warning = 0\nlife.sleep = false\n"
+                        "engulf.corpse_cost = 1\n";
     {
         const char* path = "nova_test_memtiers.replay";
         TextBuf cfg;

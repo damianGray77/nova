@@ -133,6 +133,8 @@
 //                                     CX > 0); that woke; that died asleep
 //   ray_inserts, ray_deletes          cosmic rays' indels in living code (R7):
 //                                     codons copied in place; deleted
+//   corpse_codons                     codons of fresh corpses bitten, at the
+//                                     discount (engulf.corpse_cost)
 // and last, as always, the two floating-point columns:
 //   compress                          soup compressibility (compress.h), mean
 //                                     over nodes: ~1 random, lower = repetitive
@@ -158,8 +160,8 @@ inline constexpr u32 kStatsProfileFirst = kStatsTierFirst + kStatsTierColumns;
 inline constexpr u32 kStatsNoveltyColumns = 3;
 inline constexpr double kNoveltyFixed = 1e6;
 inline constexpr u32 kStatsNoveltyFirst = kStatsProfileFirst + kStatsProfileColumns;
-// Life history (docs/lifehistory-plan.md W, V7, R7): eight sums.
-inline constexpr u32 kStatsLifeColumns = 8;
+// Life history (docs/lifehistory-plan.md W, V7, R7) and cheaper corpses: nine sums.
+inline constexpr u32 kStatsLifeColumns = 9;
 inline constexpr u32 kStatsLifeFirst = kStatsNoveltyFirst + kStatsNoveltyColumns;
 inline constexpr u32 kStatsIntColumns = kStatsLifeFirst + kStatsLifeColumns;
 inline constexpr u32 kStatsColumns = kStatsIntColumns + 2; // compress, ambient

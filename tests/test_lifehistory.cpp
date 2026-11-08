@@ -485,6 +485,117 @@ void test_indel_rays() {
            static_cast<unsigned long long>(ins), static_cast<unsigned long long>(del), ratio);
 }
 
+// --- Cheaper corpses (2026-11-08) ---------------------------------------------
+
+// A timed world where a blind bite of 16 codons of waste beside the eater
+// lands: of a dead program's fresh remnant (`corpse`, stamped when it died)
+// or of raw waste. Returns the bite's ticks; *eaten its corpse codons.
+u64 corpse_bite(bool corpse, double cost, u64* eaten) {
+    TextBuf cfg;
+    cfg.append("heat.enabled = false\nhazard.copy = 0\nhazard.flaw = 0\nhazard.rot = 0\nmem.upkeep = 0\n"
+               "cost.table = home_v1\nengulf.bite = true\nengulf.codons_per_tick = 8\nsalvage.ratio = 4\n"
+               "world.millicores = 4000\n");
+    char line[64];
+    snprintf(line, sizeof line, "engulf.corpse_cost = %g\n", cost);
+    cfg.append(line);
+    LFix f;
+    *eaten = 0;
+    if (!f.init_raw(cfg.c_str()))
+        return 0;
+    TextBuf code;
+    for (int i = 0; i < 16; ++i)
+        code.append(i ? " INC" : "INC");
+    if (corpse) { // a 16-codon program at [84, 100) dies: its code is left, stamped
+        const u32 v = plant(f.s, 84, code.c_str(), 100);
+        f.s.cpu_mut(f.s.body(v).cpus).halted = 1;
+        f.s.death_sweep();
+        if (f.s.body(v).alive || f.s.stamp(90) == 0)
+            return 0;
+    }
+    TextBuf eat;
+    eat.append("ENGULF");
+    for (int i = 0; i < 15; ++i)
+        eat.append(" INC");
+    const u32 e = plant(f.s, 100, eat.c_str(), 500);
+    f.s.cpu_mut(f.s.body(e).cpus).cx = 16;
+    f.s.run_cpu(f.s.body(e).cpus, 1000000);
+    if (f.s.actions().size() != 1 || f.s.actions()[0].target != kNone)
+        return 0;
+    const u64 ticks = f.s.actions()[0].end;
+    f.s.begin_tick(ticks);
+    f.s.run_cpu(f.s.body(e).cpus, 0);
+    *eaten = f.s.tally().corpse_codons;
+    return f.s.tally().bites_waste == 1 && f.s.owner_body(84) == e && soup_ok(f.s) ? ticks : 0;
+}
+
+// The same world, a blind bite (no template: a dormant program has no
+// surface to aim at) from an eater's last codon at a 16-codon program right
+// after it, nearer than any waste: `dormant` (resting on a memory reserve)
+// or awake. Returns the bite's ticks; *eaten its discounted codons.
+u64 dormant_bite(bool dormant, double cost, u64* eaten) {
+    TextBuf cfg;
+    cfg.append("heat.enabled = false\nhazard.copy = 0\nhazard.flaw = 0\nhazard.rot = 0\nmem.upkeep = 0\n"
+               "cost.table = home_v1\nengulf.bite = true\nengulf.codons_per_tick = 8\nsalvage.ratio = 4\n"
+               "world.millicores = 4000\nlife.dormancy = true\n");
+    char line[64];
+    snprintf(line, sizeof line, "engulf.corpse_cost = %g\n", cost);
+    cfg.append(line);
+    LFix f;
+    *eaten = 0;
+    if (!f.init_raw(cfg.c_str()))
+        return 0;
+    TextBuf eat;
+    for (int i = 0; i < 15; ++i)
+        eat.append(i ? " INC" : "INC");
+    eat.append(" ENGULF"); // at 115
+    const u32 e = plant(f.s, 100, eat.c_str(), 500);
+    TextBuf prey_code;
+    prey_code.append("INC ALLOC YIELD"); // (no surface to shield it awake; the YIELD ends its turn after the ALLOC)
+    for (int i = 0; i < 13; ++i)
+        prey_code.append(" INC");
+    const u32 v = plant(f.s, 116, prey_code.c_str(), 100);
+    Cpu& pc = f.s.cpu_mut(f.s.body(v).cpus);
+    pc.ip = 117; // its ALLOC: a reserve of 8
+    pc.bx = 0;
+    pc.cx = 8;
+    f.s.run_cpu(f.s.body(v).cpus, 1000000);
+    if (f.s.body(v).mem != 24 || (dormant && !(f.s.force_dormant(v) && f.s.dormant(v))))
+        return 0;
+    Cpu& ec = f.s.cpu_mut(f.s.body(e).cpus);
+    ec.ip = 115;
+    ec.cx = 16;
+    f.s.run_cpu(f.s.body(e).cpus, 1000000);
+    if (f.s.actions().size() != 1 || f.s.actions()[0].target != v)
+        return 0;
+    const u64 ticks = f.s.actions()[0].end;
+    f.s.begin_tick(ticks);
+    f.s.run_cpu(f.s.body(e).cpus, 0);
+    *eaten = f.s.tally().corpse_codons;
+    const bool landed = f.s.tally().bites_body + f.s.tally().engulfs == 1;
+    f.s.death_sweep(); // (an eaten sleeper is cleared there, as in suite ecology's)
+    return landed && soup_ok(f.s) ? ticks : 0;
+}
+
+// Cheaper corpses: a bite of a fresh corpse, or of a dormant program, takes
+// engulf.corpse_cost of the time a bite of raw waste or of a waking program
+// does (16 codons at 8 a tick: 1 tick at 0.5, 2 otherwise); at 1 they cost
+// the same, as before.
+void test_corpse_bites() {
+    u64 eaten = 0;
+    CHECK_EQ_U64(corpse_bite(false, 0.5, &eaten), 2);
+    CHECK_EQ_U64(eaten, 0);
+    CHECK_EQ_U64(corpse_bite(true, 0.5, &eaten), 1);
+    CHECK_EQ_U64(eaten, 16);
+    CHECK_EQ_U64(corpse_bite(true, 1.0, &eaten), 2);
+    CHECK_EQ_U64(eaten, 16);
+    CHECK_EQ_U64(dormant_bite(true, 0.5, &eaten), 1);
+    CHECK_EQ_U64(eaten, 16);
+    CHECK_EQ_U64(dormant_bite(false, 0.5, &eaten), 2); // awake: no discount (it bites 16 of its 24)
+    CHECK_EQ_U64(eaten, 0);
+    printf("  corpses: a bite of 16 codons of a fresh corpse or a dormant program takes 1 tick, of raw waste or a "
+           "waking program 2\n");
+}
+
 // --- Wipe warnings (W) --------------------------------------------------------
 
 const char* const kWipes = "hazard.rays = false\nmem.wipe_pages = 1\n";
@@ -906,6 +1017,7 @@ void suite_lifehistory() {
     test_indel_mechanics();
     test_indel_inherits();
     test_indel_rays();
+    test_corpse_bites();
     test_wipe_lands_late();
     test_wipe_symptoms();
     test_wipe_false_alarms();

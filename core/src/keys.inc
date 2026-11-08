@@ -551,6 +551,12 @@ NOVA_NUMBER("contact.inject_room", 1.0, 0, 1000000, 0, "Contact and eating", "IN
             "INJECT fails unless the host block is at least this x the payload (0 = off).")
 NOVA_FLAG("engulf.bite", true, 0, "Contact and eating", "ENGULF bites", "",
           "ENGULF takes a bite of CX codons, of raw material or of a body; else it swallows whole prey (Phase 9).")
+NOVA_NUMBER("engulf.corpse_cost", 0.9, 0, 1, 0, "Contact and eating", "Corpse bite cost", "",
+            "An ENGULF charges each codon of a dead program's fresh remnant (stamped by the salvage rule, not yet "
+            "decayed to INERT), and each codon of a dormant program, this share of a raw codon's cost, in "
+            "instructions per codon and, with a timed table, in the bite's time: scavenging pays a little better "
+            "than vent material, and a sleeper is a little cheaper to eat than a waking program. Nothing is made "
+            "(1 = the same, as before 2026-11-08: older files keep that, legacy.h).")
 NOVA_NUMBER("salvage.ratio", 4.0, 0, 1000000, 0, "Contact and eating", "Salvage ratio", "",
             "A program takes another's remnants intact only up to this x its own genome length; bigger code comes "
             "through in fragments (0 = off).")
