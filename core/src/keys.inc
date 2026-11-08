@@ -517,9 +517,9 @@ NOVA_NUMBER("mem.volatility", 0.00001, 0, 1, kKeyLog, "Hazards", "Volatility", "
 NOVA_WHOLE("mem.wipe_pages", 4, 1, 1u << 18, 0, "Hazards", "Wipe size", "mem.volatility",
            "A wipe covers 1 to this many pages.")
 // Wipe warnings (docs/lifehistory-plan.md W)
-NOVA_WHOLE("mem.wipe_warning", 0, 0, 1000000000, 0, "Hazards", "Wipe warning", "mem.volatility",
+NOVA_WHOLE("mem.wipe_warning", 200, 0, 1000000000, 0, "Hazards", "Wipe warning", "mem.volatility",
            "A wipe lands this many ticks after it's drawn, its pages heating toward hot and flickering more and "
-           "more until then (0 = at once, with no warning, as before).")
+           "more until then (0 = at once, with no warning, as before 2026-11-08: older files keep that, legacy.h).")
 NOVA_NUMBER("mem.wipe_false_alarms", 0.25, 0, 1, 0, "Hazards", "Wipe false alarms", "mem.wipe_warning",
             "The share of warnings that fade with no wipe, as disasters' false alarms do.")
 NOVA_NUMBER("mem.wipe_flicker", 0.001, 0, 1, kKeyLog, "Hazards", "Wipe flicker", "mem.wipe_warning",
@@ -579,9 +579,10 @@ NOVA_FLAG("life.threads_end", true, 0, "Life and death", "Halted threads end", "
           "A thread that halts leaves its body; a body with no thread left dies.")
 NOVA_WHOLE("life.frozen_ticks", 200, 0, 1000000000, 0, "Life and death", "Frozen ticks", "",
            "A body none of whose threads ran an instruction for this long dies, or goes dormant (0 = never).")
-NOVA_WHOLE("life.gestation", 0, 0, 1000000000, 0, "Life and death", "Gestation", "",
+NOVA_WHOLE("life.gestation", 25, 0, 1000000000, 0, "Life and death", "Gestation", "",
            "A daughter can be divided off only this many ticks after the ALLOC that made her block; an earlier "
-           "DIVIDE waits, idle (0 = at once, as before; docs/lifehistory-plan.md G).")
+           "DIVIDE waits, idle (0 = at once, as before 2026-11-08: older files keep that, legacy.h; "
+           "docs/lifehistory-plan.md G).")
 NOVA_NUMBER("life.gestation_per_codon", 0, 0, 1000000, 0, "Life and death", "Gestation per codon", "life.gestation",
             "... plus this many ticks per codon of her block.")
 
@@ -598,10 +599,11 @@ NOVA_WHOLE("dormant.disk_loss", 1, 0, 1u << 24, 0, "Dormancy", "Disk reserve los
 NOVA_WHOLE("dormant.dwell", 15, 1, 1000000000, 0, "Dormancy", "Dwell", "life.dormancy",
            "Ticks a resting program stays on a node before it moves on.")
 // Voluntary dormancy (docs/lifehistory-plan.md V)
-NOVA_FLAG("life.sleep", false, 0, "Dormancy", "Voluntary sleep", "",
+NOVA_FLAG("life.sleep", true, 0, "Dormancy", "Voluntary sleep", "",
           "YIELD with BX 1 (rest here) or 2 (drift), through the resource selector, and CX = N > 0 sends the "
           "program dormant for N ticks, on its reserves; it wakes when they're up and a core of its kind is free. "
-          "With life.dormancy off too, frozen bodies die and only the instruction sleeps.")
+          "With life.dormancy off too, frozen bodies die and only the instruction sleeps. (On since 2026-11-08; "
+          "older files keep it off: legacy.h.)")
 NOVA_WHOLE("dormant.sleep_max", 5000, 1, 65535, 0, "Dormancy", "Longest sleep", "life.sleep",
            "A voluntary sleep lasts at most this many ticks (a longer CX is cut to it).")
 

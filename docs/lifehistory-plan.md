@@ -1,6 +1,6 @@
 # Plan: gestation, ray hazards and voluntary dormancy
 
-> **Built 2026-11-08** (steps 1-5; design.md 6.24 says what changed in the build: V4's choice is a second switch, `life.sleep`, and W adds `mem.wipe_flicker`). Calibration runs (step 6) are still to do.
+> **Built 2026-11-08** (steps 1-5; design.md 6.24 says what changed in the build: V4's choice is a second switch, `life.sleep`, and W adds `mem.wipe_flicker`). Step 6's short sweep ran the same day (one seed, 50,000 ticks each), then Damian turned every feature on by default: rays (with R7's indels), gestation 25, wipe warnings 200, voluntary sleep beside the automatic rule (older files keep them off: legacy.h). The long comparison is still to do.
 >
 > **Revision 2, APPROVED by Damian (2026-11-08)**, with two answers changed from revision 1:
 > - Volatility wipes stay wipes, but now come with warning symptoms (new section 3).

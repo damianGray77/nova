@@ -292,7 +292,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `hazard.ray_indel_energy` | number | 256 | 0 to 1000000000 | **Ray indel energy**. The energy a ray needs left at a codon for an indel there (cosmic rays start at hazard.ray_cosmic, so only the first stretch of a cosmic ray's path; static never has this much). Needs `hazard.rays`. |
 | `mem.volatility` | number, log | 1e-05 | 0 to 1 | **Volatility**. The chance per memory page per tick that a wipe starts there, turning whole pages to random codons. |
 | `mem.wipe_pages` | whole | 4 | 1 to 262144 | **Wipe size**. A wipe covers 1 to this many pages. Needs `mem.volatility`. |
-| `mem.wipe_warning` | whole | 0 | 0 to 1000000000 | **Wipe warning**. A wipe lands this many ticks after it's drawn, its pages heating toward hot and flickering more and more until then (0 = at once, with no warning, as before). Needs `mem.volatility`. |
+| `mem.wipe_warning` | whole | 200 | 0 to 1000000000 | **Wipe warning**. A wipe lands this many ticks after it's drawn, its pages heating toward hot and flickering more and more until then (0 = at once, with no warning, as before 2026-11-08: older files keep that, legacy.h). Needs `mem.volatility`. |
 | `mem.wipe_false_alarms` | number | 0.25 | 0 to 1 | **Wipe false alarms**. The share of warnings that fade with no wipe, as disasters' false alarms do. Needs `mem.wipe_warning`. |
 | `mem.wipe_flicker` | number, log | 0.001 | 0 to 1 | **Wipe flicker**. Bit flips per codon per tick on a doomed page just before its wipe, rising from 0 when it's drawn. Needs `mem.wipe_warning`. |
 
@@ -334,7 +334,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 |---|---|---|---|---|
 | `life.threads_end` | switch | true | true or false | **Halted threads end**. A thread that halts leaves its body; a body with no thread left dies. |
 | `life.frozen_ticks` | whole | 200 | 0 to 1000000000 | **Frozen ticks**. A body none of whose threads ran an instruction for this long dies, or goes dormant (0 = never). |
-| `life.gestation` | whole | 0 | 0 to 1000000000 | **Gestation**. A daughter can be divided off only this many ticks after the ALLOC that made her block; an earlier DIVIDE waits, idle (0 = at once, as before; docs/lifehistory-plan.md G). |
+| `life.gestation` | whole | 25 | 0 to 1000000000 | **Gestation**. A daughter can be divided off only this many ticks after the ALLOC that made her block; an earlier DIVIDE waits, idle (0 = at once, as before 2026-11-08: older files keep that, legacy.h; docs/lifehistory-plan.md G). |
 | `life.gestation_per_codon` | number | 0 | 0 to 1000000 | **Gestation per codon**. ... plus this many ticks per codon of her block. Needs `life.gestation`. |
 
 ## Dormancy
@@ -345,7 +345,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `dormant.mem_loss` | whole | 1 | 0 to 16777216 | **Memory reserve loss**. Codons of its memory reserve a dormant program loses a tick. Needs `life.dormancy`. |
 | `dormant.disk_loss` | whole | 1 | 0 to 16777216 | **Disk reserve loss**. Codons of its disk reserve it loses a tick, once its memory reserve is gone. Needs `life.dormancy`. |
 | `dormant.dwell` | whole | 15 | 1 to 1000000000 | **Dwell**. Ticks a resting program stays on a node before it moves on. Needs `life.dormancy`. |
-| `life.sleep` | switch | false | true or false | **Voluntary sleep**. YIELD with BX 1 (rest here) or 2 (drift), through the resource selector, and CX = N &gt; 0 sends the program dormant for N ticks, on its reserves; it wakes when they're up and a core of its kind is free. With life.dormancy off too, frozen bodies die and only the instruction sleeps. |
+| `life.sleep` | switch | true | true or false | **Voluntary sleep**. YIELD with BX 1 (rest here) or 2 (drift), through the resource selector, and CX = N &gt; 0 sends the program dormant for N ticks, on its reserves; it wakes when they're up and a core of its kind is free. With life.dormancy off too, frozen bodies die and only the instruction sleeps. (On since 2026-11-08; older files keep it off: legacy.h.) |
 | `dormant.sleep_max` | whole | 5000 | 1 to 65535 | **Longest sleep**. A voluntary sleep lasts at most this many ticks (a longer CX is cut to it). Needs `life.sleep`. |
 
 ## Disasters

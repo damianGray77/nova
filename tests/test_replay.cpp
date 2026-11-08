@@ -200,7 +200,8 @@ const char* const kDiskWorld = "seed = 11\nworld.model = soup\nworld.graph = pro
                                "spark.rate = 0.5\naccel.gpu = cpu\naccel.npu = cpu\nwarp.device = cpu\n";
 const char* const kNewFeaturesOff = "spark.activity = 0\nsubstrate.enabled = false\nworld.archive = 0\n"
                                     "disaster.enabled = false\nmem.fast_share = 0\n" // (memory tiers: W3)
-                                    "hazard.rays = false\n"; // (rays: on by default since 2026-11-08)
+                                    // (life history: on by default since 2026-11-08)
+                                    "hazard.rays = false\nlife.gestation = 0\nmem.wipe_warning = 0\nlife.sleep = false\n";
 
 // The logged config a parsed log gives to replay, as a Config.
 bool replayed_config(Str text, Config* out) {
@@ -222,9 +223,11 @@ void test_legacy_config() {
         settings = settings && key_find(legacy.key(i)) != nullptr;
     CHECK(settings);
     const usize L = legacy.count();
-    // The second text (rays on by default, 2026-11-08): logs before v4 take it too.
+    // The second text (life history on by default, 2026-11-08): logs before v4 take it too.
     Config rays;
-    CHECK(rays.parse(kLegacyRaysDefaults, &pe) && rays.count() == 1 && key_find(rays.key(0)) != nullptr);
+    CHECK(rays.parse(kLegacyLifeDefaults, &pe) && rays.count() == 4);
+    for (usize i = 0; i < rays.count(); ++i)
+        CHECK(key_find(rays.key(i)) != nullptr);
     const usize R = rays.count();
     Config c;
     CHECK(replayed_config("nova-replay 2\nconfig world.model = soup\nconfig world.graph = procedural\n", &c));

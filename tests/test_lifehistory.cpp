@@ -653,7 +653,9 @@ void test_wipe_world() {
         CHECK(loaded);
         if (loaded) {
             // From before rays came on by default (v6): it resumes with them off.
-            CHECK(b.config().get_str("hazard.rays", "").eq("false"));
+            CHECK(b.config().get_str("hazard.rays", "").eq("false") &&
+                  b.config().get_str("life.gestation", "").eq("0") &&
+                  b.config().get_str("mem.wipe_warning", "").eq("0") && b.config().get_str("life.sleep", "").eq("false"));
             b.run_until(200);
             CHECK_EQ_U64(b.world().hash(), a.world().hash());
         }

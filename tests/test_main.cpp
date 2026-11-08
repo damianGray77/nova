@@ -158,9 +158,12 @@ const char* const kLegacyDefaults ="accel.mode = instant\n"
                                     // the live novelty meter (docs/analysis-plan.md A2): an observer, off here;
                                     // suites view and viewer turn it on
                                     "novelty.enabled = false\n"
-                                    // rays (docs/lifehistory-plan.md R, on by default since 2026-11-08): suite
-                                    // lifehistory tests them
-                                    "hazard.rays = false\n";
+                                    // life history (docs/lifehistory-plan.md, on by default since 2026-11-08):
+                                    // rays, gestation, wipe warnings, voluntary sleep; suite lifehistory tests them
+                                    "hazard.rays = false\n"
+                                    "life.gestation = 0\n"
+                                    "mem.wipe_warning = 0\n"
+                                    "life.sleep = false\n";
 
 int main(int argc, char** argv) {
     nova::Config::ParseError pe;

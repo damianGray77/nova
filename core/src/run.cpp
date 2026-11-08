@@ -26,8 +26,8 @@ void Run::start_novelty() {
     }
 }
 
-static_assert(kSnapshotLegacyBefore <= kSnapshotRaysBefore && kSnapshotRaysBefore <= kSnapshotVersion,
-              "snapshots before kSnapshotLegacyBefore (kSnapshotRaysBefore) take the legacy defaults (legacy.h)");
+static_assert(kSnapshotLegacyBefore <= kSnapshotLifeBefore && kSnapshotLifeBefore <= kSnapshotVersion,
+              "snapshots before kSnapshotLegacyBefore (kSnapshotLifeBefore) take the legacy defaults (legacy.h)");
 
 void genome_names(const CodonTable& t, const u8* codons, u32 len, TextBuf& out) {
     for (u32 i = 0; i < len; ++i) {

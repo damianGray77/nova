@@ -691,7 +691,8 @@ void test_old_files() {
                         "world.soup_size = 2048\nspark.initial = 20\nspark.rate = 0.5\naccel.gpu = cpu\n"
                         "accel.npu = cpu\nwarp.device = cpu\nspark.activity = 0\nsubstrate.enabled = false\n"
                         "world.archive = 0\ndisaster.enabled = false\n"
-                        "hazard.rays = false\n"; // (rays: on by default since 2026-11-08)
+                        // (life history: on by default since 2026-11-08)
+                        "hazard.rays = false\nlife.gestation = 0\nmem.wipe_warning = 0\nlife.sleep = false\n";
     {
         const char* path = "nova_test_memtiers.replay";
         TextBuf cfg;
@@ -780,6 +781,7 @@ const char* everything(const char* device) {
              "land.resolution = 64\nbridge.max_length = 0.6\nworld.soup_size = 4096\ncpu.instr_per_core = 25000\n"
              "spark.initial = 20\nspark.rate = 0.25\nnode.endurance = 1000\nnode.fallow_min = 20\n"
              "node.recover_every = 10\naccel.gpu = cpu\naccel.npu = cpu\nmem.volatility = 0.0005\n"
+             "mem.wipe_warning = 20\n" // (warned wipes, on by default since 2026-11-08, land within the run)
              "disaster.surge_every = 150\ndisaster.crash_every = 40\ndisaster.burnout_every = 30\n"
              "disaster.diskfail_every = 40\ndisaster.storm_every = 100\ndisaster.false_alarms = 0.3\n"
              "disaster.surge_lead_min = 20\ndisaster.surge_lead_max = 60\ndisaster.crash_lead_min = 20\n"

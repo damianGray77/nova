@@ -1728,10 +1728,15 @@ treating a short-world winner as an ecological improvement.
 Built from `docs/lifehistory-plan.md` revision 2, approved by Damian after
 long2 showed life settling on the shortest copier that works. Each of the
 four is behind its own keys. They were built off by default; then Damian
-turned rays on ("please stop defaulting new features to off", the same
-day), with snapshot v6 and replay v4 marking files written since: older
-ones resume and replay with `hazard.rays = false` unless they name it
-(legacy.h's second text; the test runner's fallback has it too).
+turned them on ("please stop defaulting new features to off", "turn on all
+of the new features", the same day), at values from the calibration sweep:
+rays on, gestation 25 ticks (100 cut births 15x, 300 and more never
+established replicators), wipe warnings 200 ticks (the sweep's strongest
+effect: 95% of late genomes over 32 codons against 0.5%), and voluntary
+sleep on beside the automatic rule. Snapshot v6 and replay v4 mark files
+written since: older ones resume and replay with all four off unless they
+name them (legacy.h's second text; the test runner's fallback has them
+too).
 
 **Gestation** (`life.gestation`, `life.gestation_per_codon`). A daughter
 can be divided off only that long after the ALLOC that made her block

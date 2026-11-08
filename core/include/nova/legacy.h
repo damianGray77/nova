@@ -37,14 +37,19 @@ inline constexpr const char* kLegacyFormatDefaults = //
     "novelty.enabled = false\n";
 
 // The second change of defaults (2026-11-08, Damian: "please stop defaulting
-// new features to off. Turn rays on"; docs/lifehistory-plan.md R): rays on.
-// Snapshots before format v6 and replay logs before format v4 were written
-// while they were off (v5 brought pending wipes), so they take this text too
-// for what they don't name -- the oldest files both texts.
-inline constexpr u32 kSnapshotRaysBefore = 6;
-inline constexpr u32 kReplayRaysBefore = 4;
-inline constexpr const char* kLegacyRaysDefaults = //
-    "hazard.rays = false\n";                         // rays (docs/lifehistory-plan.md R)
+// new features to off. Turn rays on", then "turn on all of the new
+// features"; docs/lifehistory-plan.md): rays, gestation, wipe warnings and
+// voluntary sleep on. Snapshots before format v6 and replay logs before
+// format v4 were written while they were off (v5 brought pending wipes), so
+// they take this text too for what they don't name -- the oldest files both
+// texts.
+inline constexpr u32 kSnapshotLifeBefore = 6;
+inline constexpr u32 kReplayLifeBefore = 4;
+inline constexpr const char* kLegacyLifeDefaults = //
+    "hazard.rays = false\n"                          // rays (docs/lifehistory-plan.md R)
+    "life.gestation = 0\n"                           // gestation (G)
+    "mem.wipe_warning = 0\n"                         // wipe warnings (W)
+    "life.sleep = false\n";                          // voluntary sleep (V)
 
 // Sets each line of kLegacyFormatDefaults that cfg doesn't name, where the
 // world will read it, so no unused entry is added: every line is a soup
