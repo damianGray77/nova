@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstdio> // snprintf (the debugging trace)
 #include <cstring>
+#include <intrin.h> // __cpuid, _xgetbv, and AVX2 (the reference's flaw draws, where the CPU has it)
 
 #include "nova/lineage.h"
 #include "nova/pool.h"    // clock_seconds (profiling)
@@ -90,6 +91,68 @@ void warp_op_histogram(u64* counts) {
 
 namespace {
 
+// The CPU reference's fast steps (WarpVM::w_fast_exec): each lane's flaw
+// draw, warp_isa.inc's w_draw_k(ks, lane, WD_FLAW), as a mask of the lanes
+// whose draw is under the threshold -- eight lanes at a time with AVX2 where
+// the CPU has it (checked once; the bits are the scalar ones either way).
+u32 flaw_mix(u32 x) { // w_mix
+    x ^= x >> 16;
+    x *= 0x7FEB352Du;
+    x ^= x >> 15;
+    x *= 0x846CA68Bu;
+    x ^= x >> 16;
+    return x;
+}
+
+bool cpu_avx2() {
+    int r[4];
+    __cpuid(r, 0);
+    if (r[0] < 7)
+        return false;
+    __cpuid(r, 1);
+    const bool osxsave = (r[2] >> 27) & 1, avx = (r[2] >> 28) & 1;
+    if (!osxsave || !avx || (_xgetbv(0) & 6) != 6)
+        return false;
+    __cpuidex(r, 7, 0);
+    return (r[1] >> 5) & 1;
+}
+const bool g_avx2 = cpu_avx2();
+
+u64 flaw_mask(u32 ks, u32 nl, u32 thr, u32 what) {
+    if (thr == 0)
+        return 0; // (no draw is under 0)
+    u64 m = 0;
+    u32 l = 0;
+    if (g_avx2) {
+        const __m256i c1 = _mm256_set1_epi32(static_cast<int>(0x85EBCA6Bu));
+        const __m256i base = _mm256_set1_epi32(static_cast<int>(ks ^ 0u));
+        const __m256i wk = _mm256_set1_epi32(static_cast<int>(what * 0xC2B2AE35u));
+        const __m256i m1 = _mm256_set1_epi32(static_cast<int>(0x7FEB352Du));
+        const __m256i m2 = _mm256_set1_epi32(static_cast<int>(0x846CA68Bu));
+        const __m256i sign = _mm256_set1_epi32(static_cast<int>(0x80000000u));
+        const __m256i t = _mm256_xor_si256(_mm256_set1_epi32(static_cast<int>(thr)), sign);
+        __m256i lane = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+        const __m256i eight = _mm256_set1_epi32(8);
+        for (; l + 8 <= nl; l += 8) {
+            __m256i x = _mm256_xor_si256(base, _mm256_add_epi32(_mm256_mullo_epi32(lane, c1), wk));
+            x = _mm256_xor_si256(x, _mm256_srli_epi32(x, 16));
+            x = _mm256_mullo_epi32(x, m1);
+            x = _mm256_xor_si256(x, _mm256_srli_epi32(x, 15));
+            x = _mm256_mullo_epi32(x, m2);
+            x = _mm256_xor_si256(x, _mm256_srli_epi32(x, 16));
+            // x < thr, unsigned: both with the sign bit flipped, signed
+            const __m256i lt = _mm256_cmpgt_epi32(t, _mm256_xor_si256(x, sign));
+            m |= static_cast<u64>(static_cast<u32>(_mm256_movemask_ps(_mm256_castsi256_ps(lt)))) << l;
+            lane = _mm256_add_epi32(lane, eight);
+        }
+        _mm256_zeroupper();
+    }
+    for (; l < nl; ++l)
+        if (flaw_mix(ks ^ (l * 0x85EBCA6Bu + what * 0xC2B2AE35u)) < thr)
+            m |= 1ull << l;
+    return m;
+}
+
 struct WarpVM {
     typedef u32 uint;
     u32* g_img = nullptr;
@@ -144,9 +207,114 @@ struct WarpVM {
 #define STACK_GET(L, i) ((L).stack[(i)])
 #define STACK_SET(L, i, v) ((L).stack[(i)] = (v))
 #define WARP_LANE0(wr, wi) IMG((wr) + WW_LANE0)
+#define W_FAST_EXEC(b, l0, op, ip, mine, obid, nx, ks) w_fast_exec((b), (l0), (op), (ip), (mine), (obid), (nx), (ks))
 
 #include "warp_isa.inc"
 
+    // A step of a simple instruction as one loop over the lanes (the
+    // reference only: warp_isa.inc's W_FAST_EXEC hook). These instructions
+    // touch only a lane's registers (an IF moves its IP on one more), so
+    // the step's switch is taken once, not once a lane through w_exec, and
+    // the lanes' flaw draws come as one mask. Each lane gets exactly what
+    // the generic lanes give it: counted, its block set, the instruction,
+    // a flaw, its error flags (INERT fails: a fault), its IP. They write
+    // nothing, so the step's write phase has nothing to do. False (the
+    // generic lanes then run it): another instruction, code not the body's,
+    // or a trace or op count being taken (those watch lane by lane).
+    bool w_fast_exec(uint b, uint lane0, uint op, uint minip, bool mine, uint obid, uint nx, uint ks) {
+        if (!mine || g_ophist || g_trace.on)
+            return false;
+        switch (op) {
+        case OP_NOP0: case OP_NOP1: case OP_NOPX: case OP_INC: case OP_T_INCC: case OP_DEC: case OP_T_DECC:
+        case OP_ZERO: case OP_T_ZERO: case OP_ROT: case OP_ROTB: case OP_SWAP: case OP_ADD: case OP_SUB:
+        case OP_T_SUBCAB: case OP_T_SUBAAC: case OP_MUL: case OP_AND: case OP_OR: case OP_XOR: case OP_NOT:
+        case OP_T_NOT0: case OP_SHL: case OP_T_SHL: case OP_SHR: case OP_NEG: case OP_MIN: case OP_MAX:
+        case OP_INCA: case OP_T_INCA: case OP_DECA: case OP_INCB: case OP_T_INCB: case OP_DECB: case OP_ZEROA:
+        case OP_ZEROB: case OP_T_MOVDC: case OP_T_MOVBA: case OP_YIELD: case OP_IFZ: case OP_T_IFZ: case OP_IFLT:
+        case OP_IFGT: case OP_IFNE: case OP_IFEQ: case OP_IFERR: case OP_INERT:
+            break;
+        default:
+            return false;
+        }
+        const uint nl = CST(WC_LANES);
+        const u64 flaws = flaw_mask(ks, nl, IMG(b + WB_FLAW_THR), WD_FLAW);
+        const bool fails = op == OP_INERT; // (w_exec's default: not a warp instruction)
+        uint skip = W_NONE;               // an IF's: the address after the next instruction
+        for (uint l = 0; l < nl; ++l) {
+            Lane& L = LANES(lane0 + l);
+            if (L.halted != 0u || L.yielded != 0u || L.ip != minip)
+                continue;
+            GS_ADD(gs_count, 1u);
+            L.block = obid;
+            bool skips = false;
+            switch (op) {
+            case OP_INC: case OP_T_INCC: L.cx++; break;
+            case OP_DEC: case OP_T_DECC: L.cx--; break;
+            case OP_ZERO: case OP_T_ZERO: L.cx = 0u; break;
+            case OP_ROT: { const uint x = L.ax, y = L.bx, v = L.cx; L.bx = x; L.cx = y; L.ax = v; break; }
+            case OP_ROTB: { const uint x = L.ax, y = L.bx, v = L.cx; L.ax = y; L.bx = v; L.cx = x; break; }
+            case OP_SWAP: { const uint x = L.ax; L.ax = L.bx; L.bx = x; break; }
+            case OP_ADD: L.cx = L.ax + L.bx; break;
+            case OP_SUB: case OP_T_SUBCAB: L.cx = L.ax - L.bx; break;
+            case OP_T_SUBAAC: L.ax = L.ax - L.cx; break;
+            case OP_MUL: L.cx = L.ax * L.bx; break;
+            case OP_AND: L.cx = L.ax & L.bx; break;
+            case OP_OR: L.cx = L.ax | L.bx; break;
+            case OP_XOR: L.cx = L.ax ^ L.bx; break;
+            case OP_NOT: L.cx = ~L.cx; break;
+            case OP_T_NOT0: L.cx ^= 1u; break;
+            case OP_SHL: case OP_T_SHL: L.cx = L.cx << 1; break;
+            case OP_SHR: L.cx = L.cx >> 1; break;
+            case OP_NEG: L.cx = 0u - L.cx; break;
+            case OP_MIN: L.cx = static_cast<int>(L.ax) < static_cast<int>(L.bx) ? L.ax : L.bx; break;
+            case OP_MAX: L.cx = static_cast<int>(L.ax) > static_cast<int>(L.bx) ? L.ax : L.bx; break;
+            case OP_INCA: case OP_T_INCA: L.ax++; break;
+            case OP_DECA: L.ax--; break;
+            case OP_INCB: case OP_T_INCB: L.bx++; break;
+            case OP_DECB: L.bx--; break;
+            case OP_ZEROA: L.ax = 0u; break;
+            case OP_ZEROB: L.bx = 0u; break;
+            case OP_T_MOVDC: L.dx = L.cx; break;
+            case OP_T_MOVBA: L.bx = L.ax; break;
+            case OP_YIELD: L.yielded = 1u; break;
+            case OP_IFZ: case OP_T_IFZ: skips = L.cx != 0u; break;
+            case OP_IFLT: skips = !(static_cast<int>(L.ax) < static_cast<int>(L.bx)); break;
+            case OP_IFGT: skips = !(static_cast<int>(L.ax) > static_cast<int>(L.bx)); break;
+            case OP_IFNE: skips = L.ax == L.bx; break;
+            case OP_IFEQ: skips = L.ax != L.bx; break;
+            case OP_IFERR: skips = L.err == 0u; break;
+            default: break; // (NOPs; INERT)
+            }
+            uint next = nx;
+            if (skips) {
+                if (skip == W_NONE)
+                    skip = w_adv(b, nx, 1u);
+                next = skip;
+            }
+            if ((flaws >> l) & 1u) { // an execution flaw: one register comes out off by one
+                const uint fd = w_draw_k(ks, l, WD_FLAW_KIND);
+                const uint fdelta = (fd & 1u) != 0u ? 1u : 0xFFFFFFFFu;
+                const uint freg = w_below(fd, 3u);
+                if (freg == 0u)
+                    L.ax += fdelta;
+                else if (freg == 1u)
+                    L.bx += fdelta;
+                else
+                    L.cx += fdelta;
+                ATOMIC_ADD(b + WB_OUT + WO_FLAWS, 1u);
+            }
+            if (fails) {
+                w_fault(b, L);
+            } else {
+                L.err = 0u;
+                L.errs = 0u;
+            }
+            L.ip = next;
+        }
+        return true;
+    }
+
+#undef W_FAST_EXEC
 #undef WARP_LANE0
 #undef LANE_T
 #undef STACK_GET

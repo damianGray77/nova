@@ -1104,6 +1104,9 @@ void w_run_warp(uint b, uint wi) {
     uint fast = 0u; // memory tiers (W3): the record's WB_FAST, 0 = one tier, every step as before
     uint tmem = 0u; // ... 1: this step's time is its lanes' memory traffic
     bool mine = false;
+#if defined(W_FAST_EXEC)
+    bool fast_done = false; // (C++: this step ran as w_fast_exec's one loop)
+#endif
     // Every value that steers the loop is decided by one thread and handed to
     // all through gs_ctl, with a barrier after each hand-over: the GPU's
     // compiler only lets barriers sit inside loops whose control it can see
@@ -1212,6 +1215,14 @@ void w_run_warp(uint b, uint wi) {
         uint nx_step = w_adv(b, minip, 1u);
         uint kstep = w_draw_key(key, step); // (each lane's draws finish it)
         w_step_begin(); // the step's shared work, found by its first lane
+#if defined(W_FAST_EXEC)
+        // (C++ only: a step of a simple instruction -- registers, an IF --
+        // as one loop over the lanes, warp.cpp's w_fast_exec, doing what the
+        // lanes below would; it writes no memory, so the write phase is
+        // skipped too. False: the lanes below run it.)
+        fast_done = W_FAST_EXEC(b, lane0, op, minip, mine, obid, nx_step, kstep);
+        if (!fast_done) {
+#endif
         LANE_BEGIN(lane0)
             gs_wa[l] = W_NONE;
             gs_wv[l] = 0u;
@@ -1264,7 +1275,13 @@ void w_run_warp(uint b, uint wi) {
                 W_TRACE(wr, l, step, minip, op, L); // debugging, C++ only (nothing on the GPU)
             }
         LANE_END
+#if defined(W_FAST_EXEC)
+        }
+#endif
         SYNC
+#if defined(W_FAST_EXEC)
+        if (!fast_done) {
+#endif
         LANE_BEGIN(lane0)
             if (gs_wa[l] != W_NONE) {
                 bool last = true;
@@ -1277,6 +1294,9 @@ void w_run_warp(uint b, uint wi) {
                     w_store(b, gs_wa[l], gs_wv[l]);
             }
         LANE_END
+#if defined(W_FAST_EXEC)
+        }
+#endif
         SYNC
         g = gs_count;
         tsearch = gs_ctl[8];
