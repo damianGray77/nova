@@ -60,6 +60,45 @@ void test_resume_equivalence() {
     CHECK(no_knob.world().hash() != straight.world().hash());
 }
 
+// A world whose initial sparks overfill every soup, so building it notes "no
+// room" in each allocator's cache before anything is freed. A resumed world is
+// built the same way and then loaded, so the note must not survive the load:
+// kept, it refused the resumed run allocations the straight run made (the
+// landscape's resume divergence, 2026-11-07).
+void test_resume_after_full_start() {
+    const char* const cfg = "seed = 42\n"
+                            "world.model = soup\n"
+                            "world.nodes = 8\n"
+                            "world.chords = 4\n"
+                            "world.soup_size = 2048\n"
+                            "world.millicores = 400\n"
+                            "cpu.instr_per_core = 2500\n"
+                            "spark.initial = 300\n"
+                            "spark.rate = 0.5\n"
+                            "spark.grant = 1\n"
+                            "spark.min_len = 8\n"
+                            "spark.max_len = 48\n"
+                            "seed.genome = SENSE ALLOC NOP1 COPY DJNZ NOP0 INC DIVIDE\n"
+                            "seed.at = 1000\n"
+                            "seed.millicores = 200\n";
+    const u64 at[3] = {1, 10, 40};
+    for (u32 i = 0; i < 3; ++i) {
+        Run straight;
+        CHECK(make_run(straight, cfg, 4));
+        straight.run_until(at[i] + 20);
+        Run first;
+        CHECK(make_run(first, cfg, 4));
+        first.run_until(at[i]);
+        ByteWriter bytes;
+        first.snapshot(bytes);
+        Run resumed;
+        TextBuf err;
+        CHECK(resumed.init_from_snapshot(bytes.data(), bytes.size(), 4, &err));
+        resumed.run_until(at[i] + 20);
+        CHECK_EQ_U64(resumed.world().hash(), straight.world().hash());
+    }
+}
+
 void test_rejects_damage() {
     Run a;
     CHECK(make_run(a, kBusyWorld, 1));
@@ -128,6 +167,7 @@ void test_file_round_trip() {
 void suite_snapshot() {
     test_round_trip();
     test_resume_equivalence();
+    test_resume_after_full_start();
     test_rejects_damage();
     test_file_round_trip();
 }

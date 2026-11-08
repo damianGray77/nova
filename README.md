@@ -194,6 +194,9 @@ unchanged):
   are rich, poor or barren (`spark.*`, `res.memory.*`, `res.cpu.*`, ...).
 - **The map** shows the land, bridges open or shut and landmass labels, with
   an overview map; double-clicking fits a landmass.
+- **Map seeds:** `world.seed` (a number or any text) picks the map apart from
+  the run's `seed`: places, paths, bridges, land, substrates and the resource
+  and spark spreads (`--set world.seed=atlantis`). Empty, the map is `seed`'s.
 - **Tools:** `nova land <config>` prints what settings generate;
   `nova run --profile` shows where each tick goes; `stats.nodes_every` thins
   the per-node CSV.
@@ -435,7 +438,12 @@ lists what you changed. Settings whose switch is off are greyed out but keep
 their values. The right-hand panel checks the settings with the engine's own
 code as you go: problems by setting (Start stays off until they are fixed),
 the values the run will work out for itself, the memory and disk the world
-needs, and a landscape's landmasses, paths and hermits. **Load** opens any
+needs, and a landscape's map (land, paths, bridges and nodes) with its
+landmasses, paths and hermits. **Map seed** (`world.seed`) is the map's own
+seed, like a game's world seed: a number or any text. **new map** (beside it,
+and above the map) rolls a fresh one, so you can look through maps before
+starting; the run's `seed` then varies what happens on that same map. Left
+empty, the map follows `seed` as before. **Load** opens any
 `.cfg` (the presets one click away); **Save as** writes what differs from the
 defaults, grouped and commented. **Start** writes every setting to the run's
 folder (`runs\<name>` unless you pick or type another) as `run.cfg` and starts

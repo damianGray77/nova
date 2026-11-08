@@ -183,6 +183,13 @@ enum class KnobResult { ok, unknown_key, not_live, bad_value };
 enum class Model : u8 { demo, soup };
 const char* describe(KnobResult r);
 
+// The map's seed from world.seed's text (like a game's world seed): empty,
+// the run's seed; a whole number (decimal digits that fit), that number; any
+// other text, a hash of it. The nodes' places, paths and bridges, the land,
+// the substrates and the resource and spark spreads follow from it; the run's
+// own draws follow from `seed`.
+u64 map_seed_from(Str text, u64 seed);
+
 class World {
   public:
     World() = default;
@@ -271,6 +278,7 @@ class World {
     double novelty_threshold() const { return novelty_threshold_; }
 
     u64 seed() const { return seed_; }
+    u64 map_seed() const { return map_seed_; } // world.seed (map_seed_from): seed unless set
     u64 tick() const { return tick_; }
     u32 node_count() const { return nodes_; }
     u32 edge_count() const { return static_cast<u32>(edge_src_.size()); }
@@ -587,6 +595,7 @@ class World {
 
     // structural
     u64 seed_ = 0;
+    u64 map_seed_ = 0; // the map's (world.seed): places, paths, land, substrates, spreads
     u64 tick_ = 0;
     u32 nodes_ = 0;
     u32 soup_size_ = 0;

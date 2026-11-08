@@ -156,13 +156,38 @@ bytes. The long run's `snap.600000`, resumed 200 ticks by its own build and
 by this one, gives the same hash (`ac6a0d4441722c93`), and `nova view --run
 runs\long1` renders all 68 windows.
 
-**Found, not fixed: a resumed snapshot is not exact on a landscape.**
-Resumed from its snapshot, `landscape.cfg` reaches a different (repeatable)
+**Found, then fixed: a resumed snapshot was not exact on a landscape.**
+Resumed from its snapshot, `landscape.cfg` reached a different (repeatable)
 hash than the uninterrupted run -- also with the CPU reference, and also in
-the build from before this one (98c2a3c, at every snapshot tried), so it is
-older than these features. The loaded state hashes the same; the first
-difference is warp working state a snapshot rebuilds: some warps' running
-lane count (`wlive_`) is 0 in the running world while their lanes, brought
-home, are all running, and the resumed world counts them as running. The
-tests' snapshot gates (smaller procedural worlds) don't meet it.
-`nova run --dump-node N:PREFIX` now writes that working state too.
+the build from before this one (98c2a3c), so it was older than these
+features. The loaded state hashed the same. (The warps' running-lane counts
+that differed first were free slots', which nothing reads.) The cause was
+the allocator's "no room of this length" cache (`known_full`), which a load
+neither saved nor cleared: a resumed world is built first, and on a small
+node the initial sparks fill memory and note "no room", so after the load
+the resumed world refused allocations the straight run made, until a codon
+was freed. Loading now clears it, and so does a node's new life (a reborn
+node kept its earlier life's note: deterministic, but a fresh soup refused
+its first allocations). `test_resume_after_full_start` (snapshot suite)
+fails without the fix at all three snapshot points. Resumed against the
+uninterrupted run, tick by tick: a 100-node landscape over 700 ticks, the
+1,000-node `landscape.cfg` with frequent disasters on the CPU reference with
+and without warps (200 ticks), and on the real GPU and NPU (300 ticks) --
+every tick the same. `nova run --dump-node N:PREFIX` writes that working
+state too.
+
+**Where the time goes (measured, nothing changed).** long1's last snapshot
+(1,000 nodes, tick 672,142), resumed for 300 ticks: 12.0 ticks/s with the
+detector alone, 11.9 with behaviour profiles and the live novelty meter on
+too, 12.0 with nothing -- the always-on observers cost about 1%. Watching
+costs more: the viewer builds its frame on the sim thread between ticks
+(about 30 a second, so one after nearly every tick of a big world), and a
+frame took 14.7 ms on long1 (a tick: 83 ms) and 9.9 ms on a new landscape (a
+tick: 22 ms). A watched big world therefore runs some 15-30% slower than
+headless.
+
+**The map's seed** (`world.seed`, design 6.13): the map apart from the run,
+as a number or any text, drawn on the setup page with a **new map** button.
+Empty, every world is exactly as before (the landscape suite checks the same
+hash with `world.seed` = `seed`, the same map with another `seed`, and other
+maps for other map seeds).

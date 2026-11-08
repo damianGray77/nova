@@ -4,8 +4,11 @@
 #include <cstdio>
 #include <cstring>
 
+#include "nova/hash.h" // new_map's seeds
 #include "nova/io.h"
 #include "nova/keys.h" // the settings registry: everything on the page comes from it
+#include "nova/pool.h" // clock_seconds
+#include "nova/view.h" // the map's colours (the viewer's)
 #include "theme.h"
 
 namespace nova {
@@ -467,6 +470,26 @@ void SetupPage::set_note(const char* text, bool bad) {
 }
 
 void SetupPage::set_headless(const char* folder) { snprintf(headless_, sizeof headless_, "%s", folder ? folder : ""); }
+
+void SetupPage::new_map() {
+    const usize k = key_index("world.seed");
+    if (k == kNoKey || read_only())
+        return;
+    // A fresh number from the clock, this page's address and a count (the
+    // map is then the run's: world.seed goes into run.cfg like any setting).
+    const double t = clock_seconds();
+    u64 bits = 0;
+    memcpy(&bits, &t, sizeof bits);
+    const u64 z = mix64(bits ^ mix64(reinterpret_cast<u64>(this) + kGolden * ++new_maps_));
+    char b[24];
+    snprintf(b, sizeof b, "%llu", static_cast<unsigned long long>(z % 1000000000ull));
+    TextBuf why;
+    set_text(k, Str(b), &why);
+    TextBuf note;
+    note.append("new map: world.seed = ");
+    note.append(b);
+    set_note(note.c_str());
+}
 
 Str SetupPage::effective(usize k) {
     if (cur_[k].set)
@@ -1683,6 +1706,14 @@ void SetupPage::draw_row(const UiInput& in, Canvas& c, const Row& r, const Rect&
         break;
     }
     case KeyKind::text:
+        if (Str(key.name).eq("world.seed") && !ro) { // the map's seed: and a new one in a click
+            const i32 bw = c.px(84);
+            const Rect fr{cx, cy, cw - bw - c.px(6), ctl_h};
+            field(in, c, fr, kEditValue, k, v, enabled, vcol, "(the seed's map)");
+            if (button(in, c, Rect{cx + cw - bw, cy, bw, ctl_h}, "new map", false, enabled))
+                new_map();
+            break;
+        }
         field(in, c, ctl, kEditValue, k, v, enabled, vcol, "(empty)");
         break;
     }
@@ -1859,12 +1890,62 @@ void SetupPage::check_panel(const UiInput& in, Canvas& c) {
     }
 
     // The landscape.
+    map_r_ = new_map_r_ = Rect{};
     if (ch.landscape) {
         head("The landscape");
         const LandSummary& L = ch.land;
+        if (!read_only()) { // a new map, beside the heading
+            const i32 bw = c.px(84), bh = c.px(20);
+            new_map_r_ = Rect{inner.right() - bw - c.px(2), y - c.line_h(kFontBold) - c.px(4), bw, bh};
+            if (button(in, c, new_map_r_, "new map"))
+                new_map();
+        }
+        {
+            const Str ms = shown(key_index("world.seed"));
+            if (ms.n)
+                snprintf(b, sizeof b, "map seed %.*s (world.seed; the run's own draws follow seed)",
+                         static_cast<int>(ms.n < 200 ? ms.n : 200), ms.p);
+            else
+                snprintf(b, sizeof b, "the map follows seed (set world.seed, or new map, for another)");
+            text(b, kFontSmall, kDim);
+        }
         if (!L.built) {
             text("it can't be generated with these settings (see the problems)", kFontSmall, kBad);
         } else {
+            // The map: land and water as the viewer draws them, the paths
+            // (bridges in amber) and the nodes.
+            const usize cells = static_cast<usize>(L.raster_w) * L.raster_h;
+            if (cells && ch.land_cells.size() == cells) {
+                if (map_gen_ != ch.land_gen || map_img_.size() != cells) {
+                    map_img_.resize(cells);
+                    for (usize i = 0; i < cells; ++i) {
+                        const u32 m = ch.land_cells[i];
+                        map_img_[i] = m == 0xFFFFFFFFu ? 0x0E1A2C : mix_color(0x37442F, lineage_color(m + 1), 0.12);
+                    }
+                    map_gen_ = ch.land_gen;
+                }
+                const i32 mw = inner.w - c.px(4);
+                const i32 mh = static_cast<i32>(static_cast<double>(mw) * L.raster_h / L.raster_w + 0.5);
+                map_r_ = Rect{inner.x + c.px(2), y + c.px(4), mw, mh};
+                c.image(map_r_, map_img_.data(), static_cast<i32>(L.raster_w), static_cast<i32>(L.raster_h));
+                const double sx = mw / (L.width > 0 ? L.width : 1.0), sy = mh;
+                auto px = [&](u32 n) { return map_r_.x + static_cast<i32>(ch.land_x[n] * sx); };
+                auto py = [&](u32 n) { return map_r_.y + static_cast<i32>(ch.land_y[n] * sy); };
+                const u32 nn = static_cast<u32>(ch.land_x.size());
+                for (usize e = 0; e + 1 < ch.land_paths.size(); e += 2) {
+                    const u32 a = ch.land_paths[e], bnode = ch.land_paths[e + 1];
+                    if (a >= nn || bnode >= nn)
+                        continue;
+                    if (ch.land_bridge[e / 2])
+                        c.dashed(px(a), py(a), px(bnode), py(bnode), 0xE8A840, c.px(4));
+                    else
+                        c.line(px(a), py(a), px(bnode), py(bnode), 0x76836F);
+                }
+                const i32 d = c.px(2) > 2 ? c.px(2) : 2;
+                for (u32 n = 0; n < nn; ++n)
+                    c.fill(Rect{px(n) - d / 2, py(n) - d / 2, d, d}, 0xE6EAF0);
+                y += mh + c.px(8);
+            }
             snprintf(b, sizeof b, "%.2f x 1, a %ux%u raster, %.0f%% land (generated in %.0f ms)", L.width, L.raster_w,
                      L.raster_h, 100.0 * L.land_share, L.ms);
             text(b, kFontSmall, kText);

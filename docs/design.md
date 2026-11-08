@@ -938,6 +938,8 @@ The plan and its calls C1–C12 are in `docs/phase7-plan.md`. Damian replaced re
 
 **A new mode, `world.graph = landscape`.** `ring` and `procedural` are untouched: every existing config, test and pinned hash is unchanged.
 
+**The map's seed (2026-11-07, Damian: "like minecraft or valheim").** `world.seed` is the map's own seed, apart from the run's `seed`: the land, the nodes' places, paths and bridges (with their phases), the procedural graph or ring chords, the substrates, the property fields and every resource and spark spread follow from it; everything that happens in the run follows from `seed`. It is text: empty, the map is `seed`'s (every world exactly as before); a whole number that fits in 64 bits, that number; any other text, a hash of it (`map_seed_from`). The setup page draws the check's landscape (the viewer's land colours, paths, amber dashed bridges, nodes) under "The landscape", and **new map** (there, and beside the setting) gives `world.seed` a fresh number, so maps can be browsed before Start. `nova run` prints the map seed when it differs; `result.txt` has `map_seed`.
+
 **1. The land (C1).** The world is `land.aspect` × 1. A noise field, warped by two more (`land.warp`) so coastlines wander, sinks toward the borders (`land.border`) and is cut at `land.fraction` on a raster `land.resolution` cells high: land and water. `land.scale` sets the features across the height. A flood fill labels each landmass.
 
 **2. Nodes (C2).** `world.nodes` points are thrown at random onto land, none closer than a spacing that starts where they should fit and shrinks 15% at a time until they all do. A spacing below a quarter of a raster cell is refused ("lower world.nodes, or raise land.fraction or land.resolution"). Nodes are numbered row by row. The only spatial lookups happen here, once.
@@ -1929,11 +1931,9 @@ worked numbers, to confirm -- every slow-tier price (stores and scans too)
 is scaled by the load ratio (a 32-codon slow copy costs 683 adds, not the
 plan's about 620), a DISK op's memory side is now priced per codon by tier
 (nothing before tiers), and the E cores' slow load is scaled, not measured.
-A known bug, older than this build: a landscape world resumed from a
-snapshot drifts from the uninterrupted run (warps' running-lane counts;
-results/final-integration.md), so snapshots aren't yet exact resume points
-there. Old logs
-continue replaying their recorded knob changes. Sampling and novelty are
+The landscape's snapshot drift (older than that build) is fixed: the
+allocator's "no room" cache outlived the load, and a node's earlier life
+(results/final-integration.md). Old logs continue replaying their recorded knob changes. Sampling and novelty are
 observers, so their histories restart at snapshots even though the world
 continues exactly. The analysis roles and maps are measurements to interpret,
 not proof of increasing complexity or cooperation.

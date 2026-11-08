@@ -176,8 +176,9 @@ int cmd_land(int argc, char** argv) {
     usize cells = 0;
     for (usize c = 0; c < L.land.size(); ++c)
         cells += L.land[c];
-    printf("nova: landscape %.2f x 1, %ux%u raster, %.0f%% land, generated in %.0f ms\n", L.width, L.raster_w,
-           L.raster_h, 100.0 * cells / L.land.size(), ms);
+    printf("nova: landscape of map seed %llu%s, %.2f x 1, %ux%u raster, %.0f%% land, generated in %.0f ms\n",
+           static_cast<unsigned long long>(w->map_seed()), w->map_seed() == w->seed() ? " (the seed's)" : "",
+           L.width, L.raster_w, L.raster_h, 100.0 * cells / L.land.size(), ms);
     printf("  %u nodes on %u landmasses (of %u); the largest:", n, static_cast<unsigned>(sizes.size()), L.masses);
     for (usize k = 0; k < sizes.size() && k < 10; ++k)
         printf(" %u", static_cast<unsigned>(sizes[sizes.size() - 1 - k] >> 32));
@@ -657,6 +658,9 @@ bool write_result(const char* path, const Run& run, const char* stop, double sec
     kv("seed");
     t.append_u64(w.seed());
     t.append_char('\n');
+    kv("map_seed"); // world.seed's number (the seed when it isn't set)
+    t.append_u64(w.map_seed());
+    t.append_char('\n');
     kv("end_tick");
     t.append_u64(w.tick());
     t.append_char('\n');
@@ -945,8 +949,10 @@ int cmd_run(const Args& a) {
         run.world().set_profile(&prof);
 
     const World& w = run.world();
-    printf("nova: seed %llu, %u nodes, %u edges, ", static_cast<unsigned long long>(w.seed()),
-           w.node_count(), w.edge_count());
+    printf("nova: seed %llu, ", static_cast<unsigned long long>(w.seed()));
+    if (w.map_seed() != w.seed())
+        printf("map seed %llu, ", static_cast<unsigned long long>(w.map_seed()));
+    printf("%u nodes, %u edges, ", w.node_count(), w.edge_count());
     if (ticks)
         printf("%llu ticks", static_cast<unsigned long long>(ticks));
     else

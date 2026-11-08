@@ -59,7 +59,12 @@ NOVA_TEXT("output.arrivals", "", 0, "Run and output", "Arrivals", "profile.arriv
 // World and land
 // ---------------------------------------------------------------------------
 NOVA_WHOLE("seed", 1, 0, kKeyNoMax, 0, "World and land", "Seed", "",
-           "The world's seed: everything random in the run follows from it.")
+           "The world's seed: everything random in the run follows from it (and the map too, unless world.seed "
+           "is set).")
+NOVA_TEXT("world.seed", "", 0, "World and land", "Map seed", "",
+          "The map's own seed, like a game's world seed: where the nodes are, their paths and bridges, the land, "
+          "the substrates and how resources and sparks are spread. A number, or any text (hashed to one); empty: "
+          "the map follows seed. Set, seed varies what happens on the same map.")
 NOVA_CHOICE("world.model", "demo", "demo soup", 0, "World and land", "Model", "",
             "soup: organisms in memory, the real model; demo: the Phase 0 test world of parcels.")
 NOVA_WHOLE("world.nodes", 64, 1, 1000000, 0, "World and land", "Nodes", "",

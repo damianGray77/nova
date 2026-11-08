@@ -69,6 +69,15 @@ struct SettingsCheck {
     TextBuf notes; // what the budgets resolved to, a line each
     bool landscape = false;
     LandSummary land;
+    // The map itself, for the setup page's picture of it (with land.built):
+    // each raster cell's landmass (0xFFFFFFFF: water), each node's place in
+    // the land's width x 1 rectangle, and each path once (a < b, as pairs)
+    // with whether it is a bridge.
+    Array<u32> land_cells;
+    Array<float> land_x, land_y;
+    Array<u32> land_paths;
+    Array<u8> land_bridge;
+    u32 land_gen = 0; // counts the landscapes generated (a picture of an older one is stale)
     // The landscape is generated again only when its settings change (its
     // own, or the substrates', whose count the summary gives).
     bool land_cached = false;

@@ -170,8 +170,23 @@ const char* describe(KnobResult r) {
     return "?";
 }
 
+u64 map_seed_from(Str text, u64 seed) {
+    if (text.n == 0)
+        return seed;
+    u64 v = 0;
+    bool number = text.n <= 20;
+    for (usize i = 0; i < text.n && number; ++i) {
+        const char ch = text.p[i];
+        const u64 d = static_cast<u64>(ch - '0');
+        number = ch >= '0' && ch <= '9' && v <= (~0ull - d) / 10;
+        v = v * 10 + d;
+    }
+    return number ? v : hash_bytes(text.p, text.n, 0x6D61707365656400ull); // "mapseed"
+}
+
 bool World::init(Config& cfg) {
     seed_ = key_u64(cfg, "seed");
+    map_seed_ = map_seed_from(key_str(cfg, "world.seed"), seed_);
     nodes_ = key_u32(cfg, "world.nodes");
     Str graph = key_choice(cfg, "world.graph");
     procedural_ = graph.eq("procedural");
@@ -336,7 +351,7 @@ bool World::init(Config& cfg) {
     bridge_list_.clear();
     if (landscape_) {
         TextBuf why;
-        if (!generate_landscape(seed_, lp_, &ls_, &why)) {
+        if (!generate_landscape(map_seed_, lp_, &ls_, &why)) {
             cfg.fail("world.nodes", why.c_str());
             return false;
         }
@@ -355,7 +370,7 @@ bool World::init(Config& cfg) {
         long_added_ = ls_.long_added;
     } else if (procedural_) {
         ProcGraph& pg = pg_; // kept: the lifecycle rebuilds from it
-        generate_graph(seed_, gp, &pg);
+        generate_graph(map_seed_, gp, &pg);
         if (!build_edges(pg.keys.data(), pg.keys.size()))
             NOVA_FATAL("World::init: generated graph failed validation");
         node_x_.assign(pg.x.data(), pg.x.size());
@@ -378,7 +393,7 @@ bool World::init(Config& cfg) {
             for (u32 i = 0; i < nodes_; ++i)
                 link(i, (i + 1) % nodes_);
         }
-        Rng g(seed_, Rng::kWorldNode, 0);
+        Rng g(map_seed_, Rng::kWorldNode, 0);
         for (u32 c = 0; c < chords && nodes_ >= 2; ++c) {
             u32 a = static_cast<u32>(g.below(nodes_));
             u32 b = static_cast<u32>(g.below(nodes_));
@@ -609,9 +624,9 @@ void World::fields_at(u64 tick, Array<double>* z) {
         if (!spatial_ || vary_[f] <= 0)
             continue;
         if (drift_ > 0)
-            node_field3(seed_, f, node_x_, node_y_, static_cast<double>(tick) * drift_, &z[f]);
+            node_field3(map_seed_, f, node_x_, node_y_, static_cast<double>(tick) * drift_, &z[f]);
         else
-            node_field(seed_, f, node_x_, node_y_, &z[f]);
+            node_field(map_seed_, f, node_x_, node_y_, &z[f]);
     }
     substrates_at(tick); // W2: and the substrate fields, likewise
 }
@@ -644,7 +659,7 @@ void World::substrates_at(u64 tick) {
     const bool drifting = drift_ > 0;
     if (!sub_at_.empty() && (!drifting || sub_at_tick_ == tick))
         return;
-    substrate_levels(seed_, sub_params_, node_x_, node_y_, drifting ? static_cast<double>(tick) * drift_ : -1.0,
+    substrate_levels(map_seed_, sub_params_, node_x_, node_y_, drifting ? static_cast<double>(tick) * drift_ : -1.0,
                      &sub_at_);
     sub_at_tick_ = tick;
 }
@@ -927,7 +942,7 @@ void World::spread_resources() {
     Array<u64> share;
     const u64 N = nodes_;
     auto split = [&](u32 idx, u32 field, u64 mean, u64 minimum, u64 maximum, Array<u32>* out) {
-        spread_weights(seed_, field, spreads_[idx], node_x_, node_y_, W, &w);
+        spread_weights(map_seed_, field, spreads_[idx], node_x_, node_y_, W, &w);
         spread_total(w, mean * N, minimum, &share);
         out->resize(nodes_);
         for (u32 n = 0; n < nodes_; ++n)
@@ -941,10 +956,10 @@ void World::spread_resources() {
     share_archive_.clear();
     if (m.archive) // disk tiers (W4): the archive by its own distribution (its own field, so the rest are as before)
         split(7, kFieldArchive, m.archive, 0, 1u << 24, &share_archive_);
-    spread_weights(seed_, kFieldSparkRate, spreads_[0], node_x_, node_y_, W, &spark_w_);
+    spread_weights(map_seed_, kFieldSparkRate, spreads_[0], node_x_, node_y_, W, &spark_w_);
     ecpu_w_.clear();
     if (m.e_share > 0) // Phase 9c: E-rich and E-poor sites (res.ecpu), the share capped at all of them
-        spread_weights(seed_, kFieldEcpu, spreads_[6], node_x_, node_y_, W, &ecpu_w_);
+        spread_weights(map_seed_, kFieldEcpu, spreads_[6], node_x_, node_y_, W, &ecpu_w_);
 }
 
 // Signal paths (Phase 4, design.md 6.10): from each source, a breadth-first
@@ -1053,9 +1068,9 @@ void World::land_at(u64 tick, Array<u8>* mask) {
     }
     Array<double> z;
     if (drift_ > 0)
-        node_field3(seed_, kFieldLand, node_x_, node_y_, static_cast<double>(tick) * drift_, &z);
+        node_field3(map_seed_, kFieldLand, node_x_, node_y_, static_cast<double>(tick) * drift_, &z);
     else
-        node_field(seed_, kFieldLand, node_x_, node_y_, &z);
+        node_field(map_seed_, kFieldLand, node_x_, node_y_, &z);
     const double keep = floor(land_ * nodes_ + 0.5);
     for (u32 n = 0; n < nodes_; ++n) {
         const double rank = nodes_ > 1 ? floor((z[n] + 1.0) * (nodes_ - 1) * 0.5 + 0.5) : 0.0;
@@ -1184,7 +1199,7 @@ void World::rebuild_graph() {
     Array<u64> old_down;
     old_down.assign(down_until_.data(), down_until_.size());
 
-    assemble_graph(seed_, gp_, &pg_, live_.data());
+    assemble_graph(map_seed_, gp_, &pg_, live_.data());
     if (!build_edges(pg_.keys.data(), pg_.keys.size()))
         NOVA_FATAL("World::rebuild_graph: assembled graph failed validation");
     edge_latency_.assign(pg_.latency.data(), pg_.latency.size());
@@ -3362,7 +3377,7 @@ bool World::load_state(ByteReader& r, TextBuf* err, u32 version) {
                 soups_[n].init(&node_params_[n], seed_, n, life_[n]);
             }
             if (!landscape_) { // a landscape's paths are fixed: only the procedural graph is rebuilt
-                assemble_graph(seed_, gp_, &pg_, live_.data());
+                assemble_graph(map_seed_, gp_, &pg_, live_.data());
                 if (!build_edges(pg_.keys.data(), pg_.keys.size())) {
                     err->append("snapshot: invalid live graph");
                     return false;

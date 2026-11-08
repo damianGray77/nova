@@ -469,6 +469,66 @@ void test_world_distributions() {
     CHECK(bad.config().first_unused(&unused) && unused.eq("vary.soup_size"));
 }
 
+// world.seed, the map's own seed: a number or any text; empty, the seed's own
+// map (the world exactly as before). The same map seed with another seed is
+// the same map -- places, paths and bridges, every node's resources and
+// substrates -- and a different run; another map seed is another map.
+const char* land_world_with(TextBuf& t, u32 seed, const char* extra) {
+    t.clear();
+    t.append("seed = ");
+    t.append_u64(seed);
+    t.append("\n");
+    t.append(kLandWorld + strlen("seed = 7\n"));
+    t.append("substrate.enabled = true\n"); // (off in the tests' defaults: on, their levels are compared)
+    t.append(extra);
+    return t.c_str();
+}
+
+bool same_map(const World& a, const World& b) {
+    if (a.node_count() != b.node_count() || a.edge_count() != b.edge_count())
+        return false;
+    for (u32 e = 0; e < a.edge_count(); ++e)
+        if (a.edge_src(e) != b.edge_src(e) || a.edge_dst(e) != b.edge_dst(e) || a.edge_bridge(e) != b.edge_bridge(e) ||
+            a.edge_phase(e) != b.edge_phase(e))
+            return false;
+    for (u32 n = 0; n < a.node_count(); ++n) {
+        const SoupParams &p = a.node_params(n), &q = b.node_params(n);
+        if (a.land().x[n] != b.land().x[n] || a.land().y[n] != b.land().y[n] || p.size != q.size ||
+            p.millicores != q.millicores || p.gpus != q.gpus || p.npus != q.npus || p.spark_rate != q.spark_rate)
+            return false;
+        for (u32 t = 0; t < kSubstrateTypes && a.substrates(); ++t)
+            if (a.substrate_level(n, t) != b.substrate_level(n, t))
+                return false;
+    }
+    return true;
+}
+
+void test_map_seed() {
+    CHECK(map_seed_from(Str(), 7) == 7);
+    CHECK(map_seed_from(Str("12345"), 7) == 12345);
+    CHECK(map_seed_from(Str("18446744073709551615"), 7) == ~0ull);
+    const u64 h = map_seed_from(Str("an island"), 7);
+    CHECK(h == map_seed_from(Str("an island"), 99) && h != map_seed_from(Str("an islanc"), 7));
+    CHECK(map_seed_from(Str("12a"), 7) != 12 && map_seed_from(Str("18446744073709551616"), 7) != 1);
+
+    TextBuf t;
+    Run base, same, other_run, other_map, other_seed;
+    CHECK(make_run(base, land_world_with(t, 7, ""), 4));
+    CHECK(make_run(same, land_world_with(t, 7, "world.seed = 7\n"), 4));
+    CHECK(make_run(other_run, land_world_with(t, 8, "world.seed = 7\n"), 4));
+    CHECK(make_run(other_map, land_world_with(t, 7, "world.seed = an island\n"), 4));
+    CHECK(make_run(other_seed, land_world_with(t, 8, ""), 4));
+    CHECK(base.world().substrates()); // (so their levels are compared too)
+    CHECK(same_map(base.world(), same.world()) && same_map(base.world(), other_run.world()));
+    CHECK(!same_map(base.world(), other_map.world()) && !same_map(base.world(), other_seed.world()));
+    CHECK(other_run.world().map_seed() == 7 && other_run.world().seed() == 8);
+    base.run_until(60);
+    same.run_until(60);
+    other_run.run_until(60);
+    CHECK_EQ_U64(same.world().hash(), base.world().hash()); // world.seed = seed: the world as before
+    CHECK(other_run.world().hash() != base.world().hash());  // the same map, another run
+}
+
 // stats.nodes_every: node rows every Nth window, each covering every tick
 // since the last; the end writes what's owed.
 void test_nodes_every() {
@@ -524,5 +584,6 @@ void suite_landscape() {
     test_world_determinism();
     test_world_bridges_and_lifecycle();
     test_world_distributions();
+    test_map_seed();
     test_nodes_every();
 }

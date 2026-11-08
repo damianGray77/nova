@@ -760,6 +760,58 @@ void test_page_render() {
     delete r;
 }
 
+// A landscape's map on the page, under "The landscape"; "new map" (there, and
+// beside world.seed) gives world.seed a fresh number and the check generates
+// that map; on a read-only page there is no button and nothing changes.
+void test_page_new_map() {
+    PageRig* r = new PageRig;
+    const char* const land = "seed = 7\n"
+                             "world.model = soup\n"
+                             "world.graph = landscape\n"
+                             "world.nodes = 120\n"
+                             "land.resolution = 64\n"
+                             "world.soup_size = 2048\n"
+                             "world.millicores = 1000\n"
+                             "run.ticks = 50\n";
+    CHECK(r->start(land));
+    {
+        const SettingsCheck& ch = r->page.check();
+        CHECK(ch.landscape && ch.land.built && ch.land_x.size() == 120 && ch.land_paths.size() > 0 &&
+              ch.land_cells.size() == static_cast<usize>(ch.land.raster_w) * ch.land.raster_h);
+    }
+    CHECK(r->page.map_rect().w > 100 && r->page.map_rect().h > 20 && r->page.new_map_button().w > 0);
+    CHECK(r->is("world.seed", ""));
+    r->canvas.flush();
+    CHECK(colours(r->canvas) >= 16);
+    const u32 gen0 = r->page.check().land_gen;
+    const float x0 = r->page.check().land_x[0];
+    const Rect b = r->page.new_map_button();
+    r->click(b.x + b.w / 2, b.y + b.h / 2);
+    char s1[32];
+    const Str v1 = r->page.shown(r->key("world.seed"));
+    snprintf(s1, sizeof s1, "%.*s", static_cast<int>(v1.n), v1.p);
+    u64 n1 = 0;
+    CHECK(v1.n > 0 && parse_u64(v1, &n1));
+    CHECK(r->page.check().land_gen != gen0 && r->page.check().land.built);
+    CHECK(r->page.check().land_x.size() == 120 && r->page.check().land_x[0] != x0); // another map
+    // Beside the setting: the control's right end is its button.
+    r->show("World and land");
+    const Rect fc = r->ctl("world.seed");
+    r->click(fc.right() - 20, fc.y + fc.h / 2);
+    const Str v2 = r->page.shown(r->key("world.seed"));
+    CHECK(v2.n > 0 && !v2.eq(s1));
+    // A typed seed, words and all, is the map's (the run's seed unchanged).
+    CHECK(r->set("world.seed", "an island"));
+    CHECK(r->page.check().land.built && r->is("seed", "7"));
+    // Read-only: no button, and new_map changes nothing.
+    r->page.set_mode(kSetupArchive, "runs\\finished");
+    r->draw();
+    CHECK(r->page.new_map_button().w == 0);
+    r->page.new_map();
+    CHECK(r->is("world.seed", "an island"));
+    delete r;
+}
+
 } // namespace
 
 void setup_page_tests() {
@@ -769,4 +821,5 @@ void setup_page_tests() {
     test_page_save_load();
     test_page_start_hash();
     test_page_render();
+    test_page_new_map();
 }

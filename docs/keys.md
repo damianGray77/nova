@@ -9,7 +9,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 - **Families:** a key with a `<placeholder>` stands for one setting per member listed.
 - **Needs:** the switch the setting depends on; it does nothing while that is off.
 
-359 settings, 83 of them from 14 families; 11 hidden (tests and demos).
+360 settings, 83 of them from 14 families; 11 hidden (tests and demos).
 
 ## Contents
 
@@ -63,7 +63,8 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 
 | Key | Kind | Default | Range | Setting |
 |---|---|---|---|---|
-| `seed` | whole | 1 | at least 0 | **Seed**. The world's seed: everything random in the run follows from it. |
+| `seed` | whole | 1 | at least 0 | **Seed**. The world's seed: everything random in the run follows from it (and the map too, unless world.seed is set). |
+| `world.seed` | text | (empty) | text | **Map seed**. The map's own seed, like a game's world seed: where the nodes are, their paths and bridges, the land, the substrates and how resources and sparks are spread. A number, or any text (hashed to one); empty: the map follows seed. Set, seed varies what happens on the same map. |
 | `world.model` | choice | demo | demo, soup | **Model**. soup: organisms in memory, the real model; demo: the Phase 0 test world of parcels. |
 | `world.nodes` | whole | 64 | 1 to 1000000 | **Nodes**. Nodes in the world: sites that each run a soup. |
 | `world.graph` | choice | ring | ring, procedural, landscape | **Graph**. How nodes connect: a ring plus random chords, a procedural graph of near neighbours, or a landscape generated like a game level. |

@@ -232,7 +232,7 @@ void check_settings(Str config_text, SettingsCheck* out, FrontEndReader front_en
             key_set_value_hook(nullptr);
             g_out = nullptr;
             land = w->landscape();
-            land_seed = w->seed();
+            land_seed = w->map_seed(); // (world.seed, else seed)
             lp = w->land_params();
             subs = w->substrates(); // (docs/world-plan.md W2: read before the check returns)
             sp = w->substrate_params();
@@ -319,6 +319,12 @@ void check_settings(Str config_text, SettingsCheck* out, FrontEndReader front_en
         if (!out->land_cached || out->land_seed != land_seed || !same_land(out->land_params, lp) ||
             out->land_subs != subs || (subs && !same_subs(out->land_sub_params, sp))) {
             out->land = LandSummary{};
+            ++out->land_gen;
+            out->land_cells.clear();
+            out->land_x.clear();
+            out->land_y.clear();
+            out->land_paths.clear();
+            out->land_bridge.clear();
             Landscape* L = new Landscape;
             TextBuf why;
             const double t0 = clock_seconds();
@@ -328,6 +334,20 @@ void check_settings(Str config_text, SettingsCheck* out, FrontEndReader front_en
                 out->land.substrates = subs; // (nova land's count, docs/world-plan.md W8)
                 out->land.substrates_distinct = subs ? distinct_substrates(land_seed, sp, *L) : 0;
                 out->land.ms = (clock_seconds() - t0) * 1000.0;
+                // The map, for the page's picture.
+                out->land_cells.assign(L->cell_mass.data(), L->cell_mass.size());
+                for (usize i = 0; i < L->x.size(); ++i) {
+                    out->land_x.push(static_cast<float>(L->x[i]));
+                    out->land_y.push(static_cast<float>(L->y[i]));
+                }
+                for (usize e = 0; e < L->keys.size(); ++e) {
+                    const u32 a = static_cast<u32>(L->keys[e] >> 32), b = static_cast<u32>(L->keys[e]);
+                    if (a >= b)
+                        continue; // (both directions are listed: each path once)
+                    out->land_paths.push(a);
+                    out->land_paths.push(b);
+                    out->land_bridge.push(L->bridge[e]);
+                }
             } else {
                 out->land.built = false;
                 out->land_why.append(why.view());

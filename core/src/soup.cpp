@@ -638,6 +638,12 @@ void Soup::init(const SoupParams* p, u64 seed, u32 node, u32 life, const Ruins* 
     writes_ = 0;
     collapse_ = false;
     hazard_mult_ = 1.0;
+    // The allocator's "no room of this length" cache: a new life's memory is
+    // all waste, so nothing an earlier life noted holds (kept, a reborn node
+    // refused its first allocations that long until a codon was freed).
+    free_epoch_ = 0;
+    fail_epoch_ = ~0ull;
+    fail_len_ = 0;
     // Ruins of an earlier life (Damian): laid over the new soup where the
     // sizes overlap, stamps and all, then weathered by each store's rot rate
     // over the fallow time (a Poisson process of bit flips, as rot itself is;
@@ -3911,6 +3917,13 @@ bool Soup::load(ByteReader& r, TextBuf* err, u32 version) {
         }
     }
     collapse_ = false; // a snapshot is taken after the barrier applied any collapse
+    // The allocator's "no room of this length" cache describes the memory it
+    // was noted in. A soup that ran (or was built) before this load could
+    // keep one that, with its epoch, would refuse allocations this memory has
+    // room for: it starts empty, as it does in a new soup.
+    free_epoch_ = 0;
+    fail_epoch_ = ~0ull;
+    fail_len_ = 0;
     // Rebuild the derived structures, then demand every invariant.
     used_.resize((static_cast<usize>(n) + 63) / 64);
     used_.fill(0);

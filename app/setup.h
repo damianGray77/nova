@@ -97,6 +97,10 @@ class SetupPage {
     }
     // A message in the bar (a file saved, a start refused, ...).
     void set_note(const char* text, bool bad = false);
+    // A new map: world.seed (the map's seed) to a fresh number, so the check
+    // generates the world's map again and the page draws it (the "new map"
+    // buttons). Nothing while read-only.
+    void new_map();
     // A headless run started from here, with its folder ("" none).
     void set_headless(const char* folder);
 
@@ -168,6 +172,10 @@ class SetupPage {
     bool row_rect(usize k, Rect* r) const;
     bool control_rect(usize k, Rect* r) const;
     const Rect& start_button(bool headless) const { return headless ? start_headless_ : start_window_; }
+    // The landscape's picture and its "new map" button in the last frame
+    // (w = 0: not drawn).
+    const Rect& map_rect() const { return map_r_; }
+    const Rect& new_map_button() const { return new_map_r_; }
     i32 scroll() const { return scroll_; }
 
   private:
@@ -280,6 +288,12 @@ class SetupPage {
     // read clearly (a greyed-out one is fainter).
     bool ro_row_ = false;
     u32 off_col() const;
+
+    // the landscape's picture: its cells coloured, for the check's landscape land_gen
+    Array<u32> map_img_;
+    u32 map_gen_ = 0;
+    Rect map_r_, new_map_r_;
+    u64 new_maps_ = 0; // new_map's count (mixed into its seeds)
 
     // layout
     Rect bar_, groups_r_, list_r_, rows_r_, check_r_, start_window_, start_headless_;
