@@ -200,7 +200,7 @@ struct RoleSoup {
 };
 
 // Three predators each among 40 surfaceless prey, three parasites each beside
-// four hosts whose surface their key fits, and three copiers (the 8-codon
+// four wounded hosts whose surface their template fits, and three copiers (the 8-codon
 // sketch), far apart in a 16K soup; every living body followed every round
 // (10 ticks) for 60 ticks.
 bool role_soup(RoleSoup& f, Array<ProfileSample>* out) {
@@ -221,7 +221,8 @@ bool role_soup(RoleSoup& f, Array<ProfileSample>* out) {
     }
     for (u32 g = 0; g < 3; ++g) {
         const u32 at = 4000 + 1000 * g;
-        const u32 b = plant(f.s, at, "ZERO INC INC INC INC INC INC ROT ZERO INC INC INJECT NOP0 NOP0 NOP0 NOP0", 40);
+        // (5 codons: its hosts must be twice its size, docs/inject-plan.md M6)
+        const u32 b = plant(f.s, at, "INJECT NOP0 NOP0 NOP0 NOP0", 40);
         if (b == kNone)
             return false;
         f.para[g] = f.s.body(b).serial;
@@ -327,7 +328,12 @@ void test_roles() {
     CHECK(same);
 
     // Clusters: the three kinds land in three different ones, named for them.
+    // (k from 5 up: since a parasite moves in once and lives on inside
+    // (docs/inject-plan.md), the few predator and parasite samples are such
+    // outliers that the silhouette alone would settle on k = 3 and lump the
+    // copiers in with the idle prey.)
     RolesOptions o;
+    o.kmin = 5;
     RolesReport r;
     CHECK(roles_build(rows, o, &r, &err));
     u32 np = 0, ni = 0, nc = 0;

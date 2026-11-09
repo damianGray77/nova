@@ -143,10 +143,13 @@ void soup_gate(const char* name, const char* cfg, u32 nodes, Rules rules) {
         CHECK(s.cpu_released > 0 && s.mem_released > 0);
         CHECK(s.engulf_tries > 0 && s.inject_tries > 0 && s.engulfs > 0 && s.injects > 0);
     }
+    // (The 1b world's lineages came from INJECT copies, which INJECT no longer
+    // makes, docs/inject-plan.md M1; its COPY replicator doesn't establish at
+    // its heat, so it has no gate event. The other worlds' events are compared.)
     if (rules == Rules::phase1a)
         CHECK(s.upkeep == 0 && s.cpu_worn == 0 && s.gpu_elements == 0 && s.npu_macs == 0);
     else
-        CHECK(s.upkeep > 0 && s.cpu_worn > 0 && t1.events > 0);
+        CHECK(s.upkeep > 0 && s.cpu_worn > 0 && (t1.events > 0 || rules == Rules::phase1b));
     if (rules == Rules::gpu)
         CHECK(s.gpu_elements > 0 && s.gpu_worn > 0);
     if (rules == Rules::accel || rules == Rules::async)

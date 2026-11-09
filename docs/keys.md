@@ -9,7 +9,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 - **Families:** a key with a `<placeholder>` stands for one setting per member listed.
 - **Needs:** the switch the setting depends on; it does nothing while that is off.
 
-383 settings, 83 of them from 14 families; 11 hidden (tests and demos).
+384 settings, 83 of them from 14 families; 11 hidden (tests and demos).
 
 ## Contents
 
@@ -309,10 +309,12 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 |---|---|---|---|---|
 | `contact.range` | whole | 256 | 0 to 16777216 (max computed) | **Contact range**. The farthest from the attacker's IP an ENGULF or INJECT reaches a surface (at most the node's size). |
 | `contact.cost_base` | whole | 8 | 0 to 1000000 | **Contact cost**. Instructions an ENGULF or INJECT attempt costs, success or not. |
-| `contact.cost_per_codon` | number | 1 | 0 to 1000000 | **Contact cost per codon**. ... plus this per codon an ENGULF moves. An INJECT pays each codon it writes what a COPY of it costs (classic: an instruction; a timed table: a load and a store at their tiers, then it waits idle as long as a full core takes, at least a tick; Damian, 2026-11-09). |
-| `contact.inject_room` | number | 1 | 0 to 1000000 | **INJECT room**. INJECT fails unless the host block is at least this x the payload (0 = off). |
-| `engulf.bite` | switch | true | true or false | **ENGULF bites**. ENGULF takes a bite of CX codons, of raw material or of a body; else it swallows whole prey (Phase 9). With bites a NOP surface no longer shields a body, and INJECT lands only through an open end (a wound: an end of the host's code whose outermost codon isn't a NOP), just inside it, starting a parasite thread there (docs/bites-plan.md). |
+| `contact.cost_per_codon` | number | 1 | 0 to 1000000 | **Contact cost per codon**. ... plus this per codon an ENGULF or an INJECT moves; with a timed table either lasts its codons at engulf.codons_per_tick, its thread busy (docs/inject-plan.md M7: INJECT priced like a bite). |
+| `contact.inject_room` | number | 1 | 0 to 1000000 | **INJECT room**. INJECT fails unless the host's code (its first block) is at least this x the injector's genome (0 = off). |
+| `contact.inject_ratio` | number | 2 | 0 to 1000000 | **INJECT size ratio**. INJECT fails unless the host owns at least this x the memory the injector owns: a program moves only into a much bigger one, so injecting its own bud fails (docs/inject-plan.md M6, Damian; 0 = off). |
+| `engulf.bite` | switch | true | true or false | **ENGULF bites**. ENGULF takes a bite of CX codons, of raw material or of a body; else it swallows whole prey (Phase 9). With bites a NOP surface no longer shields a body, and INJECT lands only through an open end (a wound: an end of the host's code whose outermost codon isn't a NOP), moving the injector in just inside it (docs/bites-plan.md, docs/inject-plan.md). |
 | `engulf.bite_share` | number | 0.3333333333333333 | 1e-06 to 1 | **Bite size**. A bite takes at most this share of the biter's own size (rounded up): prey no bigger than that is swallowed whole, a bigger one loses a piece from its nearest end (1 = up to the biter's whole size). Needs `engulf.bite`. |
+| `engulf.digest` | whole | 2 | 0 to 1000000 | **Digestion**. Codons a body swallowed whole by a bite loses to its eater a tick. It lives on meanwhile, and may INJECT itself into its eater to stop the digestion (docs/inject-plan.md S, Damian; 0 = swallowed at once, as before). Needs `engulf.bite`. |
 | `engulf.tissue` | switch | true | true or false | **NOPs as tissue**. A bitten body loses cores in proportion to the code taken, not counting NOPs: padding is tissue that protects the code and the cores inside (off: in proportion to every codon taken). Needs `engulf.bite`. |
 | `engulf.corpse_cost` | number | 0.9 | 0 to 1 | **Corpse bite cost**. An ENGULF charges each codon of a dead program's fresh remnant (stamped by the salvage rule, not yet decayed to INERT), and each codon of a dormant program, this share of a raw codon's cost, in instructions per codon and, with a timed table, in the bite's time: scavenging pays a little better than vent material, and a sleeper is a little cheaper to eat than a waking program. Nothing is made (1 = the same, as before 2026-11-08: older files keep that, legacy.h). |
 | `salvage.ratio` | number | 4 | 0 to 1000000 | **Salvage ratio**. A program takes another's remnants intact only up to this x its own genome length; bigger code comes through in fragments (0 = off). |
@@ -427,7 +429,6 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `detect.similarity` | number | 0.75 | above 0, at most 1 | **Similarity**. How closely a daughter must match her parent's block for an inheritance link. Needs `detect.enabled`. |
 | `detect.shift` | whole | 8 | 0 to 64 | **Alignment shift**. A DIVIDE daughter is also compared with her parent shifted by up to this many codons either way, and rotated where her first 4 codons appear in it (descent, not likeness: disasters plan X12). Needs `detect.enabled`. |
 | `detect.genebank_threshold` | whole | 2 | 1 to 1000000 | **Genebank threshold**. A genotype is saved to the genebank when this many copies of it live at once. Needs `detect.enabled`. |
-| `detect.inject` | switch | true | true or false | **INJECT links**. An INJECT that leaves the victim matching the injector is an inheritance link. Needs `detect.enabled`. |
 | `detect.written` | switch | true | true or false | **Written codons only**. A DIVIDE link counts only the codons the parent wrote into the daughter since her ALLOC. Needs `detect.enabled`. |
 | `detect.gate_depth` | whole | 2 | 1 to 1000000 | **Gate depth**. The replicator gate: a lineage with a member this many generations deep ... Needs `detect.enabled`. |
 | `detect.gate_alive` | whole | 2 | 1 to 1000000 | **Gate alive**. ... and this many members alive at once. Needs `detect.enabled`. |

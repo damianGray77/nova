@@ -2,7 +2,7 @@
 
 // Versioned binary snapshots (design.md 7.1 H).
 //
-// Format v8 (only v8 is read: see kSnapshotVersion), all integers little-endian:
+// Format v9 (only v9 is read: see kSnapshotVersion), all integers little-endian:
 //   "NOVASNAP"   8-byte magic
 //   u32          format version (kSnapshotVersion)
 //   u32          flags (0)
@@ -56,8 +56,11 @@ namespace nova {
 // changed. Older snapshots are refused (Damian: "old run data is incompatible"),
 // and with them the legacy defaults above (legacy.h is gone); the loader's
 // branches for older sections are never taken now.
-inline constexpr u32 kSnapshotVersion = 8;
-inline constexpr u32 kSnapshotOldest = 8;
+// v9 (2026-11-09, docs/inject-plan.md): guests (a host, kind and region per
+// body slot) and stomachs, after the dormancy section. INJECT moves a program
+// into its host; swallowed bodies are digested. Older snapshots are refused.
+inline constexpr u32 kSnapshotVersion = 9;
+inline constexpr u32 kSnapshotOldest = 9;
 
 void snapshot_write(const World& world, const Config& cfg, ByteWriter& out);
 

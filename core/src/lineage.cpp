@@ -10,7 +10,6 @@ bool detect_params_from_config(Config& cfg, DetectParams* p) {
     p->similarity = key_f64(cfg, "detect.similarity");
     p->shift = key_u32(cfg, "detect.shift"); // X12: DIVIDE alignments shifted up to this many codons each way
     p->genebank_threshold = key_u32(cfg, "detect.genebank_threshold");
-    p->inject = key_flag(cfg, "detect.inject");
     p->written = key_flag(cfg, "detect.written");
     p->gate_depth = key_u32(cfg, "detect.gate_depth");
     p->gate_alive = key_u32(cfg, "detect.gate_alive");
@@ -25,13 +24,14 @@ void Lineages::init(const DetectParams* p, u32 node) {
     p_ = p;
     node_ = node;
     next_id_ = 1;
-    links_ = inject_links_ = gpu_links_ = founded_ = detections_ = gpu_detections_ = 0;
+    links_ = parasite_links_ = gpu_links_ = founded_ = detections_ = gpu_detections_ = 0;
     npu_detections_ = colonisations_ = disk_detections_ = signal_detections_ = defended_detections_ = 0;
     sleep_detections_ = parasite_detections_ = healer_detections_ = 0;
     for (u32 i = 0; i < kOriginCount; ++i)
         founded_by_[i] = 0;
     max_depth_ever_ = 0;
     tags_.clear();
+    guest_tags_.clear();
     table_.clear();
     colonised_.clear();
     written_.clear();
@@ -43,6 +43,7 @@ void Lineages::init(const DetectParams* p, u32 node) {
 void Lineages::reset(usize block_slots, u32 soup_size) {
     tags_.resize(block_slots);
     tags_.fill(BlockTag{});
+    guest_tags_.clear();
     written_.resize((static_cast<usize>(soup_size) + 63) / 64);
     written_.fill(0);
     gpu_written_.resize(written_.size());
@@ -79,8 +80,27 @@ void Lineages::on_free_block(u32 k, u64 tick) {
 }
 
 void Lineages::join(u32 k, const u8* code, u32 len, u64 tick, u64 lineage, u32 depth, u64 parent) {
+    join_tag(&tags_[k], code, len, tick, lineage, depth, parent);
+}
+
+// A lineage founded now by `body` (kNone: unknown), whose code is
+// [code, code + len): its id. The founder joins it next (join, join_tag).
+u64 Lineages::found(const Soup& s, u32 body, const u8* code, u32 len, u64 tick) {
+    const u64 id = (static_cast<u64>(node_) << 32) | next_id_++;
+    ++founded_;
+    LineageInfo& L = table_.get_or_insert(id);
+    L = LineageInfo{};
+    L.founded = tick;
+    L.founder_len = len;
+    L.founder_genotype = genotype_hash(code, len);
+    L.founder_origin = body != kNone ? s.origin(body) : kOriginUnknown; // W7
+    ++founded_by_[L.founder_origin < kOriginCount ? L.founder_origin : kOriginUnknown];
+    return id;
+}
+
+void Lineages::join_tag(BlockTag* tag, const u8* code, u32 len, u64 tick, u64 lineage, u32 depth, u64 parent) {
     const u64 g = genotype_hash(code, len);
-    tags_[k] = BlockTag{g, tick, lineage, depth, 0};
+    *tag = BlockTag{g, tick, lineage, depth, 0};
     LineageInfo* L = table_.find(lineage);
     NOVA_ASSERT(L);
     ++L->alive;
@@ -109,8 +129,37 @@ void Lineages::join(u32 k, const u8* code, u32 len, u64 tick, u64 lineage, u32 d
     }
 }
 
-void Lineages::leave(u32 k, u64 tick) {
-    BlockTag& t = tags_[k];
+void Lineages::leave(u32 k, u64 tick) { leave_tag(&tags_[k], tick); }
+
+// docs/inject-plan.md M1: a program moving into its host keeps its
+// membership on the body until it owns a block again (or dies).
+void Lineages::on_move_in(u32 guest, u32 k) {
+    if (guest_tags_.size() <= guest)
+        guest_tags_.resize(static_cast<usize>(guest) + 1);
+    guest_tags_[guest] = k < tags_.size() ? tags_[k] : BlockTag{};
+    if (k < tags_.size())
+        tags_[k] = BlockTag{}; // (freeing the block then leaves nothing)
+}
+
+void Lineages::on_guest_freed(const Soup& s, u32 guest, u32 k, u64 tick) {
+    (void)s;
+    (void)tick;
+    if (guest >= guest_tags_.size() || guest_tags_[guest].lineage == 0)
+        return;
+    if (k >= tags_.size())
+        tags_.resize(static_cast<usize>(k) + 1);
+    tags_[k] = guest_tags_[guest];
+    guest_tags_[guest] = BlockTag{};
+}
+
+void Lineages::on_guest_gone(const Soup& s, u32 guest, u64 tick) {
+    (void)s;
+    if (guest < guest_tags_.size() && guest_tags_[guest].lineage != 0)
+        leave_tag(&guest_tags_[guest], tick);
+}
+
+void Lineages::leave_tag(BlockTag* tp, u64 tick) {
+    BlockTag& t = *tp;
     const u64 id = t.lineage;
     bank_.release(t.genotype);
     t = BlockTag{};
@@ -244,13 +293,6 @@ void Lineages::on_divide(const Soup& s, u32 p, u32 k, u64 tick) {
         link(s, p, k, tick, kViaDivide, 2 * by_gpu > match);
 }
 
-void Lineages::on_inject(const Soup& s, u32 p, u32 v, u32 match, u64 tick) {
-    if (!p_->inject || p == kNone || p == v)
-        return;
-    if (similar(match, s.block(p).len, s.block(v).len))
-        link(s, p, v, tick, kViaInject, false);
-}
-
 void Lineages::on_npu(const Soup& s, u32 k, u64 tick) {
     if (k == kNone || k >= tags_.size() || tags_[k].lineage == 0)
         return;
@@ -344,26 +386,13 @@ void Lineages::push_event(u32 kind, u64 tick, u64 lineage, const LineageInfo& L,
 
 void Lineages::link(const Soup& s, u32 p, u32 k, u64 tick, u32 via, bool gpu) {
     const Block& P = s.block(p);
-    const Block& D = s.block(k);
     const u8* m = s.mem();
     ++links_;
-    if (via == kViaInject)
-        ++inject_links_;
     const usize need = static_cast<usize>(max_of(p, k)) + 1;
     if (tags_.size() < need)
         tags_.resize(need);
-    if (tags_[p].lineage == 0) { // the parent founds a lineage
-        const u64 id = (static_cast<u64>(node_) << 32) | next_id_++;
-        ++founded_;
-        LineageInfo& L = table_.get_or_insert(id);
-        L = LineageInfo{};
-        L.founded = tick;
-        L.founder_len = P.len;
-        L.founder_genotype = genotype_hash(m + P.start, P.len);
-        L.founder_origin = P.body != kNone ? s.origin(P.body) : kOriginUnknown; // W7
-        ++founded_by_[L.founder_origin < kOriginCount ? L.founder_origin : kOriginUnknown];
-        join(p, m + P.start, P.len, tick, id, 0, 0);
-    }
+    if (tags_[p].lineage == 0) // the parent founds a lineage
+        join(p, m + P.start, P.len, tick, found(s, P.body, m + P.start, P.len, tick), 0, 0);
     adopt(s, tags_[p], P.body, k, tick, via, gpu);
 }
 
@@ -375,10 +404,9 @@ void Lineages::adopt(const Soup& s, BlockTag parent, u32 parent_body, u32 k, u64
     LineageInfo* L = table_.find(parent.lineage);
     if (!L)
         return;
-    if (via == kViaInject)
-        ++L->inject_links;
-    else
-        ++L->divide_links; // (a parasite's DIVIDE too)
+    ++L->divide_links;
+    if (via == kViaParasite)
+        ++L->parasite_links;
     if (gpu) {
         ++gpu_links_;
         ++L->gpu_links;
@@ -419,39 +447,37 @@ void Lineages::adopt(const Soup& s, BlockTag parent, u32 parent_body, u32 k, u64
     }
 }
 
-// docs/bites-plan.md I3, I5: the parasite thread carries the injector's tag
-// (none if the injector isn't a lineage member) and its payload's place.
-void Lineages::on_parasite(const Soup& s, u32 cpu, u32 injector_block, u32 host_block, u32 off, u32 len) {
-    (void)s;
-    (void)host_block;
-    if (cpu_tags_.size() <= cpu)
-        cpu_tags_.resize(static_cast<usize>(cpu) + 1);
-    ParasiteTag& t = cpu_tags_[cpu];
-    t.tag = injector_block < tags_.size() ? tags_[injector_block] : BlockTag{};
-    t.off = off;
-    t.len = len;
-}
-
-// A DIVIDE by a parasite thread: the daughter joins the injector's lineage
-// if she descends from the payload (as a DIVIDE daughter from her parent).
+// A DIVIDE by a parasite (docs/inject-plan.md M4): the daughter joins its
+// lineage (the tag it carries on its body since it moved in, on_move_in) if
+// she descends from its code, as a DIVIDE daughter from her parent; a
+// parasite outside any lineage founds one then, as a parent does.
 void Lineages::on_divide_parasite(const Soup& s, u32 cpu, u32 k, u64 tick) {
-    if (cpu >= cpu_tags_.size() || !s.cpu(cpu).parasite)
-        return;
-    const ParasiteTag& t = cpu_tags_[cpu];
-    if (t.tag.lineage == 0 || !table_.find(t.tag.lineage))
-        return; // an injector outside any lineage, or one ended here meanwhile
     const u32 body = s.cpu(cpu).body;
-    if (body == kNone || s.body(body).blocks == kNone || s.body(body).blocks == k)
+    if (body == kNone || !s.is_parasite(body))
         return;
-    const Block& H = s.block(s.body(body).blocks);
-    if (t.off >= H.len)
-        return; // the host shrank past the payload
-    const u32 len = t.off + t.len <= H.len ? t.len : H.len - t.off;
+    if (guest_tags_.size() <= body)
+        guest_tags_.resize(static_cast<usize>(body) + 1);
+    if (guest_tags_[body].lineage != 0 && !table_.find(guest_tags_[body].lineage))
+        return; // (its lineage ended here meanwhile: not while it was a member)
+    // M2: the parasite's code is its region in its host's first block,
+    // clipped to what is left of that block.
+    const u32 host = s.host_of(body);
+    if (host == kNone || s.body(host).blocks == kNone || s.body(host).blocks == k)
+        return;
+    const Block& H = s.block(s.body(host).blocks);
+    const u32 lo = max_of<u32>(s.guest_at(body), H.start);
+    const u32 hi = min_of<u32>(s.guest_at(body) + s.guest_len(body), H.start + H.len);
+    if (lo >= hi)
+        return; // the host shrank past it
     u32 match = 0, by_gpu = 0;
-    if (!descends_from(s, H.start + t.off, len, k, &match, &by_gpu))
+    if (!descends_from(s, lo, hi - lo, k, &match, &by_gpu))
         return;
     ++links_;
-    adopt(s, t.tag, kNone, k, tick, kViaParasite, false);
+    ++parasite_links_;
+    const u8* m = s.mem();
+    if (guest_tags_[body].lineage == 0) // the parasite founds a lineage
+        join_tag(&guest_tags_[body], m + lo, hi - lo, tick, found(s, body, m + lo, hi - lo, tick), 0, 0);
+    adopt(s, guest_tags_[body], kNone, k, tick, kViaParasite, false);
 }
 
 // B5: the detect.repairs-th open end a gated lineage's members closed with a

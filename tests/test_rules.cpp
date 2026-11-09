@@ -13,9 +13,10 @@ namespace {
 
 // The busy soup world (helpers.h) at tick 300 under the defaults, and with
 // Phase 1a's rules (kPhase1aRules). Re-pinned 2026-11-08 for docs/bites-plan.md
-// (INJECT only through wounds, bleeding, bites without immunity).
+// (INJECT only through wounds, bleeding, bites without immunity); the second
+// again 2026-11-09 for docs/inject-plan.md (INJECT moves the program).
 constexpr u64 kPinnedDefault = 0xf537de099f13cb24ull;
-constexpr u64 kPinnedPhase1aRules = 0x5245dc23336a58f8ull;
+constexpr u64 kPinnedPhase1aRules = 0xff50968554057dcbull;
 
 // Heat and hazards off; upkeep left to each test.
 const char* const kCalm = "heat.enabled = false\nhazard.copy = 0\nhazard.flaw = 0\nhazard.rot = 0\n";
@@ -274,23 +275,29 @@ void spark_knobs() {
     CHECK(!run.schedule_knob(20, "detect.similarity", "0.5", &err));
 }
 
-// INJECT's criteria (docs/bites-plan.md I1-I3, Damian): it lands only through
-// an open end of the host's code (an end whose outermost codon isn't a NOP: a
-// wound), just inside it, and starts a parasite thread there; the host must be
-// big enough to fit the payload (design.md 6.6), or it fails leaving the host
-// untouched.
+// INJECT's criteria (docs/inject-plan.md M1, M2, M6, M7; docs/bites-plan.md
+// I1): it lands only through an open end of the host's code (an end whose
+// outermost codon isn't a NOP: a wound), only on a host owning at least
+// contact.inject_ratio (2) x the injector's memory, whose code has room for
+// the injector's genome. The whole injector moves in: its genome overwrites
+// the host's codons just inside the wound, its thread carries on there as a
+// parasite, and the memory it leaves is zeros. A failure leaves both as they
+// were and costs the attempt.
 struct Injection {
-    bool ok;        // the INJECT succeeded
-    u32 cost;       // instructions charged
-    bool intact;    // the host's code is unchanged
-    u8 before[16];  // the host's code before
-    u8 after[16];   // the host's code afterwards
-    u8 inj[16];     // the injector's code
-    u32 threads;    // the host's threads afterwards
-    u32 parasite_ip; // where its parasite thread starts (kNone: none)
+    bool ok;          // the INJECT succeeded
+    u32 cost;         // instructions charged
+    bool intact;      // the host's code is unchanged
+    u8 before[16];    // the host's code before
+    u8 after[16];     // the host's code afterwards
+    u8 inj[16];       // the injector's code before
+    bool zeroed;      // the injector's old memory is zeros and nobody's
+    bool parasite;    // the injector is its host's parasite now
+    u32 ip;           // the injector's thread's IP afterwards
+    u32 host_threads; // the host's own threads afterwards
+    bool sound;       // Soup::check passes
 };
 
-Injection inject_once(const char* injector, const char* host, u32 cx, const char* extra = "") {
+Injection inject_once(const char* injector, const char* host, const char* extra = "") {
     Fix f;
     TextBuf cfg;
     cfg.append(kCalm);
@@ -303,63 +310,65 @@ Injection inject_once(const char* injector, const char* host, u32 cx, const char
     u32 h = plant(f.s, 200, host, 100);
     if (a == kNone || h == kNone)
         return r;
-    u8 before[16];
-    const u32 len = f.s.block(f.s.body(h).blocks).len;
+    const u32 len = f.s.block(f.s.body(h).blocks).len, ilen = f.s.block(f.s.body(a).blocks).len;
     for (u32 i = 0; i < len && i < 16; ++i)
-        before[i] = f.s.mem()[200 + i];
+        r.before[i] = f.s.mem()[200 + i];
+    for (u32 i = 0; i < ilen && i < 16; ++i)
+        r.inj[i] = f.s.mem()[100 + i];
     f.s.begin_tick(0);
-    Cpu& c = f.s.cpu_mut(f.s.body(a).cpus);
-    c.cx = cx;
-    c.rh = 100;
-    r.cost = static_cast<u32>(f.s.run_cpu(f.s.body(a).cpus, 1));
+    const u32 ca = f.s.body(a).cpus;
+    r.cost = static_cast<u32>(f.s.run_cpu(ca, 1));
     r.ok = f.s.tally().injects == 1;
     r.intact = true;
-    for (u32 i = 0; i < 16; ++i)
-        r.inj[i] = f.s.mem()[100 + i];
     for (u32 i = 0; i < len && i < 16; ++i) {
-        r.before[i] = before[i];
         r.after[i] = f.s.mem()[200 + i];
-        r.intact = r.intact && f.s.mem()[200 + i] == before[i];
+        r.intact = r.intact && f.s.mem()[200 + i] == r.before[i];
     }
-    r.threads = f.s.body(h).ncpu;
-    r.parasite_ip = kNone;
-    for (u32 c2 = f.s.body(h).cpus; c2 != kNone; c2 = f.s.cpu(c2).next)
-        if (f.s.cpu(c2).parasite)
-            r.parasite_ip = f.s.cpu(c2).ip;
+    r.zeroed = true;
+    for (u32 i = 0; i < ilen; ++i)
+        r.zeroed = r.zeroed && f.s.mem()[100 + i] == 0 && f.s.owner_body(100 + i) == kNone;
+    r.parasite = f.s.is_parasite(a) && f.s.host_of(a) == h && f.s.body(a).blocks == kNone && f.s.body(a).alive;
+    r.ip = f.s.cpu(ca).ip;
+    r.host_threads = f.s.body(h).ncpu;
+    r.sound = soup_ok(f.s);
     return r;
 }
 
 void inject_rules() {
-    // A tail wound ("NOP1 INC INC INC": its high end isn't a NOP): the payload
-    // (the injector's first CX codons, from its read head) lands just inside
-    // it, the host's last two codons, and a parasite thread starts there.
-    Injection tail = inject_once("INJECT NOP0 INC INC", "NOP1 INC INC INC", 2);
-    CHECK(tail.ok && !tail.intact && tail.cost == 9 + 2);
-    CHECK(tail.after[0] == tail.before[0] && tail.after[1] == tail.before[1]);
-    CHECK(tail.after[2] == tail.inj[0] && tail.after[3] == tail.inj[1]); // INJECT NOP0: now sealed by its NOP0
-    CHECK(tail.threads == 2 && tail.parasite_ip == 202);
-    // A head wound: its first two codons.
-    Injection head = inject_once("INJECT NOP0 INC INC", "INC INC INC NOP1", 2);
-    CHECK(head.ok && head.after[0] == head.inj[0] && head.after[1] == head.inj[1]);
-    CHECK(head.after[3] == head.before[3] && head.parasite_ip == 200);
+    // A tail wound ("NOP1 INC ... INC": its high end isn't a NOP): the
+    // injector's 3-codon genome lands just inside it, the host's last three
+    // codons; its thread runs on there (at INC, past INJECT's template), the
+    // host's own thread is the only one the host has, and the injector's old
+    // memory is zeros. The price: the attempt (1 + contact.cost_base 8) and
+    // contact.cost_per_codon (1) per codon moved (M7).
+    Injection tail = inject_once("INJECT NOP0 INC", "NOP1 INC INC INC INC INC");
+    CHECK(tail.ok && !tail.intact && tail.cost == 9 + 3 && tail.sound);
+    CHECK(tail.after[0] == tail.before[0] && tail.after[2] == tail.before[2]);
+    CHECK(tail.after[3] == tail.inj[0] && tail.after[4] == tail.inj[1] && tail.after[5] == tail.inj[2]);
+    CHECK(tail.zeroed && tail.parasite && tail.ip == 205 && tail.host_threads == 1);
+    // A head wound: its first three codons.
+    Injection head = inject_once("INJECT NOP0 INC", "INC INC INC INC INC NOP1");
+    CHECK(head.ok && head.after[0] == head.inj[0] && head.after[1] == head.inj[1] && head.after[2] == head.inj[2]);
+    CHECK(head.after[5] == head.before[5] && head.ip == 202 && head.parasite && head.sound);
     // Blind or aimed, a host with an open end is open; one sealed by NOPs at
-    // both ends is closed, whatever the key (the surface key is gone).
-    CHECK(inject_once("INJECT INC INC INC", "INC INC INC INC", 2).ok);
-    CHECK(!inject_once("INJECT INC INC INC", "NOP1 INC INC NOP0", 2).ok);
-    CHECK(!inject_once("INJECT NOP0 INC INC", "NOP1 INC INC NOP0", 2).ok);
-    // The payload must fit: 5 codons into a 4-codon host fails, leaving it
-    // intact, and still costs the attempt; 4 fit.
-    Injection big = inject_once("INJECT NOP0 INC INC INC", "NOP1 INC INC INC", 5);
-    CHECK(!big.ok && big.intact && big.cost == 9 && big.threads == 1);
-    CHECK(inject_once("INJECT NOP0 INC INC INC", "NOP1 INC INC INC", 4).ok);
-    // contact.inject_room = 0: the payload is truncated to the host instead.
-    CHECK(inject_once("INJECT NOP0 INC INC INC", "NOP1 INC INC INC", 5, "contact.inject_room = 0\n").ok);
-    // room 2: the host must be twice the payload.
-    CHECK(!inject_once("INJECT NOP0 INC INC INC", "NOP1 INC INC INC", 3, "contact.inject_room = 2\n").ok);
-    CHECK(inject_once("INJECT NOP0 INC INC INC", "NOP1 INC INC INC", 2, "contact.inject_room = 2\n").ok);
-    // A host already at cpu.max_threads takes the code but starts no thread.
-    Injection full = inject_once("INJECT NOP0 INC INC", "NOP1 INC INC INC", 2, "cpu.max_threads = 1\n");
-    CHECK(full.ok && !full.intact && full.threads == 1 && full.parasite_ip == kNone);
+    // both ends is closed.
+    CHECK(inject_once("INJECT INC INC", "INC INC INC INC INC INC").ok);
+    CHECK(!inject_once("INJECT INC INC", "NOP1 INC INC INC INC NOP0").ok);
+    // M6 (Damian): the host must own twice the injector's memory. 5 codons
+    // against 3 fails, leaving both as they were, and costs the attempt.
+    Injection small = inject_once("INJECT NOP0 INC", "NOP1 INC INC INC INC");
+    CHECK(!small.ok && small.intact && small.cost == 9 && !small.parasite && small.ip == 102 && small.sound);
+    CHECK(inject_once("INJECT NOP0 INC", "NOP1 INC INC INC INC", "contact.inject_ratio = 1.5\n").ok);
+    // An equal-sized host (a bud) never qualifies, nor a smaller one.
+    CHECK(!inject_once("INJECT NOP0 INC", "NOP1 INC INC").ok);
+    // With the ratio off, the room rule: the host's code must hold the genome,
+    // 3 codons into 2 fails; contact.inject_room = 0 truncates it to the host.
+    CHECK(!inject_once("INJECT NOP0 INC", "NOP1 INC", "contact.inject_ratio = 0\n").ok);
+    Injection cut = inject_once("INJECT NOP0 INC", "NOP1 INC", "contact.inject_ratio = 0\ncontact.inject_room = 0\n");
+    CHECK(cut.ok && cut.after[0] == cut.inj[0] && cut.after[1] == cut.inj[1] && cut.zeroed && cut.sound);
+    // room 2: the host's code must be twice the genome.
+    CHECK(!inject_once("INJECT NOP0 INC", "NOP1 INC INC INC INC", "contact.inject_ratio = 0\ncontact.inject_room = 2\n").ok);
+    CHECK(inject_once("INJECT NOP0 INC", "NOP1 INC INC INC INC INC", "contact.inject_ratio = 0\ncontact.inject_room = 2\n").ok);
 }
 
 // Bad values for the new structural keys fail loudly.

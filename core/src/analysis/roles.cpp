@@ -16,21 +16,21 @@ namespace nova {
 namespace {
 
 const char* const kFeatureNames[kRoleFeatures] = {
-    "engulf_tries", "engulf_landed", "bites_waste", "inject_tries",  "inject_landed", "divides",   "dispersals",
-    "dormant",      "disk_compares", "disk_stores", "disk_loads",    "self_loads",    "emits",     "listens",
-    "gpu_ops",      "npu_ops",       "spawns",      "instructions",  "copy_share"};
+    "engulf_tries", "engulf_landed", "bites_waste", "inject_tries",  "inject_landed", "inside",    "divides",
+    "dispersals",   "dormant",       "disk_compares", "disk_stores", "disk_loads",    "self_loads", "emits",
+    "listens",      "gpu_ops",       "npu_ops",     "spawns",        "instructions",  "copy_share"};
 
 // The word a leading feature gives a cluster.
 const char* const kFeatureRole[kRoleFeatures] = {
-    "predator",  "predator",  "scavenger", "parasite", "parasite", "copier",   "wanderer", "wanderer",
+    "predator",  "predator",  "scavenger", "parasite", "parasite", "parasite", "copier",   "wanderer", "wanderer",
     "archivist", "archivist", "repairer",  "repairer", "signaller", "listener", "gpu user", "npu user",
     "spawner",   "busy",      "copier"};
 
 // The action behind each action feature (kRfSpawn: launches and threads).
 const u32 kFeatureAction[kRfSpawn] = {kPaEngulfTry,    kPaEngulf,    kPaBiteWaste, kPaInjectTry, kPaInject,
-                                      kPaDivide,       kPaDisperse,  kPaDormant,   kPaDiskCompare, kPaDiskStore,
-                                      kPaDiskLoad,     kPaSelfLoad,  kPaEmit,      kPaListen,    kPaGpu,
-                                      kPaNpu};
+                                      kPaInside,       kPaDivide,    kPaDisperse,  kPaDormant,   kPaDiskCompare,
+                                      kPaDiskStore,    kPaDiskLoad,  kPaSelfLoad,  kPaEmit,      kPaListen,
+                                      kPaGpu,          kPaNpu};
 
 bool get_u64(Str f, u64* v) { return parse_u64(f, v); }
 bool get_u32(Str f, u32* v) {

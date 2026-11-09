@@ -682,12 +682,12 @@ bool write_result(const char* path, const Run& run, const char* stop, double sec
         kv("selectors");
         describe_selectors(w.soup_params().sel, t);
         t.append_char('\n');
-        u64 links = 0, inject = 0, founded = 0;
+        u64 links = 0, parasite = 0, founded = 0;
         u32 depth = 0;
         for (u32 n = 0; n < w.node_count(); ++n) {
             if (const Lineages* L = w.node_lineages(n)) {
                 links += L->links();
-                inject += L->inject_links();
+                parasite += L->parasite_links();
                 founded += L->founded();
                 depth = max_of(depth, L->max_depth_ever());
             }
@@ -695,8 +695,8 @@ bool write_result(const char* path, const Run& run, const char* stop, double sec
         kv("links");
         t.append_u64(links);
         t.append_char('\n');
-        kv("inject_links");
-        t.append_u64(inject);
+        kv("parasite_links");
+        t.append_u64(parasite);
         t.append_char('\n');
         u64 gpu_links = 0;
         for (u32 n = 0; n < w.node_count(); ++n)
@@ -895,7 +895,7 @@ bool write_result(const char* path, const Run& run, const char* stop, double sec
             t.append_hex64(d.genotype);
             t.append_char('\n');
             kv("detect_via");
-            t.append(d.via == kViaInject ? "inject" : "divide");
+            t.append(d.via == kViaParasite ? "parasite" : "divide");
             t.append_char('\n');
             kv("detect_genome");
             t.append(run.detection_genome());

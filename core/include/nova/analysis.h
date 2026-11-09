@@ -410,7 +410,7 @@ bool load_arrivals(const char* dir, Array<ArrivalRecord>* out, TextBuf* err);
 // profile, log(1 + x)), the instructions run (likewise) and the share of them
 // that copy. Scaled to zero mean and unit spread before k-means.
 enum : u32 {
-    kRfEngulfTry, kRfEngulf, kRfBiteWaste, kRfInjectTry, kRfInject, kRfDivide, kRfDisperse, kRfDormant,
+    kRfEngulfTry, kRfEngulf, kRfBiteWaste, kRfInjectTry, kRfInject, kRfInside, kRfDivide, kRfDisperse, kRfDormant,
     kRfDiskCompare, kRfDiskStore, kRfDiskLoad, kRfSelfLoad, kRfEmit, kRfListen, kRfGpu, kRfNpu, kRfSpawn,
     kRfInstr, kRfCopyShare,
     kRoleFeatures

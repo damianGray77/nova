@@ -19,7 +19,7 @@ const char* const kActionNames[kPaCount] = {
     "engulf_tries", "engulf_landed", "bites_waste",    "inject_tries",  "inject_landed", "divides",
     "dispersals",   "dormant",       "disk_compares",  "disk_stores",   "disk_loads",    "archive_stores",
     "archive_loads", "self_loads",   "emits",          "listens",       "heard_nonzero", "gpu_ops",
-    "npu_ops",      "launches",      "threads"};
+    "npu_ops",      "launches",      "threads",        "inside"};
 const char* const kHoldNames[kHoldCount] = {"hold_mem",  "hold_cpu",     "hold_ecpu",    "hold_gpu", "hold_npu",
                                             "hold_disk", "hold_archive", "hold_threads", "hold_warps"};
 const char* const kRoleNames[kRoleCount] = {"predator", "parasite", "repairer", "signaller",
@@ -49,19 +49,42 @@ bool is_branch(Op op) {
     }
 }
 
-// The lineage tag of body b's genome block (0 without detection).
+// Body b's code: its first block, or a parasite's region in its host's first
+// block (docs/inject-plan.md M2). False: none.
+bool code_of(const Soup& s, u32 b, u32* block, u32* start, u32* len) {
+    if (s.is_parasite(b)) {
+        u32 lo = 0, hi = 0;
+        s.parasite_span(b, &lo, &hi);
+        if (hi <= lo)
+            return false;
+        *block = s.body(s.host_of(b)).blocks;
+        *start = lo;
+        *len = hi - lo;
+        return true;
+    }
+    const u32 k = s.body(b).blocks;
+    if (k == kNone)
+        return false;
+    *block = k;
+    *start = s.block(k).start;
+    *len = s.block(k).len;
+    return true;
+}
+
+// The lineage tag of body b's genome block, or a parasite's own (0 without detection).
 BlockTag tag_of(const Soup& s, u32 b) {
     const Lineages* L = s.observer();
+    if (!L)
+        return BlockTag{};
+    if (s.is_parasite(b))
+        return L->guest_tag(b);
     const u32 k = s.body(b).blocks;
-    return L && k != kNone ? L->tag(k) : BlockTag{};
+    return k != kNone ? L->tag(k) : BlockTag{};
 }
 
 u64 genome_hash(const Soup& s, u32 b) {
-    const u32 k = s.body(b).blocks;
-    if (k == kNone)
-        return 0;
-    const Block& B = s.block(k);
-    return genotype_hash(s.mem() + B.start, B.len);
+    u32 k = kNone, start = 0, len = 0;
+    return code_of(s, b, &k, &start, &len) ? genotype_hash(s.mem() + start, len) : 0;
 }
 
 // The nearest other living body (resting dormant ones aside) on one side of
@@ -112,7 +135,7 @@ const char* profile_end_name(u32 why) {
 u32 role_by_rules(const u32* act) {
     if (act[kPaEngulf])
         return kRolePredator;
-    if (act[kPaInject])
+    if (act[kPaInject] || act[kPaInside]) // (moved into a host, or living in one)
         return kRoleParasite;
     if (act[kPaSelfLoad])
         return kRoleRepairer;
@@ -168,7 +191,7 @@ void ProfileProbe::before(const SoupTally& tl, u32 bx_, u32 dflt_, u32 block_) {
     // The order profile_step reads them in.
     t[0] = tl.engulf_tries;
     t[1] = tl.engulfs;
-    t[2] = tl.bites_body;
+    t[2] = tl.bites_body + tl.swallows; // (a whole swallow, digested later: docs/inject-plan.md S1)
     t[3] = tl.bites_waste;
     t[4] = tl.inject_tries;
     t[5] = tl.injects;
@@ -192,7 +215,7 @@ void profile_step(ProfileSample& s, const ProfileProbe& pr, const SoupTally& tl,
                   u32 cx, bool resolving, bool self_load) {
     const u64* t = pr.t;
     s.act[kPaEngulfTry] += static_cast<u32>(tl.engulf_tries - t[0]);
-    s.act[kPaEngulf] += static_cast<u32>((tl.engulfs - t[1]) + (tl.bites_body - t[2]));
+    s.act[kPaEngulf] += static_cast<u32>((tl.engulfs - t[1]) + (tl.bites_body + tl.swallows - t[2]));
     s.act[kPaBiteWaste] += static_cast<u32>(tl.bites_waste - t[3]);
     s.act[kPaInjectTry] += static_cast<u32>(tl.inject_tries - t[4]);
     s.act[kPaInject] += static_cast<u32>(tl.injects - t[5]);
@@ -300,15 +323,16 @@ void Profiles::start(const Soup& s, u32 b, u64 tick, bool census) {
     ProfileSample& x = live_[i];
     memset(&x, 0, sizeof x);
     const Body& B = s.body(b);
-    const Block& K = s.block(B.blocks);
+    u32 gk = kNone, gs = 0, gl = 0;
+    code_of(s, b, &gk, &gs, &gl); // (the callers checked it has code)
     x.serial = B.serial;
     x.start = x.end = tick;
     x.node = node_;
     x.body = b;
-    x.block = B.blocks;
-    x.gstart = K.start;
-    x.glen = K.len;
-    x.genotype = genotype_hash(s.mem() + K.start, K.len);
+    x.block = gk;
+    x.gstart = gs;
+    x.glen = gl;
+    x.genotype = genotype_hash(s.mem() + gs, gl);
     const BlockTag t = tag_of(s, b);
     x.lineage = t.lineage;
     x.depth = t.depth;
@@ -327,8 +351,8 @@ void Profiles::start(const Soup& s, u32 b, u64 tick, bool census) {
             x.lin_alive += x.lineage && clin_[j] == x.lineage ? 1u : 0u;
             x.geno_alive += cgeno_[j] == x.genotype ? 1u : 0u;
         }
-        const u32 nb[2] = {neighbour(s, b, static_cast<i64>(K.start) - 1, -1),
-                           neighbour(s, b, static_cast<i64>(K.start) + K.len, 1)};
+        const u32 nb[2] = {neighbour(s, b, static_cast<i64>(gs) - 1, -1),
+                           neighbour(s, b, static_cast<i64>(gs) + gl, 1)};
         for (u32 side = 0; side < 2; ++side) {
             u32 rel = 0;
             if (nb[side] != kNone) {
@@ -370,8 +394,8 @@ void Profiles::on_tick_start(const Soup& s, u64 tick) {
     cand_.clear();
     for (usize k = 0; k < s.body_count(); ++k) {
         const u32 b = s.body_at(k);
-        const Body& B = s.body(b);
-        if (B.alive && !s.dormant(b) && B.blocks != kNone)
+        u32 gk = kNone, gs = 0, gl = 0;
+        if (s.body(b).alive && !s.dormant(b) && code_of(s, b, &gk, &gs, &gl))
             cand_.push(b);
     }
     if (cand_.empty())
@@ -420,7 +444,9 @@ void Profiles::on_tick_end(const Soup& s, u64 tick) {
         }
         x.end = tick;
         holdings(s, x);
-        if (x.lineage == 0) { // a spark that founded a lineage, an INJECT victim taken in ...
+        if (s.is_parasite(x.body))
+            ++x.act[kPaInside];
+        if (x.lineage == 0) { // a spark that founded a lineage ...
             const BlockTag t = tag_of(s, x.body);
             x.lineage = t.lineage;
             x.depth = t.depth;
@@ -448,8 +474,8 @@ void Profiles::on_dormant(const Soup& s, u32 b) {
 }
 
 bool Profiles::follow(const Soup& s, u32 b, u64 tick) {
-    const Body& B = s.body(b);
-    if (!B.alive || s.dormant(b) || B.blocks == kNone || slot_of(b))
+    u32 gk = kNone, gs = 0, gl = 0;
+    if (!s.body(b).alive || s.dormant(b) || !code_of(s, b, &gk, &gs, &gl) || slot_of(b))
         return false;
     cand_.clear();
     start(s, b, tick, false);

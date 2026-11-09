@@ -35,6 +35,21 @@ The viewer also offers new kinds of life, substrate maps and disaster marks.
 
 ## Status: varied world, disasters and analysis built (design.md 6.18–6.23)
 
+**INJECT moves the program; swallowed prey are digested** (design.md 6.27,
+`docs/inject-plan.md`, 2026-11-09):
+- A landed INJECT moves the whole program into its host through a wound,
+  with its threads, cores and devices. The memory it leaves is cleared to
+  zeros. It lives on as a parasite inside the host: it can read, write and
+  run the host's code, and the host can overwrite it.
+- It multiplies by carving copies out of its host's code; its daughters take
+  the host's cores. When the host dies the parasite gets what is left of its
+  own code back as a free body.
+- INJECT needs a host at least twice the injector's memory
+  (`contact.inject_ratio`) and is priced like a bite, not like COPY.
+- A bite that would swallow its prey whole now digests it, `engulf.digest`
+  (2) codons a tick. The prey keeps running and can INJECT itself into its
+  eater to escape.
+
 **Dormancy and drift** (design.md 6.17, `docs/dormancy-plan.md`): a program
 the watchdog would kill as frozen (200 ticks without running, typically buried
 in upkeep debt) now goes dormant, like a bacterial spore, if it has reserves.

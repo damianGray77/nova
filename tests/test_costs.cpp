@@ -219,53 +219,56 @@ void test_actor_lost() {
     CHECK(g.s.actions().empty() && g.s.tally().actions_failed == 1 && g.cpu(e1).err == 1);
 }
 
-// INJECT as an action: its time is the codons it writes, and they land at the
-// end, just inside the host's open end (its tail: 206, 207; docs/bites-plan.md I2).
+// INJECT as an action, priced like a bite (docs/inject-plan.md M7): it lasts
+// the codons it moves at engulf.codons_per_tick (16 in the suites, 8 by
+// default), its thread busy for the
+// rest of each tick meanwhile, and the program moves in at the end, just
+// inside the host's open end (its tail: 205-209).
 void test_inject_action() {
     Fix f;
     CHECK(f.init());
-    const u32 inj = plant(f.s, 100, "INJECT NOP0 NOP0 NOP1 INC", 500);
-    const u32 host = plant(f.s, 200, "NOP1 NOP1 NOP0 INC INC INC INC INC", 300);
+    const u32 inj = plant(f.s, 100, "INJECT NOP0 NOP0 NOP1 INC", 500); // 5 codons: one tick
+    const u32 host = plant(f.s, 200, "NOP1 NOP1 NOP0 INC INC INC INC INC INC INC", 300); // 10: twice its size
     CHECK(inj != kNone && host != kNone);
-    Cpu& c = f.cpu(inj);
-    c.cx = 2;
-    c.ax = 3;
-    c.rh = 100;
-    f.s.run_cpu(f.cpu_of(inj), 1000);
-    CHECK(f.s.actions().size() == 1 && f.s.actions()[0].end == 1);
-    const u8 before = f.s.mem()[206];
+    u8 genome[5];
+    for (u32 i = 0; i < 5; ++i)
+        genome[i] = f.s.mem()[100 + i];
+    const i64 used = f.s.run_cpu(f.cpu_of(inj), 1000000);
+    CHECK(used == 1000000 && f.s.actions().size() == 1 && f.s.actions()[0].end == 1); // busy: the CPU at work
     f.s.begin_tick(1);
     f.s.run_cpu(f.cpu_of(inj), 0);
-    CHECK(f.s.tally().injects == 1 && f.s.tally().actions_landed == 1);
-    CHECK(f.s.mem()[206] == f.s.mem()[100] && f.s.mem()[207] == f.s.mem()[101] && f.s.mem()[206] != before);
-    // Its price (Damian, 2026-11-09: "inject should cost as much as copy"):
-    // what COPYs of its payload would cost -- 2 codons, a load and a store
-    // each -- with the instruction and its kernel call; then it waits idle
-    // instead of spending the rest of the tick.
+    CHECK(f.s.tally().injects == 1 && f.s.tally().actions_landed == 1 && f.s.is_parasite(inj));
+    for (u32 i = 0; i < 5; ++i)
+        CHECK(f.s.mem()[205 + i] == genome[i] && f.s.mem()[100 + i] == 0);
+    CHECK(soup_ok(f.s));
+    // A bigger program takes longer: 20 codons, two ticks at the suites' 16
+    // (three at the default 8).
     Fix h;
     CHECK(h.init());
-    const u32 i3 = plant(h.s, 100, "INJECT NOP0 NOP0 NOP1 INC", 500);
-    CHECK(i3 != kNone && plant(h.s, 200, "NOP1 NOP1 NOP0 INC INC INC INC INC", 300) != kNone);
-    h.cpu(i3).cx = 2;
-    h.cpu(i3).rh = 100;
-    const i64 used = h.s.run_cpu(h.cpu_of(i3), 1000000);
-    const i64 copies = 2 * static_cast<i64>(h.p.cost.load + h.p.cost.store);
-    const i64 call = static_cast<i64>(h.p.cost.call);
-    CHECK(used >= copies + call && used < copies + call + 10000 && h.s.cpu_waits(h.cpu_of(i3)));
+    TextBuf big, bigger;
+    big.append("INJECT");
+    for (int i = 0; i < 19; ++i)
+        big.append(" INC");
+    bigger.append("NOP1");
+    for (int i = 0; i < 39; ++i)
+        bigger.append(" INC");
+    const u32 i3 = plant(h.s, 100, big.c_str(), 500);
+    CHECK(i3 != kNone && plant(h.s, 200, bigger.c_str(), 300) != kNone);
+    h.s.run_cpu(h.cpu_of(i3), 1000000);
+    CHECK(h.s.actions().size() == 1 && h.s.actions()[0].end == (20 + h.p.engulf_cpt - 1) / h.p.engulf_cpt);
+    CHECK(h.p.engulf_cpt == 16 && h.s.actions()[0].end == 2);
     // A host that seals its wound meanwhile defends itself.
     Fix g;
     CHECK(g.init());
     const u32 i2 = plant(g.s, 100, "INJECT NOP0 NOP0 NOP1 INC", 500);
-    const u32 h2 = plant(g.s, 200, "NOP1 NOP1 NOP0 INC INC INC INC INC", 300);
+    const u32 h2 = plant(g.s, 200, "NOP1 NOP1 NOP0 INC INC INC INC INC INC INC", 300);
     CHECK(i2 != kNone && h2 != kNone);
-    g.cpu(i2).cx = 2;
-    g.cpu(i2).rh = 100;
     g.s.run_cpu(g.cpu_of(i2), 1000);
     CHECK(g.s.actions().size() == 1);
-    g.s.mem_mut()[207] = static_cast<u8>(codon_of(g.p.table, Op::nop0)); // the host writes a NOP over its tail
+    g.s.mem_mut()[209] = static_cast<u8>(codon_of(g.p.table, Op::nop0)); // the host writes a NOP over its tail
     g.s.begin_tick(1);
     g.s.run_cpu(g.cpu_of(i2), 0);
-    CHECK(g.s.tally().injects == 0 && g.s.tally().actions_defended == 1);
+    CHECK(g.s.tally().injects == 0 && g.s.tally().actions_defended == 1 && !g.s.is_parasite(i2));
 }
 
 // A DISK store longer than a tick (a 12 us write against a 4.75 us tick):
@@ -425,8 +428,16 @@ void test_defended_milestone() {
     TextBuf t;
     t.append(timed_world());
     t.append("detect.defended = 3\n");
+    // (docs/inject-plan.md: INJECT moves a program now, so it no longer
+    // links copies; this world's lineages come from its COPY replicator,
+    // given the cores to establish.)
     Run run;
-    CHECK(make_run(run, t.c_str(), 4));
+    Config::ParseError pe;
+    TextBuf err;
+    CHECK(run.config().parse(t.c_str(), &pe));
+    run.config().set("world.millicores", "2000");
+    run.config().set("seed.millicores", "1000");
+    CHECK(run.init(4, &err));
     u64 tick = 0;
     while (!run.detection().found && tick < 400)
         run.run_until(++tick);
@@ -438,6 +449,8 @@ void test_defended_milestone() {
     const LineageInfo* info = nullptr;
     for (usize k = 0; k < s.body_count() && member == kNone; ++k) {
         const u32 blk = s.body(s.body_at(k)).blocks;
+        if (blk == kNone)
+            continue; // (a parasite: no block of its own)
         const BlockTag tag = L->tag(blk);
         info = tag.lineage ? L->lineage(tag.lineage) : nullptr;
         if (info && info->detected)

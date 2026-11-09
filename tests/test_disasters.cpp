@@ -215,7 +215,13 @@ void test_crash() {
             bool fresh = true;
             for (usize k = 0; k < sp.body_count(); ++k) {
                 const u32 b = sp.body_at(k);
-                const u32 start = sp.block(sp.body(b).blocks).start;
+                u32 start = 0, hi = 0; // (a parasite's: its code in its host, docs/inject-plan.md M2)
+                if (sp.is_parasite(b)) {
+                    sp.parasite_span(b, &start, &hi);
+                    if (hi <= start)
+                        start = sp.block(sp.body(sp.host_of(b)).blocks).start;
+                } else
+                    start = sp.block(sp.body(b).blocks).start;
                 for (u32 c = sp.body(b).cpus; c != kNone; c = sp.cpu(c).next) {
                     const Cpu& C = sp.cpu(c);
                     fresh = fresh && C.ip == start && C.rh == start && C.wh == start && C.ax == 0 && C.bx == 0 &&

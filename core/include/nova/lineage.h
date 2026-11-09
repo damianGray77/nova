@@ -24,17 +24,16 @@
 //     tells "she was copied" apart from "a random block was budded off"
 //     (random bodies bud a dozen times a tick) and from "she was budded onto a
 //     relative's intact remains".
-//   - INJECT (`detect.inject`, default on): the codons an INJECT just wrote
-//     leave the victim's first block matching the injector's block (same
-//     offsets, over the longer of the two lengths, as before X12). The victim
-//     joins the injector's lineage as its offspring. This is how the first
-//     replicators found on the home rig copy themselves: bud a blank daughter,
-//     then inject their own code into her (design.md 6.6).
+//   - A parasite's DIVIDE (docs/inject-plan.md M4): a daughter a parasite
+//     divides off inside its host links to the parasite's lineage when she
+//     descends from its code in the host (its region there), by the DIVIDE
+//     rule. INJECT itself makes no link: it moves a program, it doesn't copy
+//     one. The parasite keeps its membership on its body while it owns no
+//     block (on_move_in).
 //
 // Lineage: the first link from an untagged parent founds a lineage, with that
-// parent as its depth-0 founder; every inheriting daughter (or infected victim)
-// joins her parent's lineage one generation deeper. A member re-infected by
-// its own lineage stays as it was; a member of another lineage that is taken
+// parent as its depth-0 founder; every inheriting daughter joins her parent's
+// lineage one generation deeper. A member of another lineage that is taken
 // over moves. Mutants are full members: the rules never check exactness, and
 // neither does the detector.
 //
@@ -92,7 +91,6 @@ struct DetectParams {
     double similarity = 0.75;    // detect.similarity
     u32 shift = 8;               // detect.shift: DIVIDE alignments shifted up to this many codons each way (X12)
     u32 genebank_threshold = 2;  // detect.genebank_threshold
-    bool inject = true;          // detect.inject: INJECT can make an inheritance link
     bool written = true;         // detect.written: DIVIDE links count only written codons
     u32 gate_depth = 2;          // detect.gate_depth: generations the gate needs
     u32 gate_alive = 2;          // detect.gate_alive: members alive at once it needs
@@ -103,8 +101,7 @@ struct DetectParams {
 };
 
 inline constexpr u32 kViaDivide = 0;
-inline constexpr u32 kViaInject = 1;
-inline constexpr u32 kViaParasite = 2; // a DIVIDE by a parasite thread inside a host (docs/bites-plan.md I5)
+inline constexpr u32 kViaParasite = 1; // a DIVIDE by a parasite inside its host (docs/inject-plan.md M4)
 
 // Reads detect.* (marking the keys used); a bad value is reported through cfg.
 bool detect_params_from_config(Config& cfg, DetectParams* p);
@@ -127,8 +124,8 @@ struct LineageInfo {
     u64 last_birth;       // tick of the latest inheriting birth
     u64 founder_genotype;
     u64 members;          // members ever, founder included
-    u64 divide_links;     // links by DIVIDE and by INJECT, re-infections included
-    u64 inject_links;
+    u64 divide_links;     // links by DIVIDE
+    u64 parasite_links;   // ... of them by a parasite inside its host (docs/inject-plan.md M4)
     u64 gpu_links;        // DIVIDE links whose copying the GPU mostly did
     u32 alive;
     u32 peak_alive;
@@ -145,7 +142,7 @@ struct LineageInfo {
     u32 defences;         // actions aimed at members that failed because they changed in time, once gated (9)
     u32 founder_origin;   // how its founding body began (kOrigin..., W7)
     u32 sleep_detected;   // ... and then a member chose to sleep (docs/lifehistory-plan.md V7; was padding)
-    u32 parasite_divides; // daughters its parasite threads made from inside hosts, once gated (bites plan I5)
+    u32 parasite_divides; // daughters its parasites made from inside hosts, once gated (inject-plan M4)
     u32 repairs;          // open ends its members closed with a NOP, once gated (bites plan B5)
 };
 
@@ -169,11 +166,11 @@ inline constexpr u32 kEventCount = 11;
 // has a member use the NPU, or first arrives on a node it wasn't founded on.
 struct GateEvent {
     u64 tick;
-    u64 genotype; // the daughter (or victim, or arrival) it was about
+    u64 genotype; // the daughter (or arrival) it was about
     u64 lineage;
     u32 depth, alive, len;
     u32 codon_off; // her genome, in codons()
-    u32 via;       // kViaDivide or kViaInject
+    u32 via;       // kViaDivide or kViaParasite
     u32 kind;      // kEvent...
 };
 
@@ -243,10 +240,6 @@ class Lineages {
     }
     // parent_block is the block the dividing CPU runs in (kNone if lost).
     void on_divide(const Soup& s, u32 parent_block, u32 daughter_block, u64 tick);
-    // An INJECT from the CPU running in injector_block wrote into the victim's
-    // first block; `match` counts the written codons that equal the injector's
-    // codon at the same offset.
-    void on_inject(const Soup& s, u32 injector_block, u32 victim_block, u32 match, u64 tick);
     // A CPU running in `block` did an NPU op (Phase 2b).
     void on_npu(const Soup& s, u32 block, u64 tick);
     // Phase 3: the tag a daughter in block k carries when she disperses, and
@@ -279,13 +272,19 @@ class Lineages {
     // to sleep (YIELD BX 1 or 2, CX > 0); a gated lineage's first is the
     // sleeper event.
     void on_sleep(const Soup& s, u32 block, u64 tick);
-    // docs/bites-plan.md I3, I5: an INJECT from the CPU running in
-    // injector_block started parasite thread `cpu` in the host whose first
-    // block is host_block, its payload [off, off + len) of that block. The
-    // thread carries the injector's tag; a DIVIDE it runs links a daughter
-    // that descends from the payload to the injector's lineage (via parasite).
-    void on_parasite(const Soup& s, u32 cpu, u32 injector_block, u32 host_block, u32 off, u32 len);
+    // docs/inject-plan.md M4 (bites-plan I5): a DIVIDE by a parasite's thread
+    // `cpu` links a daughter that descends from the parasite's code in its
+    // host to the parasite's lineage (via parasite).
     void on_divide_parasite(const Soup& s, u32 cpu, u32 daughter_block, u64 tick);
+    // docs/inject-plan.md M1: body `guest` moved into a host, leaving its
+    // first block k (about to be freed). It stays a member of its lineage
+    // while it owns no block: its tag moves from k to the body.
+    void on_move_in(u32 guest, u32 k);
+    // M5: a guest freed by its host's death owns block k now: its tag goes
+    // back to a block.
+    void on_guest_freed(const Soup& s, u32 guest, u32 k, u64 tick);
+    // A guest died (or was eaten) while it owned no block: it leaves its lineage.
+    void on_guest_gone(const Soup& s, u32 guest, u64 tick);
     // B5: a member (the body whose first block is `block`) closed an open end
     // of its code with a NOP; a gated lineage's detect.repairs-th is the
     // healer event.
@@ -293,8 +292,8 @@ class Lineages {
 
     // --- inspection --------------------------------------------------------
     u32 node() const { return node_; }
-    u64 links() const { return links_; }     // inheritance links so far, both kinds
-    u64 inject_links() const { return inject_links_; }
+    u64 links() const { return links_; }     // inheritance links so far
+    u64 parasite_links() const { return parasite_links_; } // ... of them by parasites inside hosts
     u64 gpu_links() const { return gpu_links_; }
     u64 gpu_detections() const { return gpu_detections_; }
     u64 npu_detections() const { return npu_detections_; }
@@ -315,6 +314,8 @@ class Lineages {
     usize living() const { return table_.size(); }
     const LineageInfo* lineage(u64 id) const { return table_.find(id); }
     BlockTag tag(u32 k) const { return k < tags_.size() ? tags_[k] : BlockTag{}; }
+    // A parasite's own tag, carried on its body (docs/inject-plan.md M1).
+    BlockTag guest_tag(u32 body) const { return body < guest_tags_.size() ? guest_tags_[body] : BlockTag{}; }
     const Genebank& genebank() const { return bank_; }
     void survey(LineageSurvey* out) const;
     // Every living lineage as a LineageEnd ending at `tick` (end-of-run report),
@@ -350,28 +351,24 @@ class Lineages {
     void push_event(u32 kind, u64 tick, u64 lineage, const LineageInfo& L, const BlockTag& child,
                     const u8* code, u32 len, u32 via);
     void join(u32 k, const u8* code, u32 len, u64 tick, u64 lineage, u32 depth, u64 parent);
+    void join_tag(BlockTag* tag, const u8* code, u32 len, u64 tick, u64 lineage, u32 depth, u64 parent);
+    u64 found(const Soup& s, u32 body, const u8* code, u32 len, u64 tick);
     void leave(u32 k, u64 tick);
+    void leave_tag(BlockTag* t, u64 tick); // (a block's or a guest's membership ends)
     u32 stash(const u8* code, u32 len);
+    // docs/inject-plan.md: per body slot, the tag of a guest that owns no block.
+    Array<BlockTag> guest_tags_;
 
     const DetectParams* p_ = nullptr;
     u32 node_ = 0;
     u32 next_id_ = 1;
-    u64 links_ = 0, inject_links_ = 0, gpu_links_ = 0, founded_ = 0, detections_ = 0;
+    u64 links_ = 0, parasite_links_ = 0, gpu_links_ = 0, founded_ = 0, detections_ = 0;
     u64 gpu_detections_ = 0, npu_detections_ = 0, colonisations_ = 0, disk_detections_ = 0;
     u64 signal_detections_ = 0, defended_detections_ = 0, sleep_detections_ = 0;
     u64 parasite_detections_ = 0, healer_detections_ = 0;
     u64 founded_by_[kOriginCount] = {};
     u32 max_depth_ever_ = 0;
     Array<BlockTag> tags_;   // by block slot
-    // docs/bites-plan.md I5: per CPU slot, a parasite thread's injector tag
-    // and its payload (offset and length in its host's first block). Stale
-    // once the slot is reused by a thread that isn't a parasite (the soup's
-    // Cpu::parasite says which), and overwritten by the next parasite's.
-    struct ParasiteTag {
-        BlockTag tag;
-        u32 off, len;
-    };
-    Array<ParasiteTag> cpu_tags_;
     Array<u64> written_;     // per codon: written by its owner since its block was allocated
     Array<u64> gpu_written_; // ... last by a GPU op
     HashMap<LineageInfo> table_; // living lineages only

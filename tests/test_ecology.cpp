@@ -276,20 +276,32 @@ void test_bite_waste() {
     CHECK(g.s.body(b2).mem == 6 && g.s.tally().codons_bitten == 3);
 }
 
-// Aimed bites: a body no bigger than the bite is swallowed whole; a bigger
+// Aimed bites: a body no bigger than the bite is swallowed whole -- digested
+// engulf.digest (2) codons a tick into its eater's stomach, its cores the
+// eater's once nothing of it is left (docs/inject-plan.md S1, S2); a bigger
 // one loses its end nearest the eater, and its cores in proportion to the
 // code taken, its NOPs not counted (docs/bites-plan.md B4: NOPs are tissue).
 void test_bite_body() {
     EcoFix f;
-    CHECK(f.init("engulf.bite = true\nworld.millicores = 4000\n"));
+    CHECK(f.init("engulf.bite = true\nworld.millicores = 4000\nengulf.digest = 2\n"));
     const u32 e = plant(f.s, 100, "ENGULF NOP0 INC INC INC INC INC INC INC INC", 500);
     const u32 small = plant(f.s, 150, "NOP1 INC INC INC", 300);
     CHECK(e != kNone && small != kNone);
     Cpu& c = f.s.cpu_mut(f.s.body(e).cpus);
     c.cx = 10; // a third of 10, rounded up: 4, the whole small prey
     f.s.run_cpu(f.s.body(e).cpus, 1);
-    CHECK(c.err == 0 && !f.s.body(small).alive && f.s.body(e).units == 800 && f.s.tally().engulfs == 1);
+    CHECK(c.err == 0 && f.s.body(small).alive && f.s.is_swallowed(small) && f.s.host_of(small) == e);
+    CHECK(f.s.tally().swallows == 1 && f.s.tally().engulfs == 0 && f.s.body(e).units == 500 && f.s.body(e).mem == 10);
+    CHECK(soup_ok(f.s));
+    f.s.digest(); // 153, 152: the eater's stomach
+    CHECK(f.s.body(small).alive && f.s.body(small).mem == 2 && f.s.body(e).mem == 12);
+    CHECK(f.s.owner_body(152) == e && f.s.owner_body(153) == e && f.s.owner_body(151) == small);
+    CHECK(f.s.tally().digested == 2 && soup_ok(f.s));
+    f.s.digest(); // the rest: it is food, its cores the eater's
+    CHECK(!f.s.body(small).alive && f.s.body(e).mem == 14 && f.s.body(e).units == 800 && f.s.tally().engulfs == 1);
+    CHECK(f.s.tally().digested == 4 && f.s.owner_body(150) == e);
     f.s.death_sweep();
+    CHECK(soup_ok(f.s));
     // A bigger prey: 40 codons (a NOP and 39 INC), 400 millicores. The eater
     // (now 14 codons) bites 5 from its low end, nearest the eater: a NOP and 4
     // of its 39 codons of code, so 41 of its 400 millicores.

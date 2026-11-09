@@ -78,6 +78,7 @@ enum : u32 {
     kPaNpu,           // ... on the NPU (BX 16-19)
     kPaLaunch,        // warps launched (BX 20)
     kPaThread,        // threads started (BX 21)
+    kPaInside,        // ticks it ended inside a host as a parasite (docs/inject-plan.md M1)
     kPaCount
 };
 // The column names, profiles.csv (engulf_tries, engulf_landed, ...).

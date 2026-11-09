@@ -39,7 +39,7 @@
 //   in_flight                         cargoes in transit (3)
 // and the replicator detector's view (Phase 1b; zeros when detection is off):
 //   links                             inheritance links during the window
-//   inject_links                      ... of which made by INJECT
+//   parasite_links                    ... of which by parasites inside hosts
 //   gpu_links                         ... and DIVIDE links copied mostly by the GPU (2)
 //   max_depth                         deepest living lineage member
 //   lineages                          lineages with a living member
@@ -135,18 +135,25 @@
 //                                     codons copied in place; deleted
 //   corpse_codons                     codons of fresh corpses bitten, at the
 //                                     discount (engulf.corpse_cost)
-// then bites as wounds and parasites (docs/bites-plan.md; six sums, then two
-// gauges), the last integer columns:
+// then bites as wounds, parasites and guests (docs/bites-plan.md,
+// docs/inject-plan.md; ten sums, then four gauges), the last integer columns:
 //   wounds                            bites of a body that left an end of its code
 //                                     open (B5)
 //   bled                              codons lost from open ends (B6)
 //   repairs                           open ends closed by writing a NOP there
-//   parasite_threads                  threads an INJECT started in its host (I3)
-//   parasite_divides                  daughters divided off by them (I4)
+//   parasite_threads                  programs an INJECT moved into a host (M1)
+//   parasite_divides                  daughters parasites divided off from inside
+//                                     their hosts (M4)
 //   struck_bodies                     living bodies whose code a lightning
 //                                     strike changed (section 7)
-//   open_ends, infected               ends of bodies' code open now; bodies with a
-//                                     parasite thread now
+//   swallows                          bodies a bite swallowed whole (S1)
+//   digested                          codons digested into eaters (S2)
+//   escapes                           swallowed bodies that injected themselves
+//                                     into their eater (S4)
+//   freed                             guests that outlived their host (M5, S5)
+//   open_ends, infected               ends of bodies' code open now; hosts with a
+//                                     parasite in them now
+//   parasites, swallowed              guests of each kind now
 // and last, as always, the two floating-point columns:
 //   compress                          soup compressibility (compress.h), mean
 //                                     over nodes: ~1 random, lower = repetitive
@@ -175,8 +182,8 @@ inline constexpr u32 kStatsNoveltyFirst = kStatsProfileFirst + kStatsProfileColu
 // Life history (docs/lifehistory-plan.md W, V7, R7) and cheaper corpses: nine sums.
 inline constexpr u32 kStatsLifeColumns = 9;
 inline constexpr u32 kStatsLifeFirst = kStatsNoveltyFirst + kStatsNoveltyColumns;
-// Bites as wounds and parasites (docs/bites-plan.md): six sums, then two gauges.
-inline constexpr u32 kStatsBiteSums = 6, kStatsBiteColumns = kStatsBiteSums + 2;
+// Bites as wounds, parasites and guests (docs/bites-plan.md, docs/inject-plan.md): ten sums, then four gauges.
+inline constexpr u32 kStatsBiteSums = 10, kStatsBiteColumns = kStatsBiteSums + 4;
 inline constexpr u32 kStatsBiteFirst = kStatsLifeFirst + kStatsLifeColumns;
 inline constexpr u32 kStatsIntColumns = kStatsBiteFirst + kStatsBiteColumns;
 inline constexpr u32 kStatsColumns = kStatsIntColumns + 2; // compress, ambient
@@ -194,7 +201,7 @@ struct StatsRow {
 // The detector's link totals at the previous row (each row shows the change),
 // and its foundings by origin (W7: spark, daughter, arrival, wake).
 struct StatsMarks {
-    u64 links = 0, inject = 0, gpu = 0;
+    u64 links = 0, parasite = 0, gpu = 0;
     u64 founded[4] = {};
 };
 // One soup-model row: `sum` is the window's summed tallies; the rest is the

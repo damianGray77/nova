@@ -59,7 +59,6 @@ detect.enabled	bool	true	-	-
 detect.gate_alive	u64	2	1	1000000
 detect.gate_depth	u64	2	1	1000000
 detect.genebank_threshold	u64	2	1	1000000
-detect.inject	bool	true	-	-
 detect.similarity	f64	0.75	0	1	openmin
 detect.written	bool	true	-	-
 disk.cost_base	u64	4	0	1000000

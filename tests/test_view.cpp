@@ -200,7 +200,7 @@ void test_stats_header() {
                          "npu_macs,npu_released,npu_worn,sent,arrived,lost,corrupted,transit_lost,"
                          "disk_stores,disk_loads,disk_compares,disk_rot,wipes,wiped,wipe_deaths,emits,"
                          "listens,collapses,recoveries,garbled,bodies,cpus,free_millicores,"
-                         "waste,gpu_held,npu_held,in_flight,links,inject_links,gpu_links,max_depth,"
+                         "waste,gpu_held,npu_held,in_flight,links,parasite_links,gpu_links,max_depth,"
                          "lineages,top_lineage,genotypes_in_top,colonised,links_down,disk_held,live_nodes,"
                          "warp_steps,lane_instr,warp_host,launches,gpu_births,warps,gpu_bodies,"
                          "actions_started,actions_landed,actions_failed,actions_defended,"
@@ -217,7 +217,8 @@ void test_stats_header() {
                          "prof_samples,role_predator,role_parasite,role_repairer,role_signaller,role_wanderer,"
                          "role_copier,role_idle,work_len,action_kinds_x100,novelty,novel_share,novel_success,"
                          "wipe_warnings,wipe_false_alarms,wipe_flickers,sleeps,sleep_woke,sleep_expired,ray_inserts,ray_deletes,corpse_codons,"
-                         "wounds,bled,repairs,parasite_threads,parasite_divides,struck_bodies,open_ends,infected,compress,ambient\n";
+                         "wounds,bled,repairs,parasite_threads,parasite_divides,struck_bodies,swallows,digested,escapes,freed,open_ends,"
+                         "infected,parasites,swallowed,compress,ambient\n";
     CHECK(bytes.size() > strlen(header) && memcmp(bytes.data(), header, strlen(header)) == 0);
     remove(path);
 }

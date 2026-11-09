@@ -542,19 +542,25 @@ NOVA_WHOLE("contact.range", 256, 0, 1u << 24, kKeyMaxComputed, "Contact and eati
 NOVA_WHOLE("contact.cost_base", 8, 0, 1000000, 0, "Contact and eating", "Contact cost", "",
            "Instructions an ENGULF or INJECT attempt costs, success or not.")
 NOVA_NUMBER("contact.cost_per_codon", 1.0, 0, 1000000, 0, "Contact and eating", "Contact cost per codon", "",
-            "... plus this per codon an ENGULF moves. An INJECT pays each codon it writes what a COPY of it costs "
-            "(classic: an instruction; a timed table: a load and a store at their tiers, then it waits idle as long "
-            "as a full core takes, at least a tick; Damian, 2026-11-09).")
+            "... plus this per codon an ENGULF or an INJECT moves; with a timed table either lasts its codons at "
+            "engulf.codons_per_tick, its thread busy (docs/inject-plan.md M7: INJECT priced like a bite).")
 NOVA_NUMBER("contact.inject_room", 1.0, 0, 1000000, 0, "Contact and eating", "INJECT room", "",
-            "INJECT fails unless the host block is at least this x the payload (0 = off).")
+            "INJECT fails unless the host's code (its first block) is at least this x the injector's genome (0 = off).")
+NOVA_NUMBER("contact.inject_ratio", 2.0, 0, 1000000, 0, "Contact and eating", "INJECT size ratio", "",
+            "INJECT fails unless the host owns at least this x the memory the injector owns: a program moves only "
+            "into a much bigger one, so injecting its own bud fails (docs/inject-plan.md M6, Damian; 0 = off).")
 NOVA_FLAG("engulf.bite", true, 0, "Contact and eating", "ENGULF bites", "",
           "ENGULF takes a bite of CX codons, of raw material or of a body; else it swallows whole prey (Phase 9). "
           "With bites a NOP surface no longer shields a body, and INJECT lands only through an open end (a wound: "
-          "an end of the host's code whose outermost codon isn't a NOP), just inside it, starting a parasite thread "
-          "there (docs/bites-plan.md).")
+          "an end of the host's code whose outermost codon isn't a NOP), moving the injector in just inside it "
+          "(docs/bites-plan.md, docs/inject-plan.md).")
 NOVA_NUMBER("engulf.bite_share", 1.0 / 3.0, 0.000001, 1, 0, "Contact and eating", "Bite size", "engulf.bite",
             "A bite takes at most this share of the biter's own size (rounded up): prey no bigger than that is "
             "swallowed whole, a bigger one loses a piece from its nearest end (1 = up to the biter's whole size).")
+NOVA_WHOLE("engulf.digest", 2, 0, 1000000, 0, "Contact and eating", "Digestion", "engulf.bite",
+           "Codons a body swallowed whole by a bite loses to its eater a tick. It lives on meanwhile, and may INJECT "
+           "itself into its eater to stop the digestion (docs/inject-plan.md S, Damian; 0 = swallowed at once, as "
+           "before).")
 NOVA_FLAG("engulf.tissue", true, 0, "Contact and eating", "NOPs as tissue", "engulf.bite",
           "A bitten body loses cores in proportion to the code taken, not counting NOPs: padding is tissue that "
           "protects the code and the cores inside (off: in proportion to every codon taken).")
@@ -782,8 +788,6 @@ NOVA_WHOLE("detect.shift", 8, 0, 64, 0, "Detection and lineages", "Alignment shi
            "rotated where her first 4 codons appear in it (descent, not likeness: disasters plan X12).")
 NOVA_WHOLE("detect.genebank_threshold", 2, 1, 1000000, 0, "Detection and lineages", "Genebank threshold",
            "detect.enabled", "A genotype is saved to the genebank when this many copies of it live at once.")
-NOVA_FLAG("detect.inject", true, 0, "Detection and lineages", "INJECT links", "detect.enabled",
-          "An INJECT that leaves the victim matching the injector is an inheritance link.")
 NOVA_FLAG("detect.written", true, 0, "Detection and lineages", "Written codons only", "detect.enabled",
           "A DIVIDE link counts only the codons the parent wrote into the daughter since her ALLOC.")
 NOVA_WHOLE("detect.gate_depth", 2, 1, 1000000, 0, "Detection and lineages", "Gate depth", "detect.enabled",

@@ -35,7 +35,6 @@ struct Exec {
     mutable u64 t_ps = 0; // (searches and template reads are const)
     const Action* resolving = nullptr;
     bool deferred = false;
-    bool pay_at_start = false; // the action it started is paid for now, not by waiting (an INJECT)
     u32 wslot = kNone; // Phase 9b: the warp, for its host instruction
     // Gestation (docs/lifehistory-plan.md G1): a DIVIDE before the daughter is
     // ripe waits at itself, idle; ripe_at is the tick she will be.
@@ -158,16 +157,13 @@ struct Exec {
 
     // --- addresses -----------------------------------------------------------
 
-    bool own(u32 a) const {
-        u32 k = s.owner_[a];
-        return k != kNone && s.blocks_[k].body == c.body;
-    }
+    // Yours: your body's, or, for a parasite, its host's too (docs/inject-plan.md M2).
+    bool own(u32 a) const { return s.mine(c.body, a); }
     // Private code: read your own body or waste. Open membrane: anything.
     bool readable(u32 a) const {
         if (p.open_membrane)
             return true;
-        u32 k = s.owner_[a];
-        return k == kNone || s.blocks_[k].body == c.body;
+        return s.owner_[a] == kNone || s.mine(c.body, a);
     }
     // Writes go only into your own body (its daughter blocks included).
     bool writable(u32 a) const { return own(a); }
@@ -261,6 +257,11 @@ struct Exec {
                 lo = min_of<i64>(lo, s.blocks_[k].start);
                 hi = max_of<i64>(hi, static_cast<i64>(s.blocks_[k].start) + s.blocks_[k].len);
             }
+            if (s.is_parasite(c.body)) // (and its host's, whose codons are its too: M2)
+                for (u32 k = s.bodies_[s.host_of(c.body)].blocks; k != kNone; k = s.blocks_[k].next) {
+                    lo = min_of<i64>(lo, s.blocks_[k].start);
+                    hi = max_of<i64>(hi, static_cast<i64>(s.blocks_[k].start) + s.blocks_[k].len);
+                }
             fmax = min_of<i64>(fmax, hi - n - static_cast<i64>(a) - n);
             bmax = min_of<i64>(bmax, static_cast<i64>(a) - n + 1 - lo);
         }
@@ -418,6 +419,10 @@ struct Exec {
     // Claims len codons of waste as a new block of this body: the nearest free
     // run outward from the block the CPU runs in (forward on a tie).
     u32 alloc_memory(u32 len) {
+        if (s.is_swallowed(c.body)) // docs/inject-plan.md S3: nothing grows inside an eater
+            return kNone;
+        if (s.is_parasite(c.body)) // M4: a parasite's memory comes out of its host
+            return alloc_in_host(len);
         if (s.known_full(len))
             return kNone;
         u32 lo = c.ip, hi = c.ip + 1;
@@ -443,12 +448,52 @@ struct Exec {
         return at;
     }
 
+    // docs/inject-plan.md M4 (Damian: "it still has to copy itself inside of
+    // the host program... eventually killing the host"): a parasite's ALLOC
+    // carves its block out of its host's first block, from the end away from
+    // its own code, never into it; the write head goes to its start, as an
+    // ALLOC's does. Fails when the host hasn't that many codons of its own
+    // there (outside the parasite's code, none lost).
+    u32 alloc_in_host(u32 len) {
+        const u32 h = s.host_of(c.body);
+        const u32 k = h == kNone ? kNone : s.bodies_[h].blocks;
+        if (len == 0 || k == kNone)
+            return kNone;
+        u32 lo = 0, hi = 0;
+        s.parasite_span(c.body, &lo, &hi);
+        const u32 S = s.blocks_[k].start, E = S + s.blocks_[k].len;
+        if (hi <= lo) // (none of its code left in the host: it may take from either end; the low)
+            lo = hi = E;
+        const bool from_low = lo - S >= E - hi; // its code nearer the high end: carve the low end
+        u32 at = kNone;
+        if (from_low && S + len <= lo)
+            at = S;
+        else if (!from_low && E - hi >= len)
+            at = E - len;
+        if (at == kNone || len >= s.blocks_[k].len)
+            return kNone;
+        for (u32 x = at; x < at + len; ++x)
+            if (s.owner_[x] != k)
+                return kNone;
+        const u32 k2 = from_low ? carve_block(k, at + len, false) : carve_block(k, at, true);
+        give_block(k2, c.body);
+        if (s.obs_) // (to the detector a fresh block: nothing written into it yet, as an ALLOC's)
+            s.obs_->on_new_block(k2, at, len);
+        if (p.gestation > 0)
+            s.blocks_[k2].born = static_cast<u32>(s.tick_);
+        c.wh = at;
+        charge_range(costs().move, at, len);
+        return at;
+    }
+
     // Memory tiers (docs/world-plan.md W3): ALLOC's resource 7 claims fast
     // memory only: the nearest free run inside [0, fast_end), outward from
     // the block the CPU runs in, as alloc_memory finds one anywhere. kNone
     // when there is no room of that size there (which proves nothing about
     // slow memory, so it notes nothing).
     u32 alloc_fast(u32 len) {
+        if (s.host_of(c.body) != kNone) // (a guest's memory is its host's: inject-plan M4, S3)
+            return alloc_memory(len);
         const u32 fe = p.fast_end;
         if (len > fe || s.known_full(len))
             return kNone;
@@ -513,9 +558,9 @@ struct Exec {
     }
 
     // A daughter in block k is divided off (at home or to a neighbour): the
-    // detector's link, and a parasite thread's count (docs/bites-plan.md I4).
+    // detector's link, and a parasite's count (docs/inject-plan.md M4).
     void note_divide(u32 k) {
-        const bool parasite = !warp && c.parasite;
+        const bool parasite = !warp && s.is_parasite(c.body);
         if (parasite)
             ++s.tally_.parasite_divides;
         if (!s.obs_)
@@ -530,8 +575,11 @@ struct Exec {
         u32 parent = c.body;
         u32 k = s.bodies_[parent].latest;
         t_ps += costs().call; // Phase 9: a world change
-        if (k == kNone)
+        if (k == kNone || s.is_swallowed(parent)) // (docs/inject-plan.md S3: nothing is born inside an eater)
             return false;
+        // M4 (Damian): a parasite's daughter takes her share of its host's
+        // cores, GPU and NPU units, not of what the parasite brought.
+        const u32 giver = s.is_parasite(parent) ? s.host_of(parent) : parent;
         charge_range(costs().move, s.blocks_[k].start, s.blocks_[k].len); // her codons handed over (W3: tiers)
         // The detector compares the daughter with the block this CPU runs in
         // (read-only; see lineage.h); a parasite thread's, with its payload,
@@ -548,18 +596,19 @@ struct Exec {
         D.blocks = k;
         D.mem = s.blocks_[k].owned;
         // Phase 9c: a share of each kind of millicore (all of them P without E millicores).
-        const u32 pe = s.e_units(parent);
-        u32 give = static_cast<u32>(static_cast<u64>(P.units - pe) * share / 64);
+        const Body& G = s.bodies_[giver];
+        const u32 pe = s.e_units(giver);
+        u32 give = static_cast<u32>(static_cast<u64>(G.units - pe) * share / 64);
         const u32 egive = static_cast<u32>(static_cast<u64>(pe) * share / 64);
         if (!p.warps)
             s.new_cpu(d, s.blocks_[k].start);
-        s.move_kind(parent, d, give, false);
+        s.move_kind(giver, d, give, false);
         if (egive)
-            s.move_kind(parent, d, egive, true);
+            s.move_kind(giver, d, egive, true);
         if (p.gpus) // GPU and NPU units too: every non-memory holding (Phase 2, 2b)
-            s.gpu_.move(parent, d, static_cast<u32>(static_cast<u64>(s.gpu_.count[parent]) * share / 64));
+            s.gpu_.move(giver, d, static_cast<u32>(static_cast<u64>(s.gpu_.count[giver]) * share / 64));
         if (p.npus)
-            s.npu_.move(parent, d, static_cast<u32>(static_cast<u64>(s.npu_.count[parent]) * share / 64));
+            s.npu_.move(giver, d, static_cast<u32>(static_cast<u64>(s.npu_.count[giver]) * share / 64));
         if (s.disk_on() && !s.disk_.tiered()) // and the newest share of the disk, contents and all (Phase 4)
             s.disk_.move_tail(parent, d, static_cast<u32>(static_cast<u64>(s.disk_.total[parent]) * share / 64));
         if (s.disk_.tiered()) { // W4: the newest share of each tier, each keeping its tier
@@ -587,7 +636,7 @@ struct Exec {
     // past the degree or when the edge already carries its capacity.
     bool disperse(u32 share, u32 dest) {
         const DispersalPorts& P = s.ports_;
-        if (dest == 0 || dest > P.degree)
+        if (dest == 0 || dest > P.degree || s.host_of(c.body) != kNone) // (a guest can't send: inject-plan M8, S3)
             return false;
         const u32 parent = c.body;
         const u32 k = s.bodies_[parent].latest;
@@ -927,6 +976,11 @@ struct Exec {
         switch (p.sel.sense[c.bx]) {
         case 0: // my size: the block I run in
             c.cx = c.block == kNone ? 0 : s.blocks_[c.block].len;
+            if (s.is_parasite(c.body) && c.block != kNone && c.block == s.bodies_[s.host_of(c.body)].blocks) {
+                u32 lo = 0, hi = 0; // (in its host: its own code's size, inject-plan M2)
+                s.parasite_span(c.body, &lo, &hi);
+                c.cx = hi - lo;
+            }
             return true;
         case 4: // heat of the memory page I run in
             c.cx = static_cast<u32>(s.page_heat_[c.ip >> kPageBits]);
@@ -993,7 +1047,7 @@ struct Exec {
         u64 seen = 0, seen_f = 0; // Phase 9: surfaces looked at (W3: of them in fast memory)
         for (usize i = 0; i < s.order_.size(); ++i) {
             u32 t = s.order_[i];
-            if (t == c.body || !s.bodies_[t].alive || s.bodies_[t].blocks == kNone)
+            if (t == c.body || !s.bodies_[t].alive || s.bodies_[t].blocks == kNone || s.host_of(t) != kNone)
                 continue;
             u32 start = s.blocks_[s.bodies_[t].blocks].start;
             u32 dist = start > ip ? start - ip : ip - start;
@@ -1083,6 +1137,7 @@ struct Exec {
             s.disk_.move_all(prey, eater);
         if (p.warps) // and its warps, up to warp.max (Phase 8)
             s.merge_warps(prey, eater);
+        s.rehost_guests(prey, eater); // and its guests (docs/inject-plan.md)
         P.blocks = P.cpus = P.latest = kNone;
         P.unit_head = P.unit_tail = kNone;
         P.units = P.mem = P.ncpu = 0;
@@ -1094,70 +1149,143 @@ struct Exec {
         }
     }
 
-    // Overwrites (never inserts, 6.4 #3) up to CX codons of the victim's first
-    // block, from this CPU's read head, just inside the open end it came in by
-    // (docs/bites-plan.md I2): the block's last CX codons for its high end, its
-    // first CX for its low end, in reading order. In the victim's code, its
-    // own copying passes the payload on. Then a parasite thread starts at the
-    // payload's first codon (I3).
-    u32 inject_into(u32 victim, bool high) {
-        u32 k = s.bodies_[victim].blocks;
-        const Block& bl = s.blocks_[k];
-        u32 count = c.cx < bl.len ? c.cx : bl.len;
-        u32 dest = high ? bl.start + bl.len - count : bl.start;
-        const u32 first = dest;
-        u32 written = 0;
-        moved_fast = 0; // W3: the payload's codons written into fast memory
-        // For the detector: written codons equal to the injector's own codon
-        // at the same offset (read-only; see lineage.h).
-        const u32 own = s.obs_ ? c.block : kNone;
-        u32 match = 0;
-        for (u32 i = 0; i < count; ++i) {
-            u32 from = c.rh;
-            if (!readable(from))
-                break;
-            if (s.owner_[dest] == k && page_accepts(dest)) {
-                const u8 was_ = s.mem_[dest];
-                s.mem_[dest] = copied(take(from));
-                note_write(dest, was_);
-                ++written;
-                moved_fast += fast(dest) ? 1u : 0u;
-                if (own != kNone) {
-                    const Block& P = s.blocks_[own];
-                    const u32 j = dest - bl.start;
-                    match += j < P.len && s.mem_[dest] == s.mem_[P.start + j];
-                }
-            }
-            c.rh = next_addr(from);
-            dest = dest + 1 == bl.start + bl.len ? bl.start : dest + 1;
+    // --- INJECT moves the program (docs/inject-plan.md M, S4) -----------------
+    //
+    // Damian, 2026-11-09: "injecting should insert the program not a copy. It
+    // should bring everything over, including machinery." A landed INJECT
+    // moves the injecting body into its host: its genome overwrites the
+    // host's first block just inside the end it came in by (I2's place), its
+    // threads carry on in it, it keeps every holding, and the memory it leaves
+    // is cleared to codon 0: free space, not information.
+
+    // Its aim (M, S4): a swallowed body's is its eater, no wound needed, at
+    // the end of the eater's code nearer its own; anyone else's the nearest
+    // (or best-matching) wound in reach (I1). kNone: none.
+    u32 inject_aim(u32 ip, const u8* bits, u32 n, bool* high, u32* pmatch, u32* plen) {
+        *pmatch = *plen = 0;
+        if (s.is_swallowed(c.body)) {
+            const u32 e = s.host_of(c.body);
+            const u32 ek = s.bodies_[e].blocks, mk = s.bodies_[c.body].blocks;
+            if (ek == kNone || mk == kNone)
+                return kNone;
+            const Block& E = s.blocks_[ek];
+            const u32 me = s.blocks_[mk].start;
+            const u32 dlo = me > E.start ? me - E.start : E.start - me;
+            const u32 hiend = E.start + E.len - 1;
+            const u32 dhi = me > hiend ? me - hiend : hiend - me;
+            *high = dhi < dlo;
+            return e;
         }
-        ++s.tally_.injects;
-        if (own != kNone)
-            s.obs_->on_inject(s, own, k, match, s.tick_);
-        if (written > 0)
-            start_parasite(victim, k, first, count);
-        return written;
+        return wound_pick(ip, bits, n, high, pmatch, plen);
     }
 
-    // docs/bites-plan.md I3, I4: a thread of the host's, at the payload's first
-    // codon, with the injector's registers (as BX 21's spawn), running on the
-    // host's cores from its compute share: under "one body, one set of rights"
-    // it may write anywhere in the host and ALLOC, COPY and DIVIDE with what
-    // the host holds. None while the host holds cpu.max_threads (the code then
-    // lies latent, running only if the host runs into it).
-    void start_parasite(u32 host, u32 k, u32 at, u32 len) {
-        if (s.bodies_[host].ncpu >= p.max_threads || s.owner_[at] != k)
-            return;
-        const u32 t = s.new_cpu(host, at);
-        Cpu& T = s.cpus_[t];
-        T.ax = c.ax;
-        T.bx = c.bx;
-        T.cx = c.cx;
-        T.dx = c.dx;
-        T.parasite = 1;
+    // Whether this body may move into `host` now: it has a genome of its own
+    // (a parasite moves no further: M8) and no guests in it (Claude's call:
+    // its code is theirs too, so an infected program can't leave it), the
+    // host owns at least contact.inject_ratio x its memory (M6), and the
+    // host's code has room for its genome x contact.inject_room.
+    bool inject_allowed(u32 host) const {
+        const Body& I = s.bodies_[c.body];
+        const u32 hk = s.bodies_[host].blocks;
+        if (I.blocks == kNone || s.is_parasite(c.body) || s.has_guests(c.body) || hk == kNone)
+            return false;
+        if (p.inject_ratio > 0 &&
+            static_cast<double>(s.bodies_[host].mem) < p.inject_ratio * static_cast<double>(I.mem))
+            return false;
+        const u32 g = s.blocks_[I.blocks].len;
+        return !(p.inject_room > 0 && static_cast<double>(g) * p.inject_room > static_cast<double>(s.blocks_[hk].len));
+    }
+
+    // The codons a move into `host` writes: the genome, at most the host's code.
+    u32 inject_size(u32 host) const {
+        const u32 g = s.blocks_[s.bodies_[c.body].blocks].len, h = s.blocks_[s.bodies_[host].blocks].len;
+        return g < h ? g : h;
+    }
+
+    // The move itself (inject_allowed holds). Returns the codons written;
+    // *next (the INJECT's next instruction) moves with its thread.
+    u32 move_in(u32 host, bool high, u32* next) {
+        const u32 me = c.body;
+        Body& I = s.bodies_[me];
+        const u32 G = I.blocks;
+        const u32 gs = s.blocks_[G].start, gl = s.blocks_[G].len;
+        const u32 hk = s.bodies_[host].blocks;
+        const Block& H = s.blocks_[hk];
+        const u32 count = gl < H.len ? gl : H.len;
+        const u32 dest = high ? H.start + H.len - count : H.start;
+        // Its genome over the host's codons (those the host still owns there).
+        moved_fast = 0;
+        for (u32 i = 0; i < count; ++i) {
+            const u32 a = dest + i;
+            if (s.owner_[a] != hk)
+                continue;
+            const u8 was_ = s.mem_[a];
+            s.mem_[a] = s.mem_[gs + i];
+            if (!s.stamp_.empty())
+                s.stamp_[a] = 0;
+            note_write(a, was_);
+            moved_fast += fast(a) ? 1u : 0u;
+        }
+        // Its threads and warps carry on in it: an address in its genome moves
+        // with it, one elsewhere in its own memory goes to its start.
+        auto mine_before = [&](u32 a) { return a < p.size && s.owner_[a] != kNone && s.blocks_[s.owner_[a]].body == me; };
+        auto map = [&](u32 a) -> u32 {
+            if (a >= gs && a < gs + gl)
+                return a - gs < count ? dest + (a - gs) : dest;
+            return mine_before(a) ? dest : a;
+        };
+        auto move_cpu = [&](Cpu& x) {
+            x.ip = map(x.ip);
+            x.rh = map(x.rh);
+            x.wh = map(x.wh);
+            for (u32 j = 0; j < x.sp && j < kMaxStack; ++j)
+                x.stack[j] = map(x.stack[j]);
+            x.block = hk;
+            x.parasite = 1;
+        };
+        for (u32 x = I.cpus; x != kNone; x = s.cpus_[x].next)
+            if (x != ci) // (this one is c, below)
+                move_cpu(s.cpus_[x]);
+        move_cpu(c); // (never a warp's: contact_may)
+        *next = map(*next);
+        // (Claude's call: a parasite runs as CPU threads; its warps end, its
+        // GPU units stay with it. A warp's code would need its host's memory
+        // in its record.)
+        if (p.warps)
+            s.kill_warps(me);
+        // Its other actions end (it is somewhere else now).
+        for (usize j = 0; j < s.actions_.size();) {
+            if (s.actions_[j].actor == me && s.actions_[j].actor_serial == I.serial) {
+                for (usize m = j; m + 1 < s.actions_.size(); ++m)
+                    s.actions_[m] = s.actions_[m + 1];
+                s.actions_.pop();
+            } else {
+                ++j;
+            }
+        }
+        // The memory it leaves: zeros (Damian: "free space, but not information").
+        if (s.obs_)
+            s.obs_->on_move_in(me, G);
+        for (u32 k = I.blocks; k != kNone;) {
+            const u32 nk = s.blocks_[k].next;
+            const Block& B = s.blocks_[k];
+            for (u32 a = B.start; a < B.start + B.len; ++a)
+                if (s.owner_[a] == k) {
+                    s.mem_[a] = 0;
+                    if (!s.stamp_.empty())
+                        s.stamp_[a] = 0;
+                }
+            s.free_block(k);
+            k = nk;
+        }
+        I.blocks = I.latest = kNone;
+        I.mem = 0;
+        if (s.is_swallowed(me))
+            ++s.tally_.escapes; // S4: out of digestion, into its eater's code
+        s.set_guest(me, host, kGuestParasite, dest, count);
+        ++s.tally_.injects;
         ++s.tally_.parasite_threads;
-        if (s.obs_ && c.block != kNone) // its lineage is the injector's (I5)
-            s.obs_->on_parasite(s, t, c.block, k, at - s.blocks_[k].start, len);
+        return count;
     }
 
     // --- ENGULF as a bite (Phase 10, design.md 6.16; engulf.bite) -------------
@@ -1195,7 +1323,7 @@ struct Exec {
         u64 seen = 0, seen_f = 0;
         for (usize i = 0; i < s.order_.size(); ++i) {
             const u32 t = s.order_[i];
-            if (t == c.body || !s.bodies_[t].alive || s.bodies_[t].blocks == kNone)
+            if (t == c.body || !s.bodies_[t].alive || s.bodies_[t].blocks == kNone || s.host_of(t) != kNone)
                 continue;
             const u32 start = s.blocks_[s.bodies_[t].blocks].start;
             const u32 dist = start > ip ? start - ip : ip - start;
@@ -1225,7 +1353,7 @@ struct Exec {
         u64 seen = 0, seen_f = 0;
         for (usize i = 0; i < s.order_.size(); ++i) {
             const u32 t = s.order_[i];
-            if (t == c.body || !s.bodies_[t].alive || s.bodies_[t].blocks == kNone)
+            if (t == c.body || !s.bodies_[t].alive || s.bodies_[t].blocks == kNone || s.host_of(t) != kNone)
                 continue;
             u32 m = kNone; // its surface's length, read once it matters
             for (u32 side = 0; side < 2; ++side) {
@@ -1559,7 +1687,16 @@ struct Exec {
             got = bite_waste(waste, want);
         } else if (s.bodies_[target].mem <= want) {
             got = s.bodies_[target].mem;
-            engulf_body(target);
+            // docs/inject-plan.md S1 (Damian): swallowed, to be digested, not
+            // dead. (A resting dormant program can't respond: it is food at
+            // once, as before. Claude's call.)
+            if (p.digest > 0 && !s.dormant(target)) {
+                s.set_guest(target, c.body, kGuestSwallowed);
+                ++s.tally_.swallows;
+                moved_fast = tiered ? fast_owned(target) : 0;
+            } else {
+                engulf_body(target);
+            }
         } else {
             got = bite_piece(target, want, ip);
         }
@@ -1572,16 +1709,16 @@ struct Exec {
         u8 bits[64];
         u32 n = read_template(next_ip(ip), bits);
         *next = skip(ip, n);
-        if (!engulf && static_cast<i32>(c.cx) <= 0) {
-            *ok = false; // nothing to inject: zero means nothing
-            return 1;
-        }
         if (engulf)
             ++s.tally_.engulf_tries;
         else
             ++s.tally_.inject_tries;
         t_ps += costs().call; // Phase 9 (a warp's host instruction): a world change
         u32 cost = 1 + p.contact_base;
+        if (!contact_may(engulf)) {
+            *ok = false;
+            return cost;
+        }
         if (engulf && p.bites) { // Phase 10: a bite, at once
             *ok = false;
             const u32 want = bite_size();
@@ -1609,34 +1746,27 @@ struct Exec {
         u32 target = kNone;
         if (engulf) {
             target = contest(ip, bits, n, true);
-        } else { // docs/bites-plan.md I1: only through an open end
+        } else { // docs/bites-plan.md I1: only through an open end (or out of a swallower: inject-plan S4)
             u32 wm = 0, wl = 0;
-            target = wound_pick(ip, bits, n, &high, &wm, &wl);
+            target = inject_aim(ip, bits, n, &high, &wm, &wl);
         }
         if (target == kNone) {
             *ok = false;
             return cost; // a failed contest still costs the attempt (6.4 #7)
         }
-        // INJECT works only on a host big enough to fit the payload: its first
-        // block must hold room x CX codons. Otherwise nothing is written, the
-        // host is unharmed, and the attempt still costs.
-        if (!engulf && p.inject_room > 0) {
-            const u32 k = s.bodies_[target].blocks;
-            if (static_cast<double>(c.cx) * p.inject_room > static_cast<double>(s.blocks_[k].len)) {
-                *ok = false;
+        if (!engulf) { // docs/inject-plan.md M: the program moves in, priced like a bite (M7)
+            if (!inject_allowed(target)) {
+                *ok = false; // too big for the host (M6) or its code (room): the host is unharmed
                 return cost;
             }
-        }
-        u32 moved = engulf ? s.bodies_[target].mem : 0;
-        const bool dorm = engulf && s.dormant(target); // (cheaper corpses: a dormant program too)
-        if (!engulf) { // docs/bites-plan.md (Damian): each codon as a COPY of it costs
-            const u32 from = c.rh, dest = inject_dest(target, high);
-            moved = inject_into(target, high);
-            cost += moved * static_cast<u32>(costs().op[static_cast<u32>(Op::copy)]);
-            copy_time(from, dest, moved);
+            const u32 moved = move_in(target, high, next);
+            cost += static_cast<u32>(p.contact_per_codon * static_cast<double>(moved));
+            charge2(costs().move, moved_fast, moved - moved_fast); // (W3: at their tiers)
             *ok = true;
             return cost;
         }
+        u32 moved = s.bodies_[target].mem;
+        const bool dorm = s.dormant(target); // (cheaper corpses: a dormant program too)
         engulf_body(target);
         if (dorm)
             s.tally_.corpse_codons += moved;
@@ -1646,34 +1776,16 @@ struct Exec {
         return cost;
     }
 
-    // Where an INJECT through the victim's open end (high or low) writes its
-    // first codon: just inside it (docs/bites-plan.md I2; as inject_into).
-    u32 inject_dest(u32 victim, bool high) const {
-        const Block& bl = s.blocks_[s.bodies_[victim].blocks];
-        const u32 count = c.cx < bl.len ? c.cx : bl.len;
-        return high ? bl.start + bl.len - count : bl.start;
-    }
-
-    // Damian, 2026-11-09: "inject should cost as much as copy". The picoseconds
-    // n COPYs from the read head at `from` into [dest, dest + n) would take --
-    // a load and a store a codon, each at its codon's tier (W3) -- charged to
-    // this instruction; returns them (0 without a timed table: there a COPY is
-    // one instruction, charged by the caller).
-    double copy_time(u32 from, u32 dest, u32 n) {
-        if (!p.cost.timed)
-            return 0;
-        const CostTable& t = costs();
-        double sum = 0;
-        for (u32 i = 0; i < n; ++i) {
-            const u32 a = (from + i) % p.size, b = (dest + i) % p.size;
-            sum += tiered ? static_cast<double>(t.load) * tf[fast(a) ? 0 : 1] + static_cast<double>(t.store) * tf[fast(b) ? 0 : 1]
-                          : static_cast<double>(t.load + t.store);
-        }
-        if (tiered)
-            t_mem += sum;
-        else
-            t_ps += static_cast<u64>(sum + 0.5);
-        return sum;
+    // Who may make contact now (docs/inject-plan.md M8, S3, S4): a parasite
+    // neither bites nor moves on; a swallowed body only INJECTs (into its
+    // eater); a warp doesn't INJECT (Claude's call: a parasite runs as CPU
+    // threads, M3).
+    bool contact_may(bool engulf) const {
+        if (s.is_parasite(c.body))
+            return false;
+        if (s.is_swallowed(c.body) && engulf)
+            return false;
+        return engulf || !warp;
     }
 
     // --- contact as an action (Phase 9, design.md 6.15) ----------------------
@@ -1683,10 +1795,9 @@ struct Exec {
     // has any chance (a target, a surface match above 0 or a blind ENGULF, an
     // INJECT payload that fits), the action starts and its target is marked.
     // An ENGULF lasts the prey's codons at engulf.codons_per_tick, its CPU at
-    // work meanwhile; an INJECT pays its payload's COPY time when it starts
-    // and waits idle as long as a full core takes to copy it (docs/bites-plan.md,
-    // 2026-11-09). Either lasts at least a tick, so every body gets a turn in
-    // between.
+    // work meanwhile; an INJECT likewise lasts the codons it moves, priced
+    // like a bite (docs/inject-plan.md M7). Either lasts at least a tick, so
+    // every body gets a turn in between.
     //
     // At its end (contact_end) it lands only if the target is still there and
     // in range, rolling its chance against the target's surface as it is
@@ -1699,13 +1810,13 @@ struct Exec {
         const u32 n = read_template(next_ip(ip), bits);
         *next = skip(ip, n);
         *ok = false;
-        if (!engulf && static_cast<i32>(c.cx) <= 0)
-            return 1; // nothing to inject: zero means nothing
         if (engulf)
             ++s.tally_.engulf_tries;
         else
             ++s.tally_.inject_tries;
         t_ps += costs().call;
+        if (!contact_may(engulf))
+            return 1; // (docs/inject-plan.md M8, S3: fails at once)
         if (engulf && p.bites) { // Phase 10: a bite takes its codons' time
             const u32 want = bite_size();
             if (want == 0)
@@ -1747,16 +1858,14 @@ struct Exec {
             target = contest_pick(ip, bits, n, true, &match, &len);
             if (target == kNone || (len != 0 && match == 0))
                 return 1; // no chance at all: fails at once, as a lost contest does
-        } else { // docs/bites-plan.md I1: only through an open end
-            target = wound_pick(ip, bits, n, &high, &match, &len);
+        } else { // docs/bites-plan.md I1: only through an open end (or out of a swallower: inject-plan S4)
+            target = inject_aim(ip, bits, n, &high, &match, &len);
             if (target == kNone)
                 return 1; // no wound in reach: fails at once
+            if (!inject_allowed(target))
+                return 1; // too big for the host (M6) or its code: fails at once
         }
-        const u32 k = s.bodies_[target].blocks;
-        if (!engulf && p.inject_room > 0 &&
-            static_cast<double>(c.cx) * p.inject_room > static_cast<double>(s.blocks_[k].len))
-            return 1; // the payload doesn't fit: fails at once
-        const u64 size = engulf ? s.bodies_[target].mem : (c.cx < s.blocks_[k].len ? c.cx : s.blocks_[k].len);
+        const u64 size = engulf ? s.bodies_[target].mem : inject_size(target);
         u64 ticks = 1;
         if (engulf) {
             const u64 pace = p.engulf_cpt;
@@ -1764,14 +1873,9 @@ struct Exec {
             if (s.dormant(target)) // (cheaper corpses: a dormant program, swallowed whole)
                 ticks = max_of<u64>(1, static_cast<u64>(ceil(bite_weight(static_cast<u32>(size), static_cast<u32>(size)) /
                                                              static_cast<double>(pace))));
-        } else {
-            // Damian, 2026-11-09: INJECT costs as much as COPY. The CPU pays its
-            // payload's COPY time now, then waits idle (as a long instruction
-            // does) for as long as a full core takes to copy it, at least a
-            // tick, so the host has a turn to seal its wound.
-            const double t = copy_time(c.rh, inject_dest(target, high), static_cast<u32>(size));
-            ticks = max_of<u64>(1, static_cast<u64>(ceil(t / p.tick_units)));
-            pay_at_start = true;
+        } else { // docs/inject-plan.md M7: the codons it moves at a bite's pace, its CPU busy meanwhile
+            const u64 pace = p.engulf_cpt;
+            ticks = max_of<u64>(1, (size + pace - 1) / pace);
         }
         Action a = {};
         a.end = s.tick_ + ticks;
@@ -1813,6 +1917,14 @@ struct Exec {
         const Body& T = s.bodies_[t];
         if (!T.alive || T.serial != a.target_serial || T.blocks == kNone)
             return 1; // gone: eaten by another, or dead (run_cpu counts it failed)
+        // docs/inject-plan.md: the actor or its target may have become a guest
+        // meanwhile. A swallowed body's INJECT lands only in its eater; a guest
+        // target is out of reach (swallowed by another, or moved in).
+        if (!contact_may(engulf))
+            return 1;
+        const bool escape = !engulf && s.is_swallowed(c.body);
+        if (escape ? s.host_of(c.body) != t : s.host_of(t) != kNone)
+            return 1;
         const u32 k = T.blocks;
         // A failure because the target changed in time is a defence (its
         // place, its surface, its size, a wound it closed).
@@ -1823,18 +1935,18 @@ struct Exec {
         };
         if (!engulf) { // docs/bites-plan.md I1: it lands if its wound is still open and in reach
             const bool high = a.at != 0;
-            const u32 w = s.outer_codon(t, high);
-            const bool open = w != kNone && !is_nop(p.table.op[s.mem_[w]]);
-            const u32 wd = w == kNone ? 0 : (w > ip ? w - ip : ip - w);
-            const bool fits = static_cast<i32>(c.cx) > 0 &&
-                              !(p.inject_room > 0 && static_cast<double>(c.cx) * p.inject_room >
-                                                         static_cast<double>(s.blocks_[k].len));
-            if (!open || wd > p.contact_range || !fits) { // (run_cpu counts it failed)
-                if (static_cast<i32>(c.cx) > 0)
-                    defended(); // the wound closed, the host moved off or shrank below the payload
+            bool open = escape; // (S4: out of a swallower needs no wound)
+            u32 wd = 0;
+            if (!escape) {
+                const u32 w = s.outer_codon(t, high);
+                open = w != kNone && !is_nop(p.table.op[s.mem_[w]]);
+                wd = w == kNone ? 0 : (w > ip ? w - ip : ip - w);
+            }
+            if (!open || wd > p.contact_range || !inject_allowed(t)) { // (run_cpu counts it failed)
+                defended(); // the wound closed, the host moved off or shrank below it
                 return 1;
             }
-            const u32 moved = inject_into(t, high);
+            const u32 moved = move_in(t, high, next);
             charge2(costs().move, moved_fast, moved - moved_fast); // (W3: at their tiers)
             *ok = true;
             return 1;
@@ -2009,7 +2121,8 @@ struct Exec {
         if (n == 0)
             return false;
         const u32 to = search(ip, bits, n, 0);
-        if (to == kNone || s.gpu_count(c.body) == 0 || s.warp_count_[c.body] >= p.warp_max)
+        if (to == kNone || s.gpu_count(c.body) == 0 || s.warp_count_[c.body] >= p.warp_max ||
+            s.is_parasite(c.body)) // (a parasite runs as CPU threads: docs/inject-plan.md M3)
             return false;
         const u32 w = s.new_warp(c.body, to, &c);
         *cost = max_of<u32>(1, p.gpu_setup);
@@ -2051,6 +2164,7 @@ struct Exec {
         T.dx = c.dx;
         T.rh = c.rh;
         T.wh = c.wh;
+        T.parasite = s.is_parasite(c.body) ? 1 : 0; // (a parasite's threads all are: inject-plan M9)
         s.cpu_kind_[t] = kind;
         ++s.tally_.threads_started;
         return true;
@@ -2577,16 +2691,8 @@ struct Exec {
         bool ok = exec_op(op, ip, &next, &cost);
         if constexpr (kProf) // (A3) what it did, before anything below can change ok
             profile_step(*prof, probe, s.tally_, op, ip, ok, next, c.cx, resolving != nullptr, self_load);
-        if (deferred) { // Phase 9: it started an action; the CPU waits here, at it, until its end
-            if (!pay_at_start)
-                return 0;
-            // docs/bites-plan.md (Damian, 2026-11-09): an INJECT pays its own
-            // part, its kernel call and its payload's COPY time as it starts,
-            // then waits idle.
-            pay_at_start = false;
-            const u64 t = own + extra_ps();
-            return t > 0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<u32>(t);
-        }
+        if (deferred) // Phase 9: it started an action; the CPU waits here, at it, until its end
+            return 0;  // (an ENGULF or INJECT keeps it busy: the rest of its tick goes on it, run_cpu)
         if (stalled) { // gestation (G1): it waits at the DIVIDE, idle, for the rest of the tick
             stalled = false;
             c.yielded = 1;

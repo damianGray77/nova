@@ -114,11 +114,23 @@ DisasterCount Soup::crash(double share, u64 restart, Rng& r) {
     for (u32 i = doomed; i < n; ++i) {
         const u32 b = run[i];
         Body& B = bodies_[b];
-        if (B.blocks == kNone)
+        // A parasite's start is its code's in its host (docs/inject-plan.md
+        // M2; none of it left: its host's start, where its threads fault).
+        const bool para = is_parasite(b);
+        const u32 hk = para ? bodies_[host_of(b)].blocks : kNone;
+        if (para ? hk == kNone : B.blocks == kNone)
             continue;
-        const u32 start = blocks_[B.blocks].start;
-        const u32 o = owner_[start];
-        const u32 wrap = o != kNone && blocks_[o].body == b ? o : kNone;
+        u32 start = 0, wrap = kNone;
+        if (para) {
+            u32 lo = 0, hi = 0;
+            parasite_span(b, &lo, &hi);
+            start = hi > lo ? lo : blocks_[hk].start;
+            wrap = hk;
+        } else {
+            start = blocks_[B.blocks].start;
+            const u32 o = owner_[start];
+            wrap = o != kNone && blocks_[o].body == b ? o : kNone;
+        }
         for (u32 c = B.cpus; c != kNone; c = cpus_[c].next) {
             Cpu& C = cpus_[c];
             const u32 next = C.next;
@@ -129,6 +141,7 @@ DisasterCount Soup::crash(double share, u64 restart, Rng& r) {
             C.block = wrap;
             C.next = next;
             C.executed = executed;
+            C.parasite = para ? 1 : 0;
             if (p_->accel_async && c < cpu_gen_.size()) { // results still due aren't the new thread's
                 ++cpu_gen_[c];
                 cpu_result_[c] = 0;

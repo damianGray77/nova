@@ -90,6 +90,11 @@ inline constexpr u8 kOriginArrival = 3;  // dispersed in from a neighbour
 inline constexpr u8 kOriginWake = 4;     // woke from dormancy
 inline constexpr u32 kOriginCount = 5;
 
+// Guests (docs/inject-plan.md): what a body living inside another is.
+inline constexpr u8 kGuestNone = 0;
+inline constexpr u8 kGuestParasite = 1;  // INJECT moved it into its host (M1)
+inline constexpr u8 kGuestSwallowed = 2; // a bite swallowed it whole; digested (S1)
+
 struct SelectorMap {
     u8 sense[kSenseReadingsMax]; // SENSE: BX -> reading (6.5 list; 8-10 GPU, 11-13 NPU, 14 degree,
                                  // 15-16 disk, 17 node health, 18-19 async accelerator)
@@ -184,6 +189,8 @@ struct SoupParams {
     double contact_per_codon; // instructions charged per codon moved
     // INJECT's own criteria (Phase 1b, Damian; design.md 6.6)
     double inject_room;     // contact.inject_room: host block >= room x payload, else it fails (0 = off)
+    double inject_ratio;    // contact.inject_ratio: host's memory >= ratio x injector's, else it fails (0 = off; inject-plan M6)
+    u32 digest;             // engulf.digest: codons a swallowed body loses to its eater a tick (0: swallowed at once; S2)
     // dispersal (Phase 3, design.md 6.9): DIVIDE to a neighbour; SENSE 14
     bool dispersal;
     // the disk tier (Phase 4, design.md 6.10); disk = 0 means no disk at all
@@ -434,7 +441,10 @@ inline bool contact_action(const Action& a) {
 // Whether its CPU is at work until it ends (an ENGULF, its codons' time), rather
 // than waiting idle: a long instruction, or (since 2026-11-09, docs/bites-plan.md)
 // an INJECT, which paid its payload's COPY time when it began.
-inline bool busy_action(const Action& a) { return a.op == static_cast<u32>(Op::engulf); }
+// (docs/inject-plan.md M7: an INJECT now too, priced like a bite.)
+inline bool busy_action(const Action& a) {
+    return a.op == static_cast<u32>(Op::engulf) || a.op == static_cast<u32>(Op::inject);
+}
 inline constexpr u32 kActEngulf = 1; // SENSE 23's codes for what is acting on me
 inline constexpr u32 kActInject = 2;
 
@@ -680,9 +690,14 @@ struct SoupTally {
     u64 wounds;            // bites of a body that left an end of its code open (B5)
     u64 bled;              // codons lost to bleeding from open ends (B6)
     u64 repairs;           // open ends closed by writing a NOP over the outermost codon (B5)
-    u64 parasite_threads;  // threads an INJECT started in its host (I3)
-    u64 parasite_divides;  // daughters divided off by parasite threads (I4)
+    u64 parasite_threads;  // programs an INJECT moved into a host (docs/inject-plan.md M1)
+    u64 parasite_divides;  // daughters divided off by parasites from inside their hosts (M4)
     u64 struck_bodies;     // living bodies whose code a lightning strike changed (section 7)
+    // --- Guests (docs/inject-plan.md)
+    u64 swallows;          // bodies a bite swallowed whole, to be digested (S1)
+    u64 digested;          // codons digested from swallowed bodies into their eaters (S2)
+    u64 escapes;           // swallowed bodies that injected themselves into their eater (S4)
+    u64 freed;             // guests that outlived their host (M5, S5)
 };
 
 // docs/lifehistory-plan.md W2-W5: a volatility wipe drawn and not yet landed
@@ -892,6 +907,7 @@ class Soup {
     bool land_dormant(const u8* code, u32 len, const Dormant& d, const CargoTag& tag);
     bool dormant(u32 b) const { return b < dorm_.size() && dorm_[b].on != 0; }
     bool force_dormant(u32 b) { return go_dormant(b); } // tests: as if the watchdog found it frozen
+    void force_kill(u32 b) { kill(b); }                 // tests: an ordinary death
     // How body b began (kOrigin..., W7): detector data, not world state.
     u8 origin(u32 b) const { return b < origin_.size() ? origin_[b] : kOriginUnknown; }
     const Dormant& dormant_state(u32 b) const { return dorm_[b]; }
@@ -903,7 +919,48 @@ class Soup {
     u32 outer_codon(u32 b, bool high) const;
     bool open_end(u32 b, bool high) const;
     u64 open_ends() const; // open ends of the bodies here now (a stats gauge)
-    u64 infected() const;  // bodies with a parasite thread now (I3; a stats gauge)
+    u64 infected() const;  // bodies with a parasite in them now (a stats gauge)
+    // Guests (docs/inject-plan.md, 2026-11-09). A body may live inside
+    // another, its host:
+    // - a parasite: INJECT moved it in (M1). It owns no code of its own; its
+    //   genome lies in the host's first block, written at [guest_at, + len),
+    //   and it may use any codon its host owns as its own (M2), running on its
+    //   own millicores only (M3).
+    // - a swallowed body: a bite took it whole (S1). It keeps its own memory,
+    //   digested into its eater engulf.digest codons a tick (S2).
+    // host_of: its host, or kNone for a free body.
+    u32 host_of(u32 b) const { return b < guest_host_.size() ? guest_host_[b] : kNone; }
+    u8 guest_kind(u32 b) const { return b < guest_kind_.size() ? guest_kind_[b] : kGuestNone; }
+    bool is_parasite(u32 b) const { return guest_kind(b) == kGuestParasite; }
+    bool is_swallowed(u32 b) const { return guest_kind(b) == kGuestSwallowed; }
+    // A parasite's region in its host (what was written; clip it to the host's first block).
+    u32 guest_at(u32 b) const { return guest_at_[b]; }
+    u32 guest_len(u32 b) const { return guest_len_[b]; }
+    // Whether body b may use codon a as its own (run, write, template, search):
+    // it owns it, or b is a parasite and its host does (M2).
+    bool mine(u32 b, u32 a) const {
+        const u32 k = owner_[a];
+        if (k == kNone)
+            return false;
+        const u32 o = blocks_[k].body;
+        return o == b || (o != kNone && is_parasite(b) && guest_host_[b] == o);
+    }
+    u64 guests_now(u8 kind) const; // guests of that kind here now (stats gauges)
+    // A parasite's code now: its region clipped to its host's first block,
+    // [*lo, *hi) (empty when none of it is left).
+    void parasite_span(u32 b, u32* lo, u32* hi) const {
+        *lo = *hi = 0;
+        const u32 h = host_of(b);
+        if (h == kNone || bodies_[h].blocks == kNone)
+            return;
+        const Block& H = blocks_[bodies_[h].blocks];
+        *lo = max_of<u32>(guest_at_[b], H.start);
+        *hi = min_of<u32>(guest_at_[b] + guest_len_[b], H.start + H.len);
+        if (*hi < *lo)
+            *hi = *lo;
+    }
+    // S2: each swallowed body loses engulf.digest codons to its eater (end of tick, before the sweep).
+    void digest();
     // A varied world (docs/world-plan.md W5): the share of memory held by
     // living bodies, counting neither waste nor resting dormant programs; and
     // the spark rate it gives now, spark.rate x the node's spark weight x
@@ -1074,6 +1131,11 @@ class Soup {
     // Salvage (Phase 4): a body's genome length (its first block), and the
     // stamp on memory codon a (0 without the rule).
     u32 genome_len(u32 b) const {
+        if (is_parasite(b)) { // (its code lies in its host: inject-plan M2)
+            u32 lo = 0, hi = 0;
+            parasite_span(b, &lo, &hi);
+            return hi - lo;
+        }
         const u32 k = bodies_[b].blocks;
         return k == kNone ? 0 : blocks_[k].len;
     }
@@ -1491,6 +1553,32 @@ class Soup {
     // W7: per body slot, how it began (kOrigin...): detector data like
     // dorm_tag_, not hashed or saved (a resumed run's bodies read as unknown).
     Array<u8> origin_;
+    // Guests (docs/inject-plan.md): per body slot, its host (kNone: free),
+    // kind (kGuest...), and a parasite's region as written in its host. World
+    // state: hashed and saved (snapshot v9).
+    Array<u32> guest_host_;
+    Array<u8> guest_kind_;
+    Array<u32> guest_at_, guest_len_;
+    Array<u32> stomach_; // S2: per body, the block digestion last gave it (kNone)
+    Array<u32> guests_;  // per body slot, the guests in it now (derived from the above: not saved)
+    void set_guest(u32 b, u32 host, u8 kind, u32 at = 0, u32 len = 0);
+    void rehost_guests(u32 from, u32 to);
+    // A guest's host died (M5, S5): a parasite's region (what's left of it)
+    // becomes its own block; a swallowed body is free again.
+    void free_guest(u32 g, u32 host_first, u32 host_lo, u32 host_hi);
+    // Body b's remains go to its eater: memory, millicores, GPU and NPU units,
+    // disk, warps (a digested body's end, S2; its threads end). Its own
+    // guests move on to the eater, their memory now the eater's.
+    void absorb(u32 prey, u32 eater);
+    bool has_guests(u32 h) const;
+    // A dying host's guests, listed while its first block's span is known,
+    // freed once its blocks are waste (M5, S5).
+    struct GuestRelease {
+        u32 first = kNone, lo = 0, hi = 0;
+        Array<u32> g;
+    };
+    void list_guests(u32 h, GuestRelease* r) const;
+    void free_guests(const GuestRelease& r);
     u64 frozen_bare_ = 0, dormant_mem_sum_ = 0, dormant_disk_sum_ = 0; // diagnostics
     // Disasters X4: offline_until > 0 is a burnout -- its cores go offline
     // until then, not to the pools, and it rests here first; grace > 0 gives

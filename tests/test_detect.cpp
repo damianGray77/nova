@@ -7,6 +7,7 @@
 #include "check.h"
 #include "helpers.h"
 #include "nova/lineage.h"
+#include "soup_helpers.h"
 
 using namespace nova;
 
@@ -82,40 +83,29 @@ void no_copy_no_link() {
 }
 
 // Control 4: a sparks-only random soup (the bench node) buds constantly, and
-// budding never makes a link. Random code does make short INJECT chains -- a
-// spark with SENSE ... INJECT overwrites a neighbour with a copy of itself --
-// which is why the gate's thresholds are knobs (design.md 6.6).
+// budding never makes a link. (Random code made short INJECT chains while
+// INJECT copied; it moves a program now, docs/inject-plan.md M1.)
 void random_budding_never_links() {
     const char* soup = "seed = 4\nworld.model = soup\nworld.nodes = 1\nworld.soup_size = 16384\n"
                        "world.millicores = 4000\ncpu.instr_per_core = 25000\n"
                        "spark.initial = 400\nspark.rate = 4\nspark.grant = 10\n"
                        "spark.min_len = 8\nspark.max_len = 64\n";
-    for (int inject = 0; inject < 2; ++inject) {
-        TextBuf cfg;
-        cfg.append(soup);
-        if (!inject)
-            cfg.append("detect.inject = false\n");
-        Run run;
-        CHECK(make_run(run, cfg.c_str(), 1));
-        u64 births = 0;
-        for (u32 t = 0; t < 300; ++t) {
-            run.step();
-            births += run.world().last_soup_tick().births;
-        }
-        const Lineages* L = run.world().node_lineages(0);
-        CHECK(L != nullptr && births > 300);
-        if (!L)
-            return;
-        CHECK(L->links() == L->inject_links()); // no DIVIDE link from budding
-        if (!inject)
-            CHECK(L->links() == 0 && !run.detection().found);
-        else
-            printf("  detect: random soup, 300 ticks: %llu births, 0 DIVIDE links, %llu INJECT links "
-                   "(chains to depth %u%s)\n",
-                   static_cast<unsigned long long>(births),
-                   static_cast<unsigned long long>(L->inject_links()), L->max_depth_ever(),
-                   run.detection().found ? ", meeting the default 2/2 gate" : "");
+    Run run;
+    CHECK(make_run(run, soup, 1));
+    u64 births = 0, injects = 0;
+    for (u32 t = 0; t < 300; ++t) {
+        run.step();
+        births += run.world().last_soup_tick().births;
+        injects += run.world().last_soup_tick().injects;
     }
+    const Lineages* L = run.world().node_lineages(0);
+    CHECK(L != nullptr && births > 300);
+    if (!L)
+        return;
+    CHECK(L->links() == L->parasite_links() && !run.detection().found); // no DIVIDE link from budding
+    printf("  detect: random soup, 300 ticks: %llu births, %llu programs moved into hosts, %llu links (by parasites)\n",
+           static_cast<unsigned long long>(births), static_cast<unsigned long long>(injects),
+           static_cast<unsigned long long>(L->links()));
 }
 
 // A detector on a standalone soup, for hand-built cases.
@@ -523,57 +513,62 @@ void founders_in_the_csv() {
     remove(csv);
 }
 
-// detect.inject: an INJECT that leaves its victim a copy is a link; the victim
-// joins the injector's lineage; re-infecting her adds no member. The injector
-// carries a surface ("0") and a key ("1"), so its copies stay open to it.
-void inject_links() {
-    for (int on = 0; on < 2; ++on) {
-        Watched w;
-        CHECK(w.init(on ? "" : "detect.inject = false\n"));
-        u32 inj = w.plant(100, "NOP0 SENSE INJECT NOP1 INC INC INC INC", 100);
-        u32 vic = w.plant(200, "NOP0 INC INC INC INC INC INC INC", 100);
-        CHECK(inj != kNone && vic != kNone);
-        w.run(inj, 3); // NOP0, SENSE (CX = 8), INJECT keyed "1": 8 codons from my start
-        CHECK(w.s.tally().injects == 1);
-        CHECK(w.s.mem()[200] == w.s.mem()[100] && w.s.mem()[207] == w.s.mem()[107]);
-        if (!on) {
-            CHECK(w.L.links() == 0);
-            continue;
-        }
-        CHECK(w.L.links() == 1 && w.L.inject_links() == 1 && w.L.founded() == 1);
-        BlockTag ti = w.L.tag(w.s.body(inj).blocks), tv = w.L.tag(w.s.body(vic).blocks);
-        CHECK(ti.lineage == 1 && ti.depth == 0 && tv.lineage == 1 && tv.depth == 1);
-        w.run(inj, 7); // INC x4, NOP0, SENSE, INJECT: her again
-        CHECK(w.s.tally().injects == 2 && w.L.links() == 2);
-        const LineageInfo* info = w.L.lineage(1);
-        CHECK(info && info->members == 2 && info->alive == 2 && info->inject_links == 2);
+// docs/inject-plan.md M4: a parasite that copies itself inside its host and
+// divides the copy off links her to its lineage (via parasite), founding one
+// as a parent does when it had none. Moving in is no link: it copies nothing.
+// Owning no block, the parasite stays a member on its body; it leaves when
+// it dies.
+void parasite_links() {
+    Watched w;
+    CHECK(w.init("life.bleed_every = 0\n"));
+    // INJECT, then a copy loop: SENSE (its size), ALLOC (out of its host),
+    // COPY x its size, SENSE, DIVIDE.
+    const u32 inj = w.plant(100, "INJECT SENSE ALLOC NOP1 COPY DJNZ NOP0 SENSE DIVIDE", 500); // 9 codons
+    TextBuf host;
+    host.append("NOP1");
+    for (int i = 0; i < 39; ++i)
+        host.append(" INC");
+    const u32 h = w.plant(200, host.c_str(), 500); // [200, 240), its tail open
+    CHECK(inj != kNone && h != kNone);
+    w.run(inj, 1);
+    CHECK(w.s.is_parasite(inj) && w.L.links() == 0 && w.L.founded() == 0); // moving in copies nothing
+    u64 divides = 0;
+    for (u32 i = 0; i < 80 && divides == 0; ++i) {
+        w.run(inj, 1);
+        divides = w.s.tally().parasite_divides;
     }
+    CHECK(divides == 1 && w.L.links() == 1 && w.L.parasite_links() == 1 && w.L.founded() == 1);
+    const u32 d = w.s.owner_body(200); // her block: carved from the host's low end
+    CHECK(d != kNone && d != h && d != inj && !w.s.is_parasite(d));
+    if (d == kNone)
+        return;
+    const BlockTag td = w.L.tag(w.s.body(d).blocks);
+    CHECK(td.lineage != 0 && td.depth == 1);
+    const LineageInfo* info = w.L.lineage(td.lineage);
+    CHECK(info && info->alive == 2 && info->members == 2 && info->parasite_links == 1 && info->divide_links == 1);
+    w.s.force_kill(inj); // the parasite dies: it leaves, its daughter stays
+    w.s.death_sweep();
+    info = w.L.lineage(td.lineage);
+    CHECK(info && info->alive == 1);
+    CHECK(soup_ok(w.s));
 }
 
-// The replicator the home rig found first (design.md 6.6): it buds blank
-// daughters and blind-injects itself into them, and the detector sees it
-// through INJECT links (and not at all without them: it has no COPY). Under
-// INJECT's key rule (2026-11-05 to 2026-11-08) its blind INJECT never landed.
-// Under the wound rule (docs/bites-plan.md I1) a blank daughter's ends are
-// open -- unwritten code isn't sealed by NOPs -- so it lands, and the
-// replicator works again: the risk the plan named, measured here.
+// The replicator the home rig found first (design.md 6.6) buds blank
+// daughters and blind-injects itself into them. Under the wound rule
+// (docs/bites-plan.md I1) that worked again, and long5 was full of it.
+// INJECT moves the program now (docs/inject-plan.md M1) and needs a host at
+// least twice its size (M6, Damian: "That should stop daughter infection as
+// a means of propagation"), so its buds can't take it: no lineage at all.
 void bud_and_inject_replicator() {
     const char* genome = "seed.genome = NOP0 POP NOP0 PUSH NOP0 POP SENSE INJECT ALLOC AND SENSE ADD "
                          "PUSH NOP0 POP SENSE INJECT DIVIDE OR SENSE SHL PUSH NOP0 POP EMIT GPU "
                          "DIVIDE OR SENSE DIVIDE OR NOP0\nseed.millicores = 10\n";
-    TextBuf rules, off_cfg;
+    TextBuf rules;
     rules.append(genome);
     rules.append("contact.inject_room = 0\n");
-    off_cfg.append(rules.view());
-    off_cfg.append("detect.inject = false\n");
     Outcome on = run_for(rules.c_str(), 50);
-    Outcome off = run_for(off_cfg.c_str(), 50);
-    CHECK(on.detections == 1 && on.max_depth >= 2 && on.first_tick < 50);
-    CHECK(off.detections == 0 && off.links == 0);
-    CHECK_EQ_U64(on.hash, off.hash); // still a pure observer
-    printf("  detect: bud-and-inject replicator: gate met at tick %llu through its daughters' open ends "
-           "(the wound rule)\n",
-           static_cast<unsigned long long>(on.first_tick));
+    CHECK(on.detections == 0 && on.links == 0);
+    printf("  detect: bud-and-inject replicator: no lineage in 50 ticks (a bud is too small to inject)\n");
 }
 
 // The gate's thresholds are knobs.
@@ -807,7 +802,7 @@ void suite_detect() {
     rotation_through_divide();
     founder_origins();
     founders_in_the_csv();
-    inject_links();
+    parasite_links();
     bud_and_inject_replicator();
     gate_knobs();
     pure_observer();

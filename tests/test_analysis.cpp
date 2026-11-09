@@ -507,7 +507,7 @@ void test_scores_files() {
     CreateDirectoryA(dir, nullptr);
     put("nova_test_analysis_run/run.cfg", "world.nodes = 4\nisa.table = nova_v2\n");
     put("nova_test_analysis_run/lineages.csv",
-        "lineage,node,founded,ended,status,max_depth,peak_alive,members,founder_len,divide_links,inject_links,"
+        "lineage,node,founded,ended,status,max_depth,peak_alive,members,founder_len,divide_links,parasite_links,"
         "gpu_links,founder_genotype,detected,founder_origin\n"
         "1.1,1,0,100,extinct,3,2,5,8,4,0,0,00000000000000aa,1,spark\n"
         "1.1,2,50,300,extinct,5,2,5,8,4,0,0,00000000000000aa,0,colonist\n"

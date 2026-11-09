@@ -13,14 +13,14 @@ namespace {
 struct Fix {
     SoupParams p;
     Soup s;
-    bool init(const char* extra = "", bool heat = false) {
+    bool init(const char* extra = "", bool heat = false, u64 seed = 23) {
         TextBuf cfg;
         cfg.append(heat ? "hazard.copy = 0\nhazard.flaw = 0\nhazard.rot = 0\nmem.upkeep = 0\n" : kQuiet);
         cfg.append("world.millicores = 2000\n");
         cfg.append(extra);
         if (!make_params(&p, cfg.c_str(), 1024))
             return false;
-        s.init(&p, 23, 0);
+        s.init(&p, seed, 0);
         s.begin_tick(0);
         return true;
     }
@@ -94,32 +94,27 @@ void shared_rights() {
 }
 
 // docs/bites-plan.md I1: INJECT has no roll. A wound (an open end) lets it in
-// every time, whatever its template matches; a host sealed at both ends never.
-// INJECT keeps the victim alive, so it can be retried.
+// every time, whatever its template matches (here at 50 seeds); a host sealed
+// at both ends never.
 void graded() {
-    Fix f;
-    CHECK(f.init());
-    u32 a = plant(f.s, 100, "INJECT NOP0 NOP0 NOP1 INC", 500);
-    u32 v = plant(f.s, 200, "NOP1 NOP1 NOP1 INC", 300); // its tail is open
-    CHECK(a != kNone && v != kNone);
-    const u32 trials = 300;
-    u64 cost = 0;
+    const u32 trials = 50;
+    u64 cost = 0, landed = 0;
     for (u32 i = 0; i < trials; ++i) {
-        Cpu& c = f.cpu(a);
-        c.ip = 100;
-        c.cx = 1;
-        c.rh = 104; // its INC: the host's tail stays INC, so stays open
-        c.errs = 0;
+        Fix f;
+        CHECK(f.init("", false, 100 + i));
+        u32 a = plant(f.s, 100, "INJECT NOP0 NOP0 NOP1", 500);
+        u32 v = plant(f.s, 200, "NOP1 NOP1 NOP1 INC INC INC INC INC", 300); // its tail is open
+        CHECK(a != kNone && v != kNone);
         cost += static_cast<u64>(f.s.run_cpu(f.cpu_of(a), 1));
+        landed += f.s.tally().injects;
     }
-    CHECK(f.s.tally().inject_tries == trials && f.s.tally().injects == trials);
-    CHECK(cost == trials * (9 + 1)); // every attempt pays; wins pay per codon
+    CHECK(landed == trials);
+    CHECK(cost == trials * (9 + 4)); // the attempt, and the 4 codons moved (docs/inject-plan.md M7)
     Fix g;
     CHECK(g.init());
-    u32 b = plant(g.s, 100, "INJECT NOP0 NOP0 NOP1 INC", 500);
-    CHECK(plant(g.s, 200, "NOP1 NOP1 INC NOP0", 300) != kNone); // sealed
-    g.cpu(b).cx = 1;
-    CHECK(g.s.run_cpu(g.cpu_of(b), 1) == 9 && g.s.tally().injects == 0);
+    u32 b = plant(g.s, 100, "INJECT NOP0 NOP0 NOP1", 500);
+    CHECK(plant(g.s, 200, "NOP1 NOP1 INC INC INC INC INC NOP0", 300) != kNone); // sealed
+    CHECK(g.s.run_cpu(g.cpu_of(b), 1) == 9 && g.s.tally().injects == 0 && !g.s.is_parasite(b));
 }
 
 // 0/0 counts as a perfect match: a blind attack takes a surfaceless body for
@@ -161,40 +156,38 @@ void blind_and_aimed() {
     CHECK(h.cpu(c).err == 1 && h.s.tally().engulfs == 0);
 }
 
-// INJECT overwrites, never inserts: the victim keeps its size and runs on.
+// INJECT overwrites, never inserts (docs/inject-plan.md M1, M2): the host
+// keeps its size, the injector's genome replaces its codons just inside the
+// wound, and both run that code -- the host's thread as its own, the
+// injector's as its guest, on its own cores. A parasite can't INJECT again
+// (M8).
 void inject_overwrites() {
     Fix f;
     CHECK(f.init());
-    u32 a = plant(f.s, 100, "INJECT NOP0 NOP0 NOP1 DEC DEC DEC", 500);
-    u32 v = plant(f.s, 300, "NOP1 NOP1 NOP0 INC INC INC", 300);
+    u32 a = plant(f.s, 100, "INJECT NOP0 NOP0 NOP1 DEC DEC DEC", 500); // 7 codons
+    u32 v = plant(f.s, 300, "NOP1 NOP1 NOP0 INC INC INC INC INC INC INC INC INC INC INC", 300); // 14, its tail open
     CHECK(a != kNone && v != kNone);
-    Cpu& c = f.cpu(a);
-    c.rh = 104;
-    c.ax = 3;
-    c.cx = 3;
-    CHECK(f.s.run_cpu(f.cpu_of(a), 1) == 1 + 8 + 3);
-    int dec = codon_of(f.p.table, Op::dec);
-    for (u32 i = 303; i < 306; ++i)
-        CHECK(f.s.mem()[i] == dec);
-    CHECK(f.s.body(v).mem == 6 && f.s.body(v).alive && f.s.block(f.s.body(v).blocks).len == 6);
-    CHECK(f.s.body(a).mem == 7);
-    // The victim runs the injected code.
-    f.s.cpu_mut(f.cpu_of(v)).ip = 303;
+    u8 genome[7];
+    for (u32 i = 0; i < 7; ++i)
+        genome[i] = f.s.mem()[100 + i];
+    f.cpu(a).cx = 10;
+    CHECK(f.s.run_cpu(f.cpu_of(a), 1) == 1 + 8 + 7);
+    for (u32 i = 0; i < 7; ++i)
+        CHECK(f.s.mem()[307 + i] == genome[i]);
+    CHECK(f.s.body(v).mem == 14 && f.s.body(v).alive && f.s.block(f.s.body(v).blocks).len == 14);
+    CHECK(f.s.body(a).mem == 0 && f.s.is_parasite(a) && f.s.host_of(a) == v && f.s.body(a).units == 500);
+    // The host runs the injected code.
+    f.s.cpu_mut(f.cpu_of(v)).ip = 311;
     f.s.run_cpu(f.cpu_of(v), 1);
     CHECK(f.s.cpu(f.cpu_of(v)).cx == 0u - 1u);
-
-    // AX no longer places it (docs/bites-plan.md I2): one codon lands just
-    // inside the wound, the last; zero means nothing.
-    const u8 second = f.s.mem()[301];
-    f.cpu(a).ip = 100;
-    f.cpu(a).rh = 104;
-    f.cpu(a).ax = 7;
-    f.cpu(a).cx = 1;
+    // So does the parasite, from past its INJECT's template, its registers kept.
+    CHECK(f.cpu(a).ip == 311 && f.cpu(a).parasite);
     f.s.run_cpu(f.cpu_of(a), 1);
-    CHECK(f.s.mem()[305] == dec && f.s.mem()[301] == second);
-    f.cpu(a).ip = 100;
-    f.cpu(a).cx = 0;
-    CHECK(f.s.run_cpu(f.cpu_of(a), 1) == 1 && f.cpu(a).err == 1);
+    CHECK(f.cpu(a).err == 0 && f.cpu(a).cx == 9);
+    // Its INJECT fails now: it moves no further.
+    f.cpu(a).ip = 307;
+    f.s.run_cpu(f.cpu_of(a), 1);
+    CHECK(f.cpu(a).err == 1 && f.s.tally().injects == 1);
     CHECK(soup_ok(f.s));
 }
 

@@ -553,7 +553,7 @@ The plan, its pilot findings and the design calls D1–D10 are in `docs/phase1b-
 **Detection (D2) [decided; extension open, see the findings].** A pure observer, one per soup (`detect.enabled`, default on): the soup tells it about new blocks, freed blocks and DIVIDEs; it never writes to the soup or draws from its RNG, and a test checks the world hash is identical with it off.
 - *Inheritance links* (extended by Damian after finding 1), each counted as same-offset matches / the longer length against `detect.similarity` (0.75; two random blocks match on about 1.6%):
   - *DIVIDE:* the daughter block matches the block the dividing CPU runs in, counting only codons the parent's body wrote into her (COPY, WRITE, movii) since her ALLOC (`detect.written`, default on), so budding onto a relative's intact remains is not copying. A CPU running inside the block it divides off is not a link.
-  - *INJECT (`detect.inject`, default on):* the codons an INJECT just wrote leave the victim's first block matching the injector's block (the block its CPU runs in). The victim joins the injector's lineage one generation deeper; a member re-infected by its own lineage stays as it was, and a member of another lineage moves.
+  - *INJECT (`detect.inject`, default on):* the codons an INJECT just wrote leave the victim's first block matching the injector's block (the block its CPU runs in). The victim joins the injector's lineage one generation deeper; a member re-infected by its own lineage stays as it was, and a member of another lineage moves. *(Retired 2026-11-09: INJECT moves a program instead of copying it, 6.27; its `inject_links` columns became `parasite_links`.)*
 - *Lineage:* the first link from an untagged parent founds a lineage, with the parent as its depth-0 founder; each inheriting daughter joins her parent's lineage one generation deeper. Members are blocks, so an engulfed replicator that keeps running stays a member. Mutants are full members.
 - *Gate:* a lineage with a member at depth ≥ `detect.gate_depth` (2) and at least `detect.gate_alive` (2) members alive at once. Both numbers only grow at links, so the check runs at the exact moment within the tick. The thresholds are knobs because, with INJECT links, 2/2 is met by chance (finding 1).
 - *Genebank:* every member's genotype (its codon hash when it joined) is counted while it lives; when a genotype's living count first reaches `detect.genebank_threshold` (2) it is saved to `genebank.txt` once, with a Tierra-style name (`0008aaa`: length, then letters in order of saving for that length), its first parent's name, its lineage and the genome as op names.
@@ -1921,6 +1921,100 @@ daughters and blind-injects itself into them -- works again: a blank
 daughter's ends are open, so the wound rule lets it in where the surface
 key didn't (suite detect). This is the risk the plan named (I1); the sweep
 watches for INJECT-only lineages.
+
+### 6.27 INJECT moves the program; swallowed prey are digested [built 2026-11-09]
+
+Built from `docs/inject-plan.md`, approved by Damian after the long5
+findings (two-thirds of hosts at tick 800,000 were one CPU family's own
+blank buds, injected with copies of itself). Supersedes 6.26's INJECT,
+its COPY price and its parasite threads. Snapshot v9; older files are
+refused.
+
+**INJECT moves the program** (Damian: "injecting should insert the program
+not a copy"). A landed INJECT moves the whole injecting body into its host.
+Its genome (its first block) overwrites the host's codons just inside the
+wound, as 6.26's payload did; its threads carry on there (an IP, head or
+stacked address in its genome moves with it, any other in its memory goes to
+its start); it keeps its serial, lineage, millicores, GPU and NPU units and
+disk; its warps end (it runs as CPU threads). Every block it owned is freed
+**cleared to codon 0**: "free space, but not information". It is now a
+**guest** of its host, a parasite, in per-body side arrays (host, kind,
+its region's place in the host's first block), saved and hashed with the
+soup.
+
+**Living inside.** One rights rule: a body may use a codon it owns, or, if
+it is a parasite, one its host owns (`Soup::mine`). So the parasite reads,
+writes and runs anywhere in its host and the host can overwrite it; bites
+and bleeding at that end take its code with the host's. It runs only on its
+own cores: one that brought none can't run. It can't INJECT again, bite,
+disperse, launch warps or go dormant, and it has no surface: nothing bites
+or injects it except through its host.
+
+**Propagating.** A parasite's ALLOC carves the block out of its host's first
+block from the end away from its own code (failing when the host has no
+codons of its own left there); its DIVIDE frees the daughter as an ordinary
+body, which takes her share of the **host's** millicores and GPU and NPU
+units. Every copy eats the host, which dies by the usual rules ("just like
+viruses in a cell"). The daughter joins the parasite's lineage by a `via
+parasite` link, as before.
+
+**The host dies; the parasite lives on.** What is left of its region, where
+it is free, becomes its own first block (the longest free run of it), its
+threads inside it. With none left it owns nothing and its threads fault. A
+host with guests never goes dormant.
+
+**Size and price.** An INJECT lands only if the host owns at least
+`contact.inject_ratio` (2) times the injector's memory, so a bud can't be
+infected by its parent; the room rule stays. It is priced as a bite's mirror
+image: `contact.cost_per_codon` per codon moved on the classic table, and on
+a timed table the codons moved at `engulf.codons_per_tick` (8), its thread
+busy meanwhile. 6.26's COPY price is gone (Damian: inject "is already a
+fairly novel mechanism").
+
+**Swallowed prey are digested** (Damian: "the victim shouldn't die
+immediately"). With `engulf.bite`, a bite that would swallow its prey whole
+makes it a swallowed guest of its eater instead. It runs on its own cores
+but can't ALLOC, DIVIDE, bite, disperse or go dormant, doesn't bleed, and
+nothing else can reach it. Each tick it loses `engulf.digest` (2) codons
+from its end to its eater's stomach (one growing block, never the eater's
+code or the daughter it is making). With nothing left, or if it dies first,
+its eater takes the rest, as a whole swallow did. Its INJECT aims at its
+eater, needs no wound and lands just inside the eater's nearer end: it
+escapes into its eater as a parasite and digestion stops. If the eater dies
+first, the prey is freed. `engulf.digest = 0` keeps the instant swallow.
+
+**Calls made while building** *(Claude's)*:
+- A program with guests in it can't INJECT: its code is theirs too.
+- A resting dormant program swallowed whole is food at once, as before: it
+  can't respond, so digesting it buys nothing.
+- A crash restarts a parasite at its own code in its host.
+- The detector: INJECT makes no link (it copies nothing), so
+  `detect.inject` is gone, and the `inject_links` columns (`stats.csv`,
+  `lineages.csv`, `result.txt`) are now `parasite_links`: daughters a
+  parasite divided off inside its host that joined its lineage. A parasite
+  that wasn't a member founds a lineage at its first such daughter, as a
+  parent does, so the inject-then-copy-inside life cycle is visible.
+- Behaviour profiles follow parasites (their code is their region in the
+  host) and count the ticks they spend inside (`inside`, a new action
+  column and roles feature); a sample that moved in or lived inside is a
+  parasite by the rules. A swallow counts as an `engulf_landed`.
+
+**Counts.** `stats.csv` gains the sums `swallows`, `digested` (codons),
+`escapes`, `freed` (guests outliving their hosts) and the gauges
+`parasites` and `swallowed`; `parasite_threads` now counts programs that
+moved into a host.
+
+**Tests.** Suite `parasites` tests moving in, life inside (carving,
+dividing, the host's death), what a parasite can't do, swallowing,
+digestion, escape and the eater's death, and a busy world through a
+snapshot; suite `rules` the size, room and placement rules. The 1b gate
+world's one gate event was an INJECT copy (with INJECT links off it had
+none, at HEAD too), so that world no longer needs one; the timed world for
+the `defended` milestone seeds its COPY replicator with the cores to
+establish. The roles test clusters from k = 5: the few, extreme predator
+and parasite samples would otherwise win the silhouette at k = 3. The
+bud-and-inject replicator no longer replicates at all (its buds are too
+small to take it).
 
 ## 7. Technical direction [decided via 7.1]
 

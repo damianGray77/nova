@@ -469,6 +469,8 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     // INJECT needs a host it fits in (Phase 1b, design.md 6.6), and lands only
     // through an open end (docs/bites-plan.md I1; the key it needed is gone).
     p->inject_room = key_f64(cfg, "contact.inject_room");
+    p->inject_ratio = key_f64(cfg, "contact.inject_ratio"); // docs/inject-plan.md M6
+    p->digest = key_u32(cfg, "engulf.digest");               // S2
 
     Str genome = key_str(cfg, "seed.genome");
     p->seed_at = key_u32(cfg, "seed.at", key_max(soup_size - 1));
@@ -743,6 +745,12 @@ void Soup::init(const SoupParams* p, u64 seed, u32 node, u32 life, const Ruins* 
     dorm_tag_.clear();
     sleep_req_.clear();
     origin_.clear();
+    guest_host_.clear(); // docs/inject-plan.md: no guests, no stomachs
+    guest_kind_.clear();
+    guest_at_.clear();
+    guest_len_.clear();
+    stomach_.clear();
+    guests_.clear();
     offline_.clear(); // disasters: every core online, nothing brewing
     pending_wipes_.clear(); // docs/lifehistory-plan.md W: no wipe coming
     weather_ = Weather{};
@@ -932,6 +940,15 @@ void Soup::forget_block(u32 body, u32 k) {
     for (u32 c = bodies_[body].cpus; c != kNone; c = cpus_[c].next)
         if (cpus_[c].block == k)
             cpus_[c].block = kNone;
+    // docs/inject-plan.md M2: its parasites' threads may run in it too.
+    if (has_guests(body))
+        for (usize i = 0; i < order_.size(); ++i) {
+            const u32 g = order_[i];
+            if (guest_host_[g] == body && guest_kind_[g] == kGuestParasite)
+                for (u32 c = bodies_[g].cpus; c != kNone; c = cpus_[c].next)
+                    if (cpus_[c].block == k)
+                        cpus_[c].block = kNone;
+        }
     // (A lane's block is set afresh every step before it is read, so lanes
     // keep theirs: they may sit on the GPU, out of the host's reach.)
 }
@@ -1005,6 +1022,19 @@ u32 Soup::new_body() {
     if (origin_.size() < bodies_.size()) // W7: how it began, set by whoever made it
         origin_.resize(bodies_.size());
     origin_[b] = kOriginUnknown;
+    if (guest_host_.size() < bodies_.size()) { // docs/inject-plan.md: free, no stomach
+        guest_host_.resize(bodies_.size());
+        guest_kind_.resize(bodies_.size());
+        guest_at_.resize(bodies_.size());
+        guest_len_.resize(bodies_.size());
+        stomach_.resize(bodies_.size());
+        guests_.resize(bodies_.size());
+    }
+    guest_host_[b] = kNone; // (a slot's last life left no guest state: kill, absorb)
+    guest_kind_[b] = kGuestNone;
+    guest_at_[b] = guest_len_[b] = 0;
+    guests_[b] = 0;
+    stomach_[b] = kNone;
     return b;
 }
 
@@ -1145,6 +1175,18 @@ bool Soup::arrive(const u8* code, u32 len, u32 millicores, u32 gpus, u32 npus, u
 }
 
 void Soup::kill(u32 b) {
+    // docs/inject-plan.md S2: a swallowed body that dies before it is
+    // digested is food at once.
+    if (guest_kind_[b] == kGuestSwallowed && guest_host_[b] != kNone && bodies_[guest_host_[b]].alive) {
+        absorb(b, guest_host_[b]);
+        ++tally_.deaths;
+        return;
+    }
+    if (obs_) // (a membership it carries on its body, owning no block: a parasite's)
+        obs_->on_guest_gone(*this, b, tick_);
+    set_guest(b, kNone, kGuestNone);
+    GuestRelease rel; // M5, S5: its guests outlive it
+    list_guests(b, &rel);
     Body& B = bodies_[b];
     const u32 g = genome_len(b); // its remnants remember whose code they were
     for (u32 k = B.blocks; k != kNone;) {
@@ -1181,6 +1223,7 @@ void Soup::kill(u32 b) {
     if (b < sleep_req_.size()) // (V1: a sleep it asked for dies with it)
         sleep_req_[b] = 0;
     ++tally_.deaths;
+    free_guests(rel);
 }
 
 // --- dormancy and drift (docs/dormancy-plan.md) ------------------------------
@@ -1220,6 +1263,10 @@ bool Soup::go_dormant(u32 b, u64 offline_until, u32 grace, u32 sleep, bool drift
     Body& B = bodies_[b];
     const u32 k = B.blocks;
     if (k == kNone)
+        return false;
+    // docs/inject-plan.md M8, S3: no guest goes dormant, nor a host with
+    // guests in it (the caller kills it instead, freeing them).
+    if (guest_kind_[b] != kGuestNone || has_guests(b))
         return false;
     const u32 code = blocks_[k].owned;
     const u32 mem_reserve = B.mem > code ? B.mem - code : 0;
@@ -1493,7 +1540,7 @@ u32 Soup::resting_count() const {
 
 u32 Soup::outer_codon(u32 b, bool high) const {
     const u32 k = bodies_[b].blocks;
-    if (k == kNone)
+    if (k == kNone || guest_kind_[b] != kGuestNone) // (a guest has no surface of its own: inject-plan M8, S3)
         return kNone;
     const Block& bl = blocks_[k];
     if (bl.owned < 2)
@@ -1525,19 +1572,297 @@ u64 Soup::open_ends() const {
     return n;
 }
 
+// Hosts with at least one living parasite in them now (docs/inject-plan.md).
 u64 Soup::infected() const {
+    Array<u8> seen;
     u64 n = 0;
     for (usize i = 0; i < order_.size(); ++i) {
-        const Body& B = bodies_[order_[i]];
-        if (!B.alive)
+        const u32 g = order_[i];
+        if (!bodies_[g].alive || guest_kind_[g] != kGuestParasite || guest_host_[g] == kNone)
             continue;
-        for (u32 c = B.cpus; c != kNone; c = cpus_[c].next)
-            if (cpus_[c].parasite) {
-                ++n;
-                break;
-            }
+        if (seen.empty())
+            seen.resize(bodies_.size()); // (zeroed)
+        const u32 h = guest_host_[g];
+        n += seen[h] ? 0u : 1u;
+        seen[h] = 1;
     }
     return n;
+}
+
+u64 Soup::guests_now(u8 kind) const {
+    u64 n = 0;
+    for (usize i = 0; i < order_.size(); ++i) {
+        const u32 b = order_[i];
+        n += bodies_[b].alive && guest_kind_[b] == kind ? 1u : 0u;
+    }
+    return n;
+}
+
+// --- guests (docs/inject-plan.md) ----------------------------------------------
+
+void Soup::set_guest(u32 b, u32 host, u8 kind, u32 at, u32 len) {
+    if (guest_kind_[b] != kGuestNone && guest_host_[b] != kNone)
+        --guests_[guest_host_[b]];
+    if (kind != kGuestNone && host != kNone)
+        ++guests_[host];
+    guest_host_[b] = host;
+    guest_kind_[b] = kind;
+    guest_at_[b] = at;
+    guest_len_[b] = len;
+}
+
+// M5, S5: guest g's host died, its first block having spanned [host_lo,
+// host_hi) (kNone first block: nothing). A parasite's region, clipped to
+// that span, becomes its own block where it is still free (the longest
+// free run of it); its threads in it run there, the rest go to its start.
+// With none of it left it owns nothing and its threads fault.
+void Soup::free_guest(u32 g, u32 host_first, u32 host_lo, u32 host_hi) {
+    const u8 kind = guest_kind_[g];
+    const u32 at = guest_at_[g], len = guest_len_[g];
+    set_guest(g, kNone, kGuestNone);
+    ++tally_.freed;
+    if (kind != kGuestParasite)
+        return;
+    Body& B = bodies_[g];
+    for (u32 c = B.cpus; c != kNone; c = cpus_[c].next) { // (its host's blocks are gone)
+        cpus_[c].parasite = 0;
+        cpus_[c].block = kNone;
+    }
+    if (host_first == kNone)
+        return;
+    const u32 lo = max_of<u32>(at, host_lo), hi = min_of<u32>(at + len, host_hi);
+    u32 best = kNone, best_len = 0;
+    for (u32 a = lo; a < hi;) {
+        if (owner_[a] != kNone) {
+            ++a;
+            continue;
+        }
+        u32 e = a;
+        while (e < hi && owner_[e] == kNone)
+            ++e;
+        if (e - a > best_len) {
+            best = a;
+            best_len = e - a;
+        }
+        a = e;
+    }
+    if (best == kNone)
+        return;
+    // Its own block now, first in its list (its code: the surface), before
+    // any daughter block it was carving.
+    const u32 had = B.blocks;
+    B.blocks = kNone;
+    const u32 k = new_block(best, best_len, g);
+    blocks_[k].next = had;
+    if (obs_)
+        obs_->on_guest_freed(*this, g, k, tick_);
+    for (u32 c = B.cpus; c != kNone; c = cpus_[c].next) {
+        Cpu& C = cpus_[c];
+        if (C.ip < best || C.ip >= best + best_len)
+            C.ip = best;
+        C.block = k;
+    }
+}
+
+// S2: a digested body's end, or a swallowed body dying first: its eater gets
+// what is left of it (as a whole swallow gave before digestion): memory,
+// millicores with their heat, GPU and NPU units, disk, warps. Its threads end.
+void Soup::absorb(u32 prey, u32 eater) {
+    Body& P = bodies_[prey];
+    Body& E = bodies_[eater];
+    rehost_guests(prey, eater); // its own guests: inside the eater now
+    if (!stamp_.empty()) { // its code stays its (salvage)
+        const u32 g = genome_len(prey);
+        for (u32 k = P.blocks; k != kNone; k = blocks_[k].next)
+            stamp_block(k, g);
+    }
+    // Its blocks with anything left in them become the eater's; digestion's
+    // emptied ones go.
+    u32 tail = E.blocks;
+    while (tail != kNone && blocks_[tail].next != kNone)
+        tail = blocks_[tail].next;
+    for (u32 k = P.blocks; k != kNone;) {
+        const u32 nk = blocks_[k].next;
+        blocks_[k].next = kNone;
+        if (blocks_[k].owned == 0) {
+            forget_block(prey, k);
+            free_block(k);
+        } else {
+            blocks_[k].body = eater;
+            if (tail == kNone)
+                E.blocks = k;
+            else
+                blocks_[tail].next = k;
+            tail = k;
+        }
+        k = nk;
+    }
+    E.mem += P.mem;
+    for (u32 c = P.cpus; c != kNone;) {
+        const u32 next = cpus_[c].next;
+        cpus_[c].body = kNone;
+        free_cpus_.push(c);
+        c = next;
+    }
+    if (P.unit_head != kNone) {
+        for (u32 u = P.unit_head; u != kNone; u = unit_next_[u])
+            unit_owner_[u] = eater;
+        if (E.unit_tail != kNone) {
+            unit_next_[E.unit_tail] = P.unit_head;
+            unit_prev_[P.unit_head] = E.unit_tail;
+        } else {
+            E.unit_head = P.unit_head;
+        }
+        E.unit_tail = P.unit_tail;
+        E.units += P.units;
+        if (ek()) {
+            eunits_[eater] += eunits_[prey];
+            eunits_[prey] = 0;
+        }
+    }
+    if (p_->gpus)
+        gpu_.move(prey, eater, gpu_.count[prey]);
+    if (p_->npus)
+        npu_.move(prey, eater, npu_.count[prey]);
+    if (disk_on())
+        disk_.move_all(prey, eater);
+    if (p_->warps)
+        merge_warps(prey, eater);
+    P.blocks = P.cpus = P.latest = kNone;
+    P.unit_head = P.unit_tail = kNone;
+    P.units = P.mem = P.ncpu = 0;
+    P.alive = 0; // the sweep recycles its slot
+    set_guest(prey, kNone, kGuestNone);
+    if (prey < sleep_req_.size())
+        sleep_req_[prey] = 0;
+    if (dormant(prey)) {
+        dorm_[prey].on = 0;
+        ++tally_.dormant_eaten;
+    }
+    if (obs_)
+        obs_->on_guest_gone(*this, prey, tick_);
+    ++tally_.engulfs; // (eaten, as a whole swallow counted before digestion)
+}
+
+bool Soup::has_guests(u32 h) const { return h < guests_.size() && guests_[h] > 0; }
+
+// Body `from` is eaten whole by `to` (a swallowed body digested, or the
+// whole-body ENGULF): its guests are inside `to` now, their places kept.
+void Soup::rehost_guests(u32 from, u32 to) {
+    if (!has_guests(from))
+        return;
+    for (usize i = 0; i < order_.size(); ++i) {
+        const u32 g = order_[i];
+        if (g != from && g != to && guest_host_[g] == from && guest_kind_[g] != kGuestNone)
+            set_guest(g, to, guest_kind_[g], guest_at_[g], guest_len_[g]);
+    }
+}
+
+// Body h is going (dying or eaten): its guests, listed now, while its first
+// block's span is known (M5, S5). free_guests() frees them once its blocks
+// are waste.
+void Soup::list_guests(u32 h, GuestRelease* r) const {
+    r->first = bodies_[h].blocks;
+    r->lo = r->first == kNone ? 0 : blocks_[r->first].start;
+    r->hi = r->first == kNone ? 0 : blocks_[r->first].start + blocks_[r->first].len;
+    r->g.clear();
+    if (!has_guests(h))
+        return;
+    for (usize i = 0; i < order_.size(); ++i) {
+        const u32 g = order_[i];
+        if (g != h && bodies_[g].alive && guest_host_[g] == h)
+            r->g.push(g);
+    }
+}
+
+void Soup::free_guests(const GuestRelease& r) {
+    for (usize i = 0; i < r.g.size(); ++i)
+        free_guest(r.g[i], r.first, r.lo, r.hi);
+}
+
+// S2 (Damian, 2026-11-09): a swallowed body isn't killed at once; each tick
+// it loses engulf.digest codons from the end of its code (its first block,
+// then its others) to its eater, appended to the eater's latest block when
+// they lie next to it (the eater's stomach), else as a new latest block.
+// When nothing of it is left its eater takes the rest of it (absorb).
+void Soup::digest() {
+    const u32 per = p_->digest;
+    for (usize i = 0; i < order_.size(); ++i) {
+        const u32 b = order_[i];
+        if (!bodies_[b].alive || guest_kind_[b] != kGuestSwallowed)
+            continue;
+        const u32 eater = guest_host_[b];
+        if (eater == kNone || !bodies_[eater].alive) { // (its eater died this tick: free)
+            set_guest(b, kNone, kGuestNone);
+            ++tally_.freed;
+            continue;
+        }
+        const u32 g = genome_len(b);
+        u32 left = per;
+        while (left > 0 && bodies_[b].blocks != kNone) {
+            // The last codon it owns of its last block (its first block last).
+            u32 k = bodies_[b].blocks;
+            while (blocks_[k].next != kNone)
+                k = blocks_[k].next;
+            Block& bl = blocks_[k];
+            u32 a = kNone;
+            for (u32 x = bl.start + bl.len; x > bl.start; --x)
+                if (owner_[x - 1] == k) {
+                    a = x - 1;
+                    break;
+                }
+            if (a == kNone) { // (an empty block: drop it)
+                if (bodies_[b].blocks == k) {
+                    bodies_[b].blocks = kNone;
+                } else {
+                    u32 t = bodies_[b].blocks;
+                    while (blocks_[t].next != k)
+                        t = blocks_[t].next;
+                    blocks_[t].next = kNone;
+                }
+                if (bodies_[b].latest == k)
+                    bodies_[b].latest = kNone;
+                forget_block(b, k);
+                free_block(k);
+                continue;
+            }
+            // Out of the prey ...
+            owner_[a] = kNone;
+            --bl.owned;
+            --bodies_[b].mem;
+            while (bl.len > 0 && owner_[bl.start + bl.len - 1] != k)
+                --bl.len;
+            // ... into the eater: its stomach (the block digestion last gave
+            // it) grows by it if adjacent, else it is a new stomach. Neither
+            // its code nor its latest block (a daughter in the making) changes.
+            u32 sk = stomach_[eater];
+            if (sk != kNone && (blocks_[sk].body != eater || sk == bodies_[eater].blocks || sk == bodies_[eater].latest ||
+                                blocks_[sk].owned != blocks_[sk].len))
+                sk = kNone;
+            const bool below = sk != kNone && blocks_[sk].start == a + 1;
+            const bool above = sk != kNone && blocks_[sk].start + blocks_[sk].len == a;
+            if (below || above) {
+                Block& L = blocks_[sk];
+                if (below)
+                    --L.start;
+                ++L.len;
+                ++L.owned;
+                owner_[a] = sk;
+                ++bodies_[eater].mem;
+            } else {
+                used_[a >> 6] &= ~(1ull << (a & 63)); // (new_block claims it back)
+                ++waste_;
+                stomach_[eater] = new_block(a, 1, eater);
+            }
+            if (!stamp_.empty()) // the prey's code, as a bite piece is (salvage)
+                stamp_[a] = g;
+            ++free_epoch_;
+            ++tally_.digested;
+            --left;
+        }
+        if (bodies_[b].blocks == kNone || bodies_[b].mem == 0)
+            absorb(b, eater); // nothing of it left: it is food
+    }
 }
 
 // Bleeding (B6, Damian): an end of a body's code whose outermost codon isn't a
@@ -1555,6 +1880,8 @@ void Soup::bleed() {
         Body& B = bodies_[b];
         if (!B.alive || B.blocks == kNone || (tick_ + 1 + B.serial) % every != 0)
             continue;
+        if (guest_kind_[b] != kGuestNone) // (inside a host: a swallowed body is digested instead, S3;
+            continue;                     //  a parasite's code is its host's and bleeds with it, M2)
         const u32 k = B.blocks;
         for (u32 side = 0; side < 2; ++side) {
             const u32 a = outer_codon(b, side == 1);
@@ -2593,7 +2920,7 @@ void Soup::accel_complete(const AccelOp& op, const u8* out, u32 scalar, const u3
     const double copy_p = p_->copy_rate * hazard_mult_ * op.gerr;
     for (u32 i = 0; i < op.out_n; ++i) {
         const u32 a = addr[i];
-        if (a >= p_->size || owner_[a] == kNone || blocks_[owner_[a]].body != op.body)
+        if (a >= p_->size || !mine(op.body, a)) // (a parasite's: its host's too, inject-plan M2)
             continue;
         if (p_->heat_on) {
             const float h = page_heat_[a >> kPageBits];
@@ -2731,6 +3058,8 @@ void Soup::tick_second_parts() {
         weather_hazards();
     if (p_->bleed_every > 0) // docs/bites-plan.md B6 (no draws)
         bleed();
+    if (p_->digest > 0) // docs/inject-plan.md S2 (no draws)
+        digest();
     death_sweep();
     if (!actions_.empty()) // Phase 9
         sweep_actions();
@@ -3695,7 +4024,11 @@ void Soup::death_sweep() {
             rest_tick(b);
             continue;
         }
-        if (sleep) { // docs/lifehistory-plan.md V1-V2: a sleep it asked for this tick
+        // docs/inject-plan.md M8, S3: a guest can't sleep, nor a host with
+        // guests in it; its ask is dropped.
+        if (sleep && (guest_kind_[b] != kGuestNone || has_guests(b))) {
+            // (falls through to the ordinary sweep)
+        } else if (sleep) { // docs/lifehistory-plan.md V1-V2: a sleep it asked for this tick
             ++tally_.sleeps;
             if (!go_dormant(b, 0, 0, sleep & ~kSleepDrift, (sleep & kSleepDrift) != 0)) {
                 ++tally_.sleep_expired; // (no reserve to sleep on: it dies)
@@ -3814,6 +4147,16 @@ void Soup::hash_into(Hasher& h) const {
         h.bytes(last_ran_.data(), last_ran_.size() * sizeof(u64));
     if (p_->dormancy) // dormancy: each body slot's dormant state (the tags are detector data)
         h.bytes(dorm_.data(), dorm_.size() * sizeof(Dormant));
+    bool guests = false; // docs/inject-plan.md: guests and stomachs (only once there are any: others hash as before)
+    for (usize i = 0; i < guest_host_.size() && !guests; ++i)
+        guests = guest_host_[i] != kNone || stomach_[i] != kNone;
+    if (guests) {
+        h.bytes(guest_host_.data(), guest_host_.size() * sizeof(u32));
+        h.bytes(guest_kind_.data(), guest_kind_.size());
+        h.bytes(guest_at_.data(), guest_at_.size() * sizeof(u32));
+        h.bytes(guest_len_.data(), guest_len_.size() * sizeof(u32));
+        h.bytes(stomach_.data(), stomach_.size() * sizeof(u32));
+    }
     if (!vent_at_.empty()) // Phase 10: the vents' places
         h.bytes(vent_at_.data(), vent_at_.size() * sizeof(u32));
     if (pages_pending()) { // heat inputs carried into the next tick (only then: worlds without them hash as before)
@@ -4155,6 +4498,11 @@ void Soup::save(ByteWriter& w) const {
         put_array(w, last_ran_);
     if (p_->dormancy) // dormancy (v3)
         put_array(w, dorm_);
+    put_array(w, guest_host_); // docs/inject-plan.md (v9): guests
+    put_array(w, guest_kind_);
+    put_array(w, guest_at_);
+    put_array(w, guest_len_);
+    put_array(w, stomach_);
     if (p_->vent_spacing > 0)
         put_array(w, vent_at_);
     // The pages' heat inputs carried into the next tick (async accelerator
@@ -4317,6 +4665,26 @@ bool Soup::load(ByteReader& r, TextBuf* err, u32 version) {
     }
     origin_.clear(); // W7: not in snapshots, so every body alive now began unknown
     origin_.resize(nb);
+    // docs/inject-plan.md (v9): guests and stomachs, one per body slot.
+    if (!get_array(r, &guest_host_, nb) || guest_host_.size() != nb || !get_array(r, &guest_kind_, nb) ||
+        guest_kind_.size() != nb || !get_array(r, &guest_at_, nb) || guest_at_.size() != nb ||
+        !get_array(r, &guest_len_, nb) || guest_len_.size() != nb || !get_array(r, &stomach_, nb) ||
+        stomach_.size() != nb) {
+        err->append("snapshot: guests truncated or the wrong shape");
+        return false;
+    }
+    for (usize i = 0; i < nb; ++i) {
+        if (guest_kind_[i] > kGuestSwallowed || (guest_kind_[i] != kGuestNone) != (guest_host_[i] != kNone) ||
+            (guest_host_[i] != kNone && guest_host_[i] >= nb) || (stomach_[i] != kNone && stomach_[i] >= blocks_.size())) {
+            err->append("snapshot: a guest or stomach out of range");
+            return false;
+        }
+    }
+    guests_.clear();
+    guests_.resize(nb); // (zeroed; derived)
+    for (usize i = 0; i < nb; ++i)
+        if (guest_kind_[i] != kGuestNone && guest_host_[i] != kNone)
+            ++guests_[guest_host_[i]];
     vent_at_.clear();
     if (p_->vent_spacing > 0 && !get_array(r, &vent_at_, n)) {
         err->append("snapshot: vents truncated");
@@ -4498,12 +4866,31 @@ bool Soup::check(TextBuf* why) const {
                 return fail("CPU list out of range or cyclic at body", b);
             if (cpus_[c].body != b)
                 return fail("CPU list crosses bodies at CPU", c);
-            if (cpus_[c].block != kNone && blocks_[cpus_[c].block].body != b)
+            // (a parasite's threads may run in its host's blocks: inject-plan M2)
+            if (cpus_[c].block != kNone && blocks_[cpus_[c].block].body != b &&
+                !(guest_kind_[b] == kGuestParasite && blocks_[cpus_[c].block].body == guest_host_[b]))
                 return fail("CPU wrap block not owned by its body, CPU", c);
             ++ncpu;
         }
         if (ncpu != B.ncpu)
             return fail("body CPU count wrong at body", b);
+        // docs/inject-plan.md: a guest's host is a living body that isn't
+        // itself; a parasite owns no code of its own.
+        if (guest_kind_[b] != kGuestNone) {
+            const u32 h = guest_host_[b];
+            if (h == kNone || h == b || h >= bodies_.size() || !bodies_[h].alive)
+                return fail("guest without a living host, body", b);
+        }
+    }
+    if (!guest_kind_.empty()) { // the guest counts match the guests
+        Array<u32> count;
+        count.resize(bodies_.size());
+        for (usize i = 0; i < bodies_.size(); ++i)
+            if (bodies_[i].alive && guest_kind_[i] != kGuestNone && guest_host_[i] < bodies_.size())
+                ++count[guest_host_[i]];
+        for (usize i = 0; i < bodies_.size(); ++i)
+            if (bodies_[i].alive && count[i] != guests_[i])
+                return fail("guest count wrong at body", static_cast<u32>(i));
     }
     if (mem_total + waste_ != n)
         return fail("memory not conserved: owned", mem_total);

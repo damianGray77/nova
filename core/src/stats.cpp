@@ -7,7 +7,7 @@ namespace nova {
 
 namespace {
 
-enum class LinkKind { all, inject, gpu };
+enum class LinkKind { all, parasite, gpu };
 
 // A node row's window sums: births, deaths, sent, arrived, lost, symptom
 // ticks, struck, then voluntary sleeps and dormant departures (bites plan).
@@ -17,7 +17,7 @@ u64 total_links(const World& w, LinkKind kind) {
     u64 links = 0;
     for (u32 n = 0; n < w.node_count(); ++n)
         if (const Lineages* L = w.node_lineages(n))
-            links += kind == LinkKind::inject ? L->inject_links()
+            links += kind == LinkKind::parasite ? L->parasite_links()
                                               : (kind == LinkKind::gpu ? L->gpu_links() : L->links());
     return links;
 }
@@ -31,7 +31,7 @@ const char* const kColumns[kStatsColumns] = {
     "disk_stores",  "disk_loads",   "disk_compares", "disk_rot",     "wipes",         "wiped",
     "wipe_deaths",  "emits",        "listens",       "collapses",    "recoveries",    "garbled",
     "bodies",       "cpus",         "free_millicores", "waste",      "gpu_held",      "npu_held",
-    "in_flight",    "links",        "inject_links",  "gpu_links",    "max_depth",     "lineages",
+    "in_flight",    "links",        "parasite_links", "gpu_links",    "max_depth",     "lineages",
     "top_lineage",  "genotypes_in_top", "colonised", "links_down",   "disk_held",     "live_nodes",
     // Phase 8: warps (sums, then gauges), after every earlier column so those keep their places
     "warp_steps",   "lane_instr",   "warp_host",     "launches",     "gpu_births",    "warps",
@@ -64,8 +64,9 @@ const char* const kColumns[kStatsColumns] = {
     // life history (docs/lifehistory-plan.md W, V7, R7) and cheaper corpses: nine sums
     "wipe_warnings", "wipe_false_alarms", "wipe_flickers", "sleeps", "sleep_woke", "sleep_expired", "ray_inserts",
     "ray_deletes", "corpse_codons",
-    // bites as wounds and parasites (docs/bites-plan.md): six sums, then two gauges
-    "wounds", "bled", "repairs", "parasite_threads", "parasite_divides", "struck_bodies", "open_ends", "infected",
+    // bites as wounds, parasites and guests (docs/bites-plan.md, docs/inject-plan.md): ten sums, then four gauges
+    "wounds", "bled", "repairs", "parasite_threads", "parasite_divides", "struck_bodies", "swallows", "digested",
+    "escapes", "freed", "open_ends", "infected", "parasites", "swallowed",
     // the two floating-point columns, last as always
     "compress",     "ambient"};
 // The first 39 tally fields fill columns 3-41; Phase 8's five go after
@@ -124,7 +125,7 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
         v[3 + i] = t[i];
     // The detector's view: the largest lineage over all nodes, and its
     // genotype count.
-    const u64 links = total_links(w, LinkKind::all), inject = total_links(w, LinkKind::inject),
+    const u64 links = total_links(w, LinkKind::all), parasite = total_links(w, LinkKind::parasite),
               gpu = total_links(w, LinkKind::gpu);
     u64 gpu_held = 0, npu_held = 0, max_depth = 0, lineages = 0, top = 0, top_genos = 0, colonised = 0,
         disk_held = 0, warps = 0, gpu_bodies = 0, e_held = 0, archive_held = 0, fast_held = 0;
@@ -161,7 +162,7 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
         }
     }
     const u64 tail[] = {bodies,          cpus,        free_units, waste,     gpu_held,     npu_held,
-                        w.in_flight(),   links - marks->links, inject - marks->inject, gpu - marks->gpu,
+                        w.in_flight(),   links - marks->links, parasite - marks->parasite, gpu - marks->gpu,
                         max_depth,       lineages,    top,        top_genos, colonised,    w.links_down(),
                         disk_held,       w.live_nodes()};
     const usize nt = sizeof tail / sizeof tail[0];
@@ -244,16 +245,20 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
     for (u32 i = 0; i < kTallyBite; ++i)
         v[kStatsBiteFirst + i] = t[kTallyEarly + kTallyWarp + kTallyAction + kTallyThread + kTallyLife + kTallyDormant +
                                    kTallyArchive + kTallyDisaster + kTallyTier + kTallyLifeHistory + i];
-    u64 open_ends = 0, infected = 0;
+    u64 open_ends = 0, infected = 0, parasites = 0, swallowed = 0;
     for (u32 n = 0; n < w.node_count(); ++n) {
         const Soup& s = w.node_soup(n);
         open_ends += s.open_ends();
         infected += s.infected();
+        parasites += s.guests_now(kGuestParasite);
+        swallowed += s.guests_now(kGuestSwallowed);
     }
     v[kStatsBiteFirst + kTallyBite] = open_ends;
     v[kStatsBiteFirst + kTallyBite + 1] = infected;
+    v[kStatsBiteFirst + kTallyBite + 2] = parasites;
+    v[kStatsBiteFirst + kTallyBite + 3] = swallowed;
     marks->links = links;
-    marks->inject = inject;
+    marks->parasite = parasite;
     marks->gpu = gpu;
     out->compress = comp / w.node_count();
     out->ambient = ambient / w.node_count();

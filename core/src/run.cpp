@@ -255,7 +255,7 @@ void Run::drain_detection() {
             t.append_u64(g.len);
             t.append(" genotype=");
             t.append_hex64(g.genotype);
-            t.append(g.via == kViaInject ? " via=inject" : (g.via == kViaParasite ? " via=parasite" : " via=divide"));
+            t.append(g.via == kViaParasite ? " via=parasite" : " via=divide");
             Event ev;
             ev.tick = g.tick;
             ev.off = static_cast<u32>(event_text_.size());
@@ -394,7 +394,7 @@ void Run::drain_detection() {
 void Run::write_lineage_row(const LineageEnd& e, u32 node, bool alive) {
     const u64 cols[] = {node,          e.info.founded, e.ended,
                         e.info.max_depth, e.info.peak_alive, e.info.members, e.info.founder_len,
-                        e.info.divide_links, e.info.inject_links, e.info.gpu_links};
+                        e.info.divide_links, e.info.parasite_links, e.info.gpu_links};
     TextBuf t;
     append_lineage(t, e.id);
     for (usize i = 0; i < sizeof cols / sizeof cols[0]; ++i) {
@@ -491,7 +491,7 @@ bool Run::open_lineages(const char* path, TextBuf* err) {
         return false;
     }
     lineages_.write("lineage,node,founded,ended,status,max_depth,peak_alive,members,founder_len,"
-                    "divide_links,inject_links,gpu_links,founder_genotype,detected,founder_origin\n");
+                    "divide_links,parasite_links,gpu_links,founder_genotype,detected,founder_origin\n");
     lineages_.flush();
     return true;
 }

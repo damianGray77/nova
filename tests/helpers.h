@@ -58,11 +58,11 @@ inline const char* const kSoupWorld = "seed = 42\n"
                                       "heat.write_gain = 1.5\n";
 
 // A busy soup world under the Phase 1b rules: memory upkeep (the default), CPU
-// wear, sparks last, the doubled-invasion table, INJECT's key and fit rules,
-// and on every node a seeded COPY replicator with a surface ("0") and a keyed
-// INJECT ("1") that overwrites its own relatives, so the detector fires and
-// keyed injections happen. Sparks are funded well enough to pay their upkeep,
-// and hazards and heat run hot as in kSoupWorld. 24 nodes x at most 1000
+// wear, sparks last, the doubled-invasion table, and on every node a seeded
+// COPY replicator sealed by NOPs. Sparks are funded well enough to pay their
+// upkeep, and hazards and heat run hot as in kSoupWorld. (Its gate events came
+// from INJECT copies; INJECT moves a program now, docs/inject-plan.md, and at
+// this heat the COPY replicator doesn't establish.) 24 nodes x at most 1000
 // instructions per tick.
 inline const char* const kSoupWorld1b = "seed = 42\n"
                                         "world.model = soup\n"
