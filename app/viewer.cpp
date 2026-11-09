@@ -617,6 +617,7 @@ void Viewer::open_popup(u32 kind, u32 owner, const Rect& anchor) {
     popup_ = kind;
     popup_owner_ = owner;
     popup_scroll_ = 0;
+    popup_bar_.release();
     popup_r_ = Rect{anchor.x, anchor.bottom(), 0, 0}; // sized when drawn
 }
 
@@ -659,6 +660,8 @@ void Viewer::frame(const UiInput& input, Canvas& c, const RunStatus& st) {
                 sub_type_ = (sub_type_ + 1) % kSubstrateTypes;
             if (in.keys[i] == 0x42) // 'B'
                 ground_on_ = !ground_on_;
+            if (in.keys[i] == 0x24) // Home: the charts show the whole run again
+                charts_whole_run();
         }
     }
 
@@ -1462,38 +1465,129 @@ void Viewer::fit_mass(u32 mass) {
 
 // --- charts ----------------------------------------------------------------------
 
+// The whole log's span of ticks (one tick wide until there are two samples).
+TickSpan Viewer::chart_full() const {
+    const usize n = charts_.size();
+    const double t0 = n ? static_cast<double>(charts_.tick(0)) : 0.0;
+    const double t1 = n ? static_cast<double>(charts_.tick(n - 1)) : 1.0;
+    return TickSpan{t0, t1 > t0 ? t1 : t0 + 1.0};
+}
+
 void Viewer::charts_panel(const UiInput& in, Canvas& c) {
     Rect inner;
     panel_box(c, charts_r_, "Charts", &inner);
     char buf[256];
-    if (charts_.step() > 1) {
-        snprintf(buf, sizeof buf, "every %u samples shown", charts_.step());
-        c.text(charts_r_.right() - c.px(8), charts_r_.y + c.px(4), buf, kFontSmall, kDim, kAlignRight);
-    }
     const usize n = charts_.size();
     const i32 each = inner.h / static_cast<i32>(kCharts);
     const i32 lab = c.px(52);
-    const u64 t0 = n ? charts_.tick(0) : 0, t1 = n ? charts_.tick(n - 1) : 1;
-    const double span = t1 > t0 ? static_cast<double>(t1 - t0) : 1.0;
-    // The sample under the mouse (shared by every chart).
-    usize hover = ~static_cast<usize>(0);
+    const i32 head = c.line_h(kFontSmall) + c.px(2);
     const i32 plot_x = inner.x + lab, plot_w = inner.w - lab;
-    if (n > 1 && in.mx >= plot_x && in.mx < plot_x + plot_w && inner.contains(in.mx, in.my)) {
-        const double t = t0 + (static_cast<double>(in.mx - plot_x) / plot_w) * span;
-        usize lo = 0, hi = n - 1;
+    const double across = plot_w > 1 ? plot_w - 1 : 1; // pixels from the span's first tick to its last
+    // Each chart: a header (its series) over its plot; the last has the ticks under it.
+    for (u32 k = 0; k < kCharts; ++k) {
+        const i32 cy = inner.y + static_cast<i32>(k) * each, ch = each - c.px(4);
+        cplot_[k] = Rect{plot_x, cy + head, plot_w, ch - head - (k + 1 == kCharts ? c.line_h(kFontSmall) : 0)};
+    }
+
+    // The span of ticks every chart shows (2026-11-09): the whole run, or the
+    // part the wheel zoomed into about the tick under the mouse. Dragging a
+    // plot pans it; a double-click on one, Home or "whole run" shows the whole
+    // run again. Zoomed into the run's end, it keeps up with the newest sample.
+    const TickSpan full = chart_full();
+    if (czoom_) {
+        if (cfollow_)
+            cspan_ = TickSpan{full.hi - cspan_.width(), full.hi};
+        cspan_ = pan_span(cspan_, 0, full);
+        czoom_ = cspan_.width() < full.width();
+    }
+    TickSpan view = czoom_ ? cspan_ : full;
+    i32 over = -1; // the plot under the mouse
+    for (u32 k = 0; k < kCharts; ++k)
+        over = cplot_[k].contains(in.mx, in.my) ? static_cast<i32>(k) : over;
+    if (n > 1 && over >= 0) {
+        if (in.wheel) {
+            const double at = view.lo + (in.mx - plot_x) / across * view.width();
+            const double least = 3.0 * full.width() / static_cast<double>(n - 1); // three samples apart at least
+            cspan_ = zoom_span(view, at, in.wheel, full, least);
+            czoom_ = cspan_.width() < full.width();
+            cfollow_ = czoom_ && cspan_.hi >= full.hi;
+            view = czoom_ ? cspan_ : full;
+        }
+        if (in.dbl) {
+            charts_whole_run();
+            view = full;
+        } else if (in.pressed && czoom_) {
+            cpan_ = true;
+            cpan_x_ = in.mx;
+            cpan_from_ = cspan_;
+        }
+    }
+    if (cpan_ && (!in.down || !czoom_))
+        cpan_ = false;
+    if (cpan_) {
+        cspan_ = pan_span(cpan_from_, -(in.mx - cpan_x_) / across * cpan_from_.width(), full);
+        cfollow_ = cspan_.hi >= full.hi;
+        view = cspan_;
+        cursor_ = 1;
+    }
+    // The header's right end: "whole run" while zoomed, the log's thinning,
+    // and the mouse's hints where there is room.
+    {
+        i32 right = charts_r_.right() - c.px(8);
+        if (czoom_) {
+            const char* label = "whole run";
+            const i32 hh = c.line_h(kFontBold) + c.px(6), w = c.text_w(label, kFontUi) + c.px(16);
+            const Rect r{charts_r_.right() - w - c.px(6), charts_r_.y + c.px(2), w, hh - c.px(4)};
+            if (button(in, c, r, label)) {
+                charts_whole_run();
+                view = full;
+            }
+            right = r.x - c.px(8);
+        }
+        const i32 left = charts_r_.x + c.text_w("Charts", kFontBold) + c.px(20);
+        if (charts_.step() > 1) {
+            snprintf(buf, sizeof buf, "every %u samples shown", charts_.step());
+            c.text(right, charts_r_.y + c.px(4), buf, kFontSmall, kDim, kAlignRight);
+            right -= c.text_w(buf, kFontSmall) + c.px(12);
+        }
+        const char* hint = czoom_ ? "drag: pan, double-click: whole run" : "wheel: zoom the ticks";
+        if (n > 1 && right - c.text_w(hint, kFontSmall) >= left)
+            c.text(right, charts_r_.y + c.px(4), hint, kFontSmall, kFaint, kAlignRight);
+    }
+    const double vw = view.width() > 0 ? view.width() : 1.0;
+    // Samples [a, b) are in the span; one more each side reaches its edges.
+    auto first_after = [&](double t, bool or_at) { // the first sample at (or_at) or after t
+        usize lo = 0, hi = n;
         while (lo < hi) {
             const usize mid = (lo + hi) / 2;
-            if (static_cast<double>(charts_.tick(mid)) < t)
+            const double m = static_cast<double>(charts_.tick(mid));
+            if (or_at ? m < t : m <= t)
                 lo = mid + 1;
             else
                 hi = mid;
         }
-        hover = lo;
+        return lo;
+    };
+    const usize a = first_after(view.lo, true), b = first_after(view.hi, false);
+    const usize d0 = a ? a - 1 : 0, d1 = b < n ? b + 1 : n;
+    auto x_of = [&](double t) {
+        double x = plot_x + (t - view.lo) / vw * across;
+        x = x < -1e6 ? -1e6 : (x > 1e6 ? 1e6 : x);
+        return static_cast<i32>(floor(x + 0.5));
+    };
+    // The sample under the mouse (shared by every chart): the nearest.
+    usize hover = ~static_cast<usize>(0);
+    if (n > 1 && in.mx >= plot_x && in.mx < plot_x + plot_w && inner.contains(in.mx, in.my)) {
+        const double t = view.lo + (in.mx - plot_x) / across * vw;
+        usize j = first_after(t, true);
+        j = j < n ? j : n - 1;
+        if (j > 0 && t - static_cast<double>(charts_.tick(j - 1)) < static_cast<double>(charts_.tick(j)) - t)
+            --j;
+        hover = j;
     }
     Array<i32> pts;
     for (u32 k = 0; k < kCharts; ++k) {
         const Rect ck{inner.x, inner.y + static_cast<i32>(k) * each, inner.w, each - c.px(4)};
-        const i32 head = c.line_h(kFontSmall) + c.px(2);
         const Rect hr{ck.x, ck.y, ck.w, head};
         // The header: each series in its colour (with the value under the mouse).
         i32 x = ck.x + c.px(2);
@@ -1517,19 +1611,22 @@ void Viewer::charts_panel(const UiInput& in, Canvas& c) {
             if (in.pressed)
                 open_popup(3, k, Rect{hr.x + c.px(40), hr.y, 0, hr.h});
         }
-        const Rect pr{plot_x, ck.y + head, plot_w, ck.h - head - (k + 1 == kCharts ? c.line_h(kFontSmall) : 0)};
+        const Rect& pr = cplot_[k];
         c.fill(pr, 0x1A1D23);
         if (n < 2 || !any) {
             if (k == 0)
                 c.text(pr.x + c.px(6), pr.y + c.px(4), n < 2 ? "waiting for samples..." : "", kFontSmall, kDim);
             continue;
         }
+        // The values' range over the samples in the span (zoomed in, the
+        // part's own; its neighbours' if it falls between two samples).
+        const usize v0 = a < b ? a : d0, v1 = a < b ? b : d1;
         double vmax = 0, vmin = 0;
         for (u32 s = 0; s < kSeries; ++s) {
             const u32 col = series_[k][s];
             if (col == kNone)
                 continue;
-            for (usize i = 0; i < n; ++i) {
+            for (usize i = v0; i < v1; ++i) {
                 const double v = charts_.value(i, col);
                 vmax = v > vmax ? v : vmax;
                 vmin = v < vmin ? v : vmin;
@@ -1546,9 +1643,10 @@ void Viewer::charts_panel(const UiInput& in, Canvas& c) {
         // Milestones: the first event of each kind, as a labelled line.
         static const char kLetter[] = "RGNCDS";
         for (u32 e = 0; e < 6; ++e) {
-            if (!first_event_[e] || first_event_[e] - 1 < t0)
+            const double et = static_cast<double>(first_event_[e]) - 1;
+            if (!first_event_[e] || et < view.lo || et > view.hi)
                 continue;
-            const i32 ex = pr.x + static_cast<i32>((static_cast<double>(first_event_[e] - 1) - t0) / span * pr.w);
+            const i32 ex = x_of(et);
             c.dashed(ex, pr.y, ex, pr.bottom(), kWarn, c.px(3));
             const char l[2] = {kLetter[e], 0};
             c.text(ex + c.px(2), pr.y, l, kFontSmall, kWarn);
@@ -1556,38 +1654,38 @@ void Viewer::charts_panel(const UiInput& in, Canvas& c) {
         // Collapses (red) and recoveries (green) as ticks along the bottom.
         for (usize i = events_.size(), shown = 0; i-- > 0 && shown < 4000;) {
             const ViewEvent& e = events_[i];
-            if ((e.kind != kEvCollapse && e.kind != kEvRecovered) || e.tick < t0)
+            const double et = static_cast<double>(e.tick);
+            if ((e.kind != kEvCollapse && e.kind != kEvRecovered) || et < view.lo || et > view.hi)
                 continue;
             ++shown;
-            const i32 ex = pr.x + static_cast<i32>((static_cast<double>(e.tick) - t0) / span * pr.w);
-            c.fill(Rect{ex, pr.bottom() - c.px(4), 1, c.px(4)}, e.kind == kEvCollapse ? kBad : kGood);
+            c.fill(Rect{x_of(et), pr.bottom() - c.px(4), 1, c.px(4)}, e.kind == kEvCollapse ? kBad : kGood);
         }
         for (u32 s = 0; s < kSeries; ++s) {
             const u32 col = series_[k][s];
             if (col == kNone)
                 continue;
-            pts.resize(2 * n);
-            for (usize i = 0; i < n; ++i) {
-                pts[2 * i] = pr.x + static_cast<i32>((static_cast<double>(charts_.tick(i)) - t0) / span * (pr.w - 1));
-                pts[2 * i + 1] =
+            pts.resize(2 * (d1 - d0));
+            for (usize i = d0; i < d1; ++i) {
+                pts[2 * (i - d0)] = x_of(static_cast<double>(charts_.tick(i)));
+                pts[2 * (i - d0) + 1] =
                     pr.bottom() - 1 - static_cast<i32>((charts_.value(i, col) - vmin) / range * (pr.h - 1));
             }
-            c.polyline(pts.data(), static_cast<u32>(n), kSeriesColor[s]);
+            c.polyline(pts.data(), static_cast<u32>(d1 - d0), kSeriesColor[s]);
         }
         if (hover < n) {
-            const i32 hx = pr.x + static_cast<i32>((static_cast<double>(charts_.tick(hover)) - t0) / span * (pr.w - 1));
+            const i32 hx = x_of(static_cast<double>(charts_.tick(hover)));
             c.line(hx, pr.y, hx, pr.bottom(), kFaint);
         }
         c.unclip();
-        if (k + 1 == kCharts) {
-            char a[32], b[32];
-            commas(t0, a);
-            commas(t1, b);
-            c.text(pr.x, pr.bottom(), a, kFontSmall, kDim);
-            c.text(pr.right(), pr.bottom(), b, kFontSmall, kDim, kAlignRight);
+        if (k + 1 == kCharts) { // the ticks: the span's ends (zoomed: the part's)
+            char ta[32], tb[32];
+            commas(static_cast<u64>(view.lo + 0.5), ta);
+            commas(static_cast<u64>(view.hi + 0.5), tb);
+            c.text(pr.x, pr.bottom(), ta, kFontSmall, kDim);
+            c.text(pr.right(), pr.bottom(), tb, kFontSmall, kDim, kAlignRight);
             if (hover < n) {
-                commas(charts_.tick(hover), a);
-                snprintf(buf, sizeof buf, "tick %s", a);
+                commas(charts_.tick(hover), ta);
+                snprintf(buf, sizeof buf, "tick %s", ta);
                 c.text(pr.x + pr.w / 2, pr.bottom(), buf, kFontSmall, kText, kAlignCenter);
             }
         }
@@ -1639,11 +1737,12 @@ void Viewer::phylogeny(const UiInput& in, Canvas& c) {
     }
     const i32 rh = c.line_h(kFontSmall) + c.px(3);
     const i32 rows = static_cast<i32>(phylo_.size());
-    if (in.wheel && inner.contains(in.mx, in.my))
-        phylo_scroll_ -= in.wheel * 3 * rh;
-    const i32 max_scroll = rows * rh - inner.h;
-    phylo_scroll_ = phylo_scroll_ > max_scroll ? max_scroll : phylo_scroll_;
-    phylo_scroll_ = phylo_scroll_ < 0 ? 0 : phylo_scroll_;
+    { // The wheel or the scrollbar, in pixels; the tree keeps clear of the bar.
+        Rect track;
+        const Rect area = inner;
+        scroll_split(c, area, &inner, &track);
+        phylo_bar_.update(in, c, area, track, rows * rh, inner.h, 3 * rh, &phylo_scroll_);
+    }
     u64 tmin = phylo_[0].tick, tmax = phylo_[0].tick;
     for (usize i = 0; i < phylo_.size(); ++i) {
         tmin = phylo_[i].tick < tmin ? phylo_[i].tick : tmin;
@@ -1718,16 +1817,15 @@ void Viewer::kinds_panel(const UiInput& in, Canvas& c, const Rect& inner) {
     const char* heads[7] = {"#", "bits/codon", "name", "lineage", "tick", "node", "len"};
     for (u32 k = 0; k < 7; ++k)
         c.text(inner.x + cols[k], inner.y, heads[k], kFontSmall, kDim);
-    const Rect rows{inner.x, inner.y + sh, inner.w, inner.h - sh};
+    const Rect area{inner.x, inner.y + sh, inner.w, inner.h - sh};
+    Rect rows, track; // the list and its scrollbar
+    scroll_split(c, area, &rows, &track);
     // Rows: a header for each window, then its picks.
     u32 lines = 0;
     for (usize i = 0; i < n; ++i)
         lines += 1 + (i == 0 || pick(i).window_first != pick(i - 1).window_first || pick(i).open != pick(i - 1).open);
-    if (in.wheel && rows.contains(in.mx, in.my))
-        kinds_scroll_ -= in.wheel * 3;
     const i32 visible = rows.h / sh;
-    kinds_scroll_ = kinds_scroll_ > static_cast<i32>(lines) - visible ? static_cast<i32>(lines) - visible : kinds_scroll_;
-    kinds_scroll_ = kinds_scroll_ < 0 ? 0 : kinds_scroll_;
+    kinds_bar_.update(in, c, area, track, static_cast<i32>(lines), visible, 3, &kinds_scroll_);
     const GenomeEntry* sel = sel_save_ < saves_.size() ? &saves_[sel_save_] : nullptr;
     c.clip(rows);
     i32 line = 0;
@@ -2159,13 +2257,12 @@ void Viewer::inspector(const UiInput& in, Canvas& c) {
     const char* heads[6] = {"body", "len", "cpu", "mcores", "mem", "lineage"};
     for (u32 k = 0; k < 6; ++k)
         c.text(list.x + cols[k], y, heads[k], kFontSmall, kDim);
-    const Rect rows{list.x, y + sh2, list.w, list.h - sh2};
-    if (in.wheel && rows.contains(in.mx, in.my))
-        body_scroll_ -= in.wheel * 3;
+    const Rect area{list.x, y + sh2, list.w, list.h - sh2};
+    Rect rows, track; // the list and its scrollbar
+    scroll_split(c, area, &rows, &track);
     const i32 visible = rows.h / sh2;
     const i32 count = static_cast<i32>(cur_.bodies.size());
-    body_scroll_ = body_scroll_ > count - visible ? count - visible : body_scroll_;
-    body_scroll_ = body_scroll_ < 0 ? 0 : body_scroll_;
+    body_bar_.update(in, c, area, track, count, visible, 3, &body_scroll_);
     c.clip(rows);
     for (i32 r = 0; r < visible + 1 && body_scroll_ + r < count; ++r) {
         const BodyRow& br = cur_.bodies[static_cast<usize>(body_scroll_ + r)];
@@ -2291,21 +2388,21 @@ void Viewer::inspector(const UiInput& in, Canvas& c) {
     }
     dy += c.px(4);
     // The genome, wrapped.
-    const Rect gr{det.x, dy, det.w, det.bottom() - dy};
-    if (in.wheel && gr.contains(in.mx, in.my))
-        genome_scroll_ -= in.wheel * 2;
-    genome_scroll_ = genome_scroll_ < 0 ? 0 : genome_scroll_;
+    const Rect garea{det.x, dy, det.w, det.bottom() - dy};
+    Rect gr, gtrack; // the text and its scrollbar (in lines)
+    scroll_split(c, garea, &gr, &gtrack);
+    const i32 mh = c.line_h(kFontMono);
+    i32 lines = 0;
+    wrap_mono(c, cur_.genome.data(), cur_.genome.size(), gr.w, [&](usize, usize) { ++lines; });
+    genome_bar_.update(in, c, garea, gtrack, lines, gr.h > 0 && mh > 0 ? gr.h / mh : 0, 2, &genome_scroll_);
     c.clip(gr);
     i32 line = 0;
-    const i32 mh = c.line_h(kFontMono);
     wrap_mono(c, cur_.genome.data(), cur_.genome.size(), gr.w, [&](usize s, usize len) {
         const i32 ly = gr.y + (line - genome_scroll_) * mh;
         if (ly >= gr.y - mh && ly < gr.bottom())
             c.text(gr.x, ly, cur_.genome.data() + s, len, kFontMono, 0xC8D0A0);
         ++line;
     });
-    if (genome_scroll_ > line - 1)
-        genome_scroll_ = line > 0 ? line - 1 : 0;
     c.unclip();
 }
 
@@ -2429,6 +2526,7 @@ void Viewer::browser(const UiInput& in, Canvas& c) {
     if (order_dirty_)
         sort_saves();
     if (saves_.empty()) {
+        browse_track_ = Rect{};
         c.text(inner.x, inner.y, "no genotype saved yet (a lineage member's genotype is saved once it has "
                                  "detect.genebank_threshold living copies)",
                kFontSmall, kDim, kAlignLeft, inner.w);
@@ -2452,13 +2550,14 @@ void Viewer::browser(const UiInput& in, Canvas& c) {
         }
     }
     const i32 list_h = (inner.h - sh) * 3 / 5;
-    const Rect rows{inner.x, inner.y + sh, inner.w, list_h};
-    if (in.wheel && rows.contains(in.mx, in.my))
-        browse_scroll_ -= in.wheel * 3;
+    const Rect area{inner.x, inner.y + sh, inner.w, list_h};
+    Rect rows, track; // the list and its scrollbar
+    scroll_split(c, area, &rows, &track);
     const i32 visible = rows.h / sh;
     const i32 count = static_cast<i32>(order_.size());
-    browse_scroll_ = browse_scroll_ > count - visible ? count - visible : browse_scroll_;
-    browse_scroll_ = browse_scroll_ < 0 ? 0 : browse_scroll_;
+    browse_bar_.update(in, c, area, track, count, visible, 3, &browse_scroll_);
+    browse_track_ = scroll_thumb(track.h, c.px(kScrollThumbMin), count, visible, 0).h ? track : Rect{};
+    browse_shown_ = visible;
     c.clip(rows);
     for (i32 r = 0; r < visible + 1 && browse_scroll_ + r < count; ++r) {
         const u32 idx = order_[static_cast<usize>(browse_scroll_ + r)];
@@ -2540,7 +2639,9 @@ void Viewer::popup(const UiInput& in, Canvas& c, bool* consumed) {
     }
     const i32 per = (static_cast<i32>(count) + ncols - 1) / ncols; // items per column
     const i32 rows = per < max_rows ? per : (max_rows > 4 ? max_rows : 4);
-    Rect r{popup_r_.x, popup_r_.y, w * ncols, rows * ih + c.px(4)};
+    // A scrollbar down its right side when not every row fits (2026-11-09).
+    const i32 bar_w = per > rows ? c.px(kScrollBarW) + c.px(kScrollBarGap) : 0;
+    Rect r{popup_r_.x, popup_r_.y, w * ncols + bar_w, rows * ih + c.px(4)};
     if (r.right() > c.width())
         r.x = c.width() - r.w;
     if (r.x < 0)
@@ -2548,19 +2649,21 @@ void Viewer::popup(const UiInput& in, Canvas& c, bool* consumed) {
     if (r.bottom() > c.height())
         r.y = c.height() - r.h;
     popup_r_ = r;
-    if (consumed && in.wheel && r.contains(in.mx, in.my)) {
-        popup_scroll_ -= in.wheel * 3;
-        *consumed = true;
+    const Rect track{r.right() - c.px(2) - c.px(kScrollBarW), r.y + c.px(2), c.px(kScrollBarW), r.h - c.px(4)};
+    bool held = false; // the scrollbar has the mouse: no item takes the click
+    if (consumed) {
+        held = popup_bar_.input(in, c, r, track, per, rows, 3, &popup_scroll_);
+        if (held || (in.wheel && r.contains(in.mx, in.my)))
+            *consumed = true;
     }
-    popup_scroll_ = popup_scroll_ > per - rows ? per - rows : popup_scroll_;
-    popup_scroll_ = popup_scroll_ < 0 ? 0 : popup_scroll_;
+    popup_scroll_ = scroll_clamp(per, rows, popup_scroll_);
     popup_cols_ = ncols;
     popup_per_ = per;
     popup_rows_ = rows;
     popup_w_ = w;
     popup_ih_ = ih;
     popup_count_ = count;
-    if (consumed && in.pressed) {
+    if (consumed && in.pressed && !held) {
         *consumed = true;
         if (!r.contains(in.mx, in.my)) {
             popup_ = 0;
@@ -2606,6 +2709,7 @@ void Viewer::popup(const UiInput& in, Canvas& c, bool* consumed) {
     // Draw.
     c.fill(r, 0x2A2E37);
     c.frame(r, kFaint);
+    popup_bar_.draw(in, c, track, per, rows, popup_scroll_);
     for (i32 col = 0; col < ncols; ++col) {
         for (i32 i = 0; i < rows; ++i) {
             const u32 item = static_cast<u32>(col * per + i + popup_scroll_);

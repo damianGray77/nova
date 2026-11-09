@@ -14,6 +14,7 @@
 // can drive it with made-up input and read back what it selected.
 #include "canvas.h"
 #include "nova/view.h"
+#include "widgets.h" // the scrollbars and the charts' span of ticks
 
 namespace nova {
 
@@ -211,8 +212,21 @@ class Viewer {
     static constexpr u32 kCharts = 4, kSeries = 4;
     u32 series_[kCharts][kSeries];
 
+    // The charts' zoom (2026-11-09): every chart shows the same span of ticks.
+    // Zoomed out it is the whole log's and follows it; zoomed into the run's
+    // end it keeps its width and follows the newest sample; elsewhere it stays.
+    bool czoom_ = false, cfollow_ = false;
+    TickSpan cspan_;
+    bool cpan_ = false; // dragging a plot pans it
+    i32 cpan_x_ = 0;
+    TickSpan cpan_from_;
+    Rect cplot_[kCharts] = {}; // each chart's plot as drawn last
+    TickSpan chart_full() const;
+
     // lists
     i32 body_scroll_ = 0, browse_scroll_ = 0, phylo_scroll_ = 0, genome_scroll_ = 0;
+    // Their scrollbars (2026-11-09), and the popup's and the new kinds list's.
+    ScrollBar body_bar_, browse_bar_, phylo_bar_, genome_bar_, popup_bar_, kinds_bar_;
     u32 sort_col_ = 3; // tick
     bool sort_desc_ = true, lineage_only_ = false;
     Array<u32> order_;   // saves_ in browser order
@@ -245,6 +259,11 @@ class Viewer {
     // and a chart's series (kNone: an empty slot).
     u32 popup_kind() const { return popup_; }
     u32 popup_items() const { return popup_count_; }
+    // ... its rect, its rows per column and how many of them fit (it scrolls
+    // when they don't all fit, with a scrollbar down its right side).
+    const Rect& popup_rect() const { return popup_r_; }
+    i32 popup_per() const { return popup_per_; }
+    i32 popup_shown() const { return popup_rows_; }
     bool popup_item_rect(u32 item, Rect* r) const {
         if (!popup_ || item >= popup_count_ || popup_per_ <= 0)
             return false;
@@ -331,6 +350,36 @@ class Viewer {
     // Test hooks: the map's zoom, and the overview map's place.
     double zoom() const { return zoom_; }
     const Rect& minimap() const { return minimap_; }
+    // The charts' zoom (2026-11-09): the span of ticks they show (the whole
+    // log's when not zoomed), whether zoomed, back to the whole run (as a
+    // double-click on a chart, Home or the "whole run" button does), and
+    // where chart k's plot was drawn in the last frame.
+    TickSpan chart_span() const { return czoom_ ? cspan_ : chart_full(); }
+    bool charts_zoomed() const { return czoom_; }
+    void charts_whole_run() { czoom_ = cpan_ = false; }
+    bool chart_plot(u32 k, Rect* r) const {
+        if (k >= kCharts || cplot_[k].w <= 0)
+            return false;
+        *r = cplot_[k];
+        return true;
+    }
+    // The lists' scrolls: the phylogeny's (pixels), the new kinds list's,
+    // the bodies', the inspector's genome's (lines), the genome browser's and
+    // the popup's (rows).
+    i32 phylo_scroll() const { return phylo_scroll_; }
+    i32 kinds_scroll() const { return kinds_scroll_; }
+    i32 body_scroll() const { return body_scroll_; }
+    i32 genome_scroll() const { return genome_scroll_; }
+    i32 browse_scroll() const { return browse_scroll_; }
+    i32 popup_scroll() const { return popup_scroll_; }
+    // The genome browser's scrollbar track as drawn last (w = 0: the list
+    // fits, no bar), and how many of its rows (browser_rows()) fit.
+    const Rect& browse_track() const { return browse_track_; }
+    i32 browse_shown() const { return browse_shown_; }
+
+  private:
+    Rect browse_track_;
+    i32 browse_shown_ = 0;
 };
 
 } // namespace nova

@@ -1179,6 +1179,7 @@ void SetupPage::open_popup(u32 kind, usize key, const Rect& anchor) {
     popup_ = kind;
     popup_key_ = key;
     popup_scroll_ = 0;
+    popup_bar_.release();
     popup_r_ = Rect{anchor.x, anchor.bottom(), anchor.w, 0};
 }
 
@@ -1536,41 +1537,11 @@ void SetupPage::list(const UiInput& in, Canvas& c) {
     snprintf(b, sizeof b, "%u setting%s", shown_n, shown_n == 1 ? "" : "s");
     c.text(co.right() + c.px(10), inner.y + (fh - c.line_h(kFontSmall)) / 2, b, kFontSmall, kDim);
 
-    const i32 sbw = c.px(10);
-    rows_r_ = Rect{inner.x, inner.y + fh + c.px(6), inner.w - sbw - c.px(4), inner.bottom() - (inner.y + fh + c.px(6))};
-    const Rect track{rows_r_.right() + c.px(4), rows_r_.y, sbw, rows_r_.h};
-    // Scrolling: the wheel, or the scrollbar's thumb.
-    if (in.wheel && rows_r_.contains(in.mx, in.my))
-        scroll_ -= in.wheel * c.px(30) * 3;
-    const i32 max_scroll = imax(0, content_h_ - rows_r_.h);
-    if (content_h_ > rows_r_.h) {
-        const i32 thumb_h = imax(c.px(24), static_cast<i32>(static_cast<i64>(rows_r_.h) * rows_r_.h / content_h_));
-        const i32 thumb_y =
-            track.y + (max_scroll ? static_cast<i32>(static_cast<i64>(scroll_) * (track.h - thumb_h) / max_scroll) : 0);
-        const Rect thumb{track.x, thumb_y, track.w, thumb_h};
-        if (in.pressed && track.contains(in.mx, in.my)) {
-            if (thumb.contains(in.mx, in.my)) {
-                drag_bar_ = true;
-                drag_bar_y_ = in.my;
-                drag_bar_scroll_ = scroll_;
-            } else { // a page up or down
-                scroll_ += in.my < thumb.y ? -rows_r_.h : rows_r_.h;
-            }
-        }
-        if (!in.down)
-            drag_bar_ = false;
-        if (drag_bar_ && track.h > thumb_h)
-            scroll_ = drag_bar_scroll_ +
-                      static_cast<i32>(static_cast<i64>(in.my - drag_bar_y_) * max_scroll / (track.h - thumb_h));
-        scroll_ = scroll_ > max_scroll ? max_scroll : (scroll_ < 0 ? 0 : scroll_);
-        const i32 ty2 =
-            track.y + (max_scroll ? static_cast<i32>(static_cast<i64>(scroll_) * (track.h - thumb_h) / max_scroll) : 0);
-        c.fill(track, kBg);
-        c.fill(Rect{track.x, ty2, track.w, thumb_h}, drag_bar_ || track.contains(in.mx, in.my) ? kDim : kButtonHot);
-    } else {
-        scroll_ = 0;
-        drag_bar_ = false;
-    }
+    const Rect area{inner.x, inner.y + fh + c.px(6), inner.w, inner.bottom() - (inner.y + fh + c.px(6))};
+    Rect track;
+    scroll_split(c, area, &rows_r_, &track);
+    // Scrolling: the wheel, or the scrollbar (the viewer's too: widgets.h), in pixels.
+    const bool bar_held = list_bar_.update(in, c, area, track, content_h_, rows_r_.h, c.px(30) * 3, &scroll_);
     if (rows_.empty()) {
         c.text(rows_r_.x + c.px(4), rows_r_.y + c.px(4),
                search_[0] ? "no setting matches" : (changed_only_ ? "nothing changed from the file" : "no settings here yet"),
@@ -1578,7 +1549,7 @@ void SetupPage::list(const UiInput& in, Canvas& c) {
         return;
     }
     UiInput rin = in;
-    if (drag_bar_) {
+    if (bar_held) {
         rin.pressed = false;
         rin.wheel = 0;
     }
@@ -1795,9 +1766,12 @@ void SetupPage::check_panel(const UiInput& in, Canvas& c) {
     panel_box(c, check_r_, "Check", &inner);
     const SettingsCheck& ch = check();
     const i32 lh = c.line_h(kFontSmall) + c.px(1);
-    if (in.wheel && inner.contains(in.mx, in.my))
-        check_scroll_ -= in.wheel * lh * 3;
-    check_scroll_ = imax(0, imin(check_scroll_, check_h_ - inner.h));
+    { // The wheel or the scrollbar, in pixels (check_h_: the last frame's height).
+        Rect track;
+        const Rect area = inner;
+        scroll_split(c, area, &inner, &track);
+        check_bar_.update(in, c, area, track, check_h_, inner.h, lh * 3, &check_scroll_);
+    }
     c.clip(inner);
     i32 y = inner.y - check_scroll_;
     char b[512];
@@ -2013,11 +1987,16 @@ void SetupPage::popup(const UiInput& in, Canvas& c, bool* consumed) {
     if (r.bottom() > c.height())
         r.y = c.height() - r.h;
     popup_r_ = Rect{r.x, r.y, popup_r_.w, 0};
-    if (consumed && in.wheel && r.contains(in.mx, in.my)) {
-        popup_scroll_ -= in.wheel * 3;
-        *consumed = true;
+    // A scrollbar down its right side when not every item fits (2026-11-09).
+    const i32 bar_w = static_cast<i32>(count) > rows ? c.px(kScrollBarW) + c.px(kScrollBarGap) : 0;
+    const Rect track{r.right() - c.px(2) - c.px(kScrollBarW), r.y + c.px(2), c.px(kScrollBarW), r.h - c.px(4)};
+    bool held = false; // the scrollbar has the mouse: no item takes the click
+    if (consumed) {
+        held = popup_bar_.input(in, c, r, track, static_cast<i32>(count), rows, 3, &popup_scroll_);
+        if (held || (in.wheel && r.contains(in.mx, in.my)))
+            *consumed = true;
     }
-    popup_scroll_ = imax(0, imin(popup_scroll_, static_cast<i32>(count) - rows));
+    popup_scroll_ = scroll_clamp(static_cast<i32>(count), rows, popup_scroll_);
     const u32 kind = popup_;
     auto label = [&](u32 item, char* out, usize n) {
         if (kind == kPopChoice) {
@@ -2035,7 +2014,7 @@ void SetupPage::popup(const UiInput& in, Canvas& c, bool* consumed) {
             snprintf(out, n, "%.*s", static_cast<int>(l.n), l.p);
         }
     };
-    if (consumed && in.pressed) {
+    if (consumed && in.pressed && !held) {
         *consumed = true;
         popup_ = kPopNone;
         if (!r.contains(in.mx, in.my))
@@ -2070,6 +2049,7 @@ void SetupPage::popup(const UiInput& in, Canvas& c, bool* consumed) {
         return; // the input pass: drawn last, over everything
     c.fill(r, kPopup);
     c.frame(r, kFaint);
+    popup_bar_.draw(in, c, track, static_cast<i32>(count), rows, popup_scroll_);
     char cur[300] = "";
     if (popup_ == kPopChoice) {
         const Str v = shown(popup_key_);
@@ -2079,7 +2059,7 @@ void SetupPage::popup(const UiInput& in, Canvas& c, bool* consumed) {
         const u32 item = static_cast<u32>(i + popup_scroll_);
         if (item >= count)
             break;
-        const Rect ir{r.x + c.px(2), r.y + c.px(2) + i * ih, r.w - c.px(4), ih};
+        const Rect ir{r.x + c.px(2), r.y + c.px(2) + i * ih, r.w - c.px(4) - bar_w, ih};
         char l[300];
         label(item, l, sizeof l);
         const bool on = popup_ == kPopChoice && strcmp(l, cur) == 0;

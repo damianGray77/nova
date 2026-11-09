@@ -1,7 +1,8 @@
 // The viewer and the live novelty meter (docs/results/viewer.md): A2's live
 // columns and "new kinds of life", A5's map of life, world plan W8 (substrates
-// on the map, nodes.csv's new columns, the fast region) and disasters X7's
-// map marker. Called from suites view (the core) and viewer (the panels).
+// on the map, nodes.csv's new columns, the fast region), disasters X7's map
+// marker, and the scrollbars and the charts' zoom (2026-11-09). Called from
+// suites view (the core) and viewer (the panels).
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -1160,6 +1161,400 @@ void test_ground_viewer() {
     delete r;
 }
 
+// --- scrollbars and the charts' zoom (2026-11-09) ----------------------------------
+
+bool same_tick(double a, double b) { return fabs(a - b) < 1e-6; }
+
+// The scrollbar's arithmetic: the thumb's length and place, a drag, a page.
+void test_scroll_maths() {
+    // 100 rows, 25 shown, on a 200-pixel track: a quarter-length thumb that
+    // moves over the other 150 pixels as the scroll goes from 0 to 75.
+    const Thumb t = scroll_thumb(200, 20, 100, 25, 0);
+    CHECK(t.h == 50 && t.y == 0);
+    CHECK(scroll_thumb(200, 20, 100, 25, 75).y == 150);
+    CHECK(scroll_thumb(200, 20, 100, 25, 30).y == 60);
+    CHECK(scroll_thumb(200, 20, 100, 25, 999).y == 150 && scroll_thumb(200, 20, 100, 25, -5).y == 0); // (clamped)
+    // Everything fits: no bar. A very long list: the shortest thumb, still reaching the bottom.
+    CHECK(scroll_thumb(200, 20, 25, 25, 0).h == 0 && scroll_thumb(200, 20, 10, 25, 0).h == 0);
+    CHECK(scroll_thumb(200, 20, 100000, 25, 0).h == 20 && scroll_thumb(200, 20, 100000, 25, 99975).y == 180);
+    CHECK(scroll_thumb(0, 20, 100, 25, 0).h == 0 && scroll_thumb(200, 20, 100, 0, 0).h == 0);
+    // A drag: the thumb's 150 pixels of room are the 75 rows of scroll, so 60
+    // pixels down is 30 rows; the whole room, from the top to the end; past
+    // the ends, clamped; everything fitting, no scroll.
+    CHECK(scroll_drag(200, 20, 100, 25, 28, 60) == 58 && scroll_drag(200, 20, 100, 25, 30, -60) == 0);
+    CHECK(scroll_drag(200, 20, 100, 25, 0, 150) == 75 && scroll_drag(200, 20, 100, 25, 75, -150) == 0);
+    CHECK(scroll_drag(200, 20, 100, 25, 30, 1000) == 75 && scroll_drag(200, 20, 100, 25, 30, -1000) == 0);
+    CHECK(scroll_drag(200, 20, 25, 25, 10, 40) == 0);
+    // More rows than pixels (300 rows, 13 shown, 175 pixels of room): a grab
+    // that hasn't moved changes nothing; the thumb stays under the mouse (to
+    // a pixel) all the way down; further down never scrolls up.
+    bool still = true, under = true, rising = true;
+    for (i32 p = 0; p <= 287; ++p)
+        still = still && scroll_drag(195, 20, 300, 13, p, 0) == p;
+    for (i32 dy = 0; dy <= 175; ++dy) {
+        const i32 p = scroll_drag(195, 20, 300, 13, 0, dy), y = scroll_thumb(195, 20, 300, 13, p).y;
+        under = under && y - dy <= 1 && dy - y <= 1;
+        rising = rising && scroll_drag(195, 20, 300, 13, 0, dy + 1) >= p;
+    }
+    CHECK(still && under && rising);
+    CHECK(scroll_thumb(195, 20, 300, 13, 0).h == 20);
+    // A page: a click above the thumb (60..110 at scroll 30) goes up by the 25
+    // shown, below it down, on it nowhere; the ends stop it.
+    CHECK(scroll_page(200, 20, 100, 25, 30, 10) == 5);
+    CHECK(scroll_page(200, 20, 100, 25, 30, 150) == 55);
+    CHECK(scroll_page(200, 20, 100, 25, 30, 80) == 30);
+    CHECK(scroll_page(200, 20, 100, 25, 10, 0) == 0 && scroll_page(200, 20, 100, 25, 70, 199) == 75);
+    CHECK(scroll_clamp(100, 25, 80) == 75 && scroll_clamp(100, 25, -1) == 0 && scroll_clamp(10, 25, 5) == 0);
+}
+
+// The scrollbar as the panels use it: the wheel as before, a page click, a
+// drag that keeps going off the bar, and a let-go.
+void test_scroll_bar() {
+    Canvas* c = new Canvas;
+    CHECK(c->resize(400, 400, 1.0f));
+    const Rect area{20, 50, 208, 200}, track{220, 50, 8, 200};
+    ScrollBar bar;
+    i32 pos = 0;
+    UiInput in;
+    // The wheel over the content or the bar: 3 rows a notch, as before the bars; elsewhere nothing.
+    in.mx = 100;
+    in.my = 100;
+    in.wheel = -2;
+    CHECK(!bar.input(in, *c, area, track, 100, 25, 3, &pos) && pos == 6);
+    in.mx = 224;
+    in.wheel = 1;
+    bar.input(in, *c, area, track, 100, 25, 3, &pos);
+    CHECK(pos == 3);
+    in.mx = 300;
+    in.wheel = -1;
+    bar.input(in, *c, area, track, 100, 25, 3, &pos);
+    CHECK(pos == 3);
+    in.wheel = 0;
+    // A click on the track below the thumb (6..56): a page down.
+    in.mx = 224;
+    in.my = track.y + 150;
+    in.pressed = true;
+    CHECK(bar.input(in, *c, area, track, 100, 25, 3, &pos) && pos == 28 && !bar.dragging());
+    // Grab the thumb (now 56..106) 10 pixels down it and drag 60 pixels: the
+    // scroll follows in proportion; far below the bar, the end.
+    in.my = track.y + 56 + 10;
+    in.down = true;
+    CHECK(bar.input(in, *c, area, track, 100, 25, 3, &pos) && bar.dragging() && pos == 28);
+    in.pressed = false;
+    in.my += 60;
+    CHECK(bar.input(in, *c, area, track, 100, 25, 3, &pos) && pos == 58);
+    CHECK(scroll_thumb(200, 20, 100, 25, pos).y == 56 + 60); // the thumb moved with the mouse
+    in.mx = 50;
+    in.my = 390;
+    CHECK(bar.input(in, *c, area, track, 100, 25, 3, &pos) && pos == 75);
+    // Let go: the drag ends and the mouse no longer scrolls.
+    in.down = false;
+    in.released = true;
+    CHECK(!bar.input(in, *c, area, track, 100, 25, 3, &pos) && !bar.dragging());
+    in.released = false;
+    in.my = 60;
+    bar.input(in, *c, area, track, 100, 25, 3, &pos);
+    CHECK(pos == 75);
+    // Drawn: the track, and the thumb at its bottom.
+    c->fill(Rect{0, 0, 400, 400}, 0);
+    bar.draw(in, *c, track, 100, 25, pos);
+    c->flush();
+    CHECK(count_color(*c, kButtonHot, track.x, track.y + 150, track.right(), track.bottom()) == 8 * 50);
+    CHECK(count_color(*c, kBg, track.x, track.y, track.right(), track.y + 150) == 8 * 150);
+    // Everything fits: no bar, no scroll, and the track takes no click.
+    pos = 5;
+    in.mx = 224;
+    in.my = 100;
+    in.pressed = true;
+    CHECK(!bar.input(in, *c, area, track, 20, 25, 3, &pos) && pos == 0);
+    delete c;
+}
+
+// The genome browser's list, end to end: its bar shows the share shown, the
+// wheel scrolls as before, a drag reaches the end, a click on the track pages.
+void test_list_scrollbars() {
+    Viewer* v = new Viewer;
+    Canvas* c = new Canvas;
+    CHECK(c->resize(1400, 900, 1.0f));
+    RunStatus st;
+    UiInput none;
+    ViewFrame f;
+    small_frame(f, 1000);
+    for (u32 i = 0; i < 300; ++i) {
+        GenomeEntry e = {};
+        e.tick = i;
+        e.genotype = i + 1;
+        e.lineage = (1ull << 32) | 1;
+        e.len = 3 + i;
+        snprintf(e.name, sizeof e.name, "%04uaaa", 3 + i);
+        snprintf(e.parent_name, sizeof e.parent_name, "none");
+        e.off = static_cast<u32>(f.save_text.size());
+        f.save_text.append("ABC", 3);
+        e.n = 3;
+        f.saves.push(e);
+    }
+    v->take(f);
+    v->frame(none, *c, st);
+    const i32 shown = v->browse_shown();
+    const Rect tr = v->browse_track();
+    CHECK(v->browser_rows() == 300 && shown > 3 && shown < 300 && tr.w > 0 && tr.h > 0);
+    UiInput w;
+    w.mx = tr.x - 40;
+    w.my = tr.y + 10;
+    w.wheel = -2;
+    v->frame(w, *c, st);
+    CHECK(v->browse_scroll() == 6);
+    const usize sel = v->selected_save();
+    // Drag the thumb from where it is to below the track: the list's end.
+    const Thumb t = scroll_thumb(tr.h, c->px(kScrollThumbMin), 300, shown, 6);
+    CHECK(t.h > 0 && t.h < tr.h);
+    UiInput d;
+    d.mx = tr.x + tr.w / 2;
+    d.my = tr.y + t.y + t.h / 2;
+    d.pressed = d.down = true;
+    v->frame(d, *c, st);
+    CHECK(v->browse_scroll() == 6);
+    d.pressed = false;
+    d.my = tr.bottom() + 100;
+    v->frame(d, *c, st);
+    CHECK(v->browse_scroll() == 300 - shown);
+    d.down = false;
+    d.released = true;
+    v->frame(d, *c, st);
+    // A click on the track above the thumb: a page up. The bar's clicks select nothing.
+    UiInput p;
+    p.mx = tr.x + tr.w / 2;
+    p.my = tr.y + 1;
+    p.pressed = p.released = true;
+    v->frame(p, *c, st);
+    CHECK(v->browse_scroll() == 300 - 2 * shown);
+    CHECK(v->selected_save() == sel);
+    CHECK(png_ok(*c, "nova_test_viewer_scrollbar.png"));
+    delete c;
+    delete v;
+}
+
+// The series picker on a small window: too many columns to show at once, so
+// it scrolls, with a bar down its right side that picks no series.
+void test_popup_scrollbar() {
+    Viewer* v = new Viewer;
+    Canvas* c = new Canvas;
+    CHECK(c->resize(640, 420, 1.0f));
+    RunStatus st;
+    UiInput none;
+    ViewFrame f;
+    small_frame(f, 10);
+    v->take(f);
+    v->frame(none, *c, st);
+    v->open_series_picker(1);
+    v->frame(none, *c, st);
+    const i32 per = v->popup_per(), shown = v->popup_shown();
+    CHECK(v->popup_kind() == 3 && per > shown && shown > 4);
+    const Rect r = v->popup_rect();
+    const Rect tr{r.right() - c->px(2) - c->px(kScrollBarW), r.y + c->px(2), c->px(kScrollBarW), r.h - c->px(4)};
+    u32 before[4];
+    for (u32 s = 0; s < 4; ++s)
+        before[s] = v->series(1, s);
+    Rect ir;
+    CHECK(v->popup_item_rect(0, &ir) && !v->popup_item_rect(static_cast<u32>(per - 1), &ir));
+    // Drag the thumb (at the top) to the window's bottom: the last rows come into sight.
+    UiInput d;
+    d.mx = tr.x + tr.w / 2;
+    d.my = tr.y + 2;
+    d.pressed = d.down = true;
+    v->frame(d, *c, st);
+    d.pressed = false;
+    d.my = c->height() - 1;
+    v->frame(d, *c, st);
+    CHECK(v->popup_scroll() == per - shown);
+    CHECK(v->popup_item_rect(static_cast<u32>(per - 1), &ir) && !v->popup_item_rect(0, &ir));
+    d.down = false;
+    d.released = true;
+    v->frame(d, *c, st);
+    // A click on the track above the thumb pages up; the popup stays open and
+    // no series changed.
+    UiInput p;
+    p.mx = tr.x + tr.w / 2;
+    p.my = tr.y + 1;
+    p.pressed = p.released = true;
+    v->frame(p, *c, st);
+    CHECK(v->popup_kind() == 3 && v->popup_scroll() == scroll_clamp(per, shown, per - 2 * shown));
+    bool same = true;
+    for (u32 s = 0; s < 4; ++s)
+        same = same && v->series(1, s) == before[s];
+    CHECK(same);
+    // The wheel still scrolls it, 3 rows a notch.
+    const i32 at = v->popup_scroll();
+    UiInput w;
+    w.mx = r.x + c->px(20);
+    w.my = r.y + c->px(30);
+    w.wheel = -1;
+    v->frame(w, *c, st);
+    CHECK(v->popup_scroll() == scroll_clamp(per, shown, at + 3));
+    delete c;
+    delete v;
+}
+
+// The charts' zoom arithmetic: about a tick, inside the whole run, no wider than it.
+void test_zoom_maths() {
+    const TickSpan full{0, 1000};
+    // A notch in about tick 250: 1.25 times narrower, 250 still a quarter of the way across.
+    TickSpan s = zoom_span(full, 250, 1, full, 30);
+    CHECK(same_tick(s.lo, 50) && same_tick(s.hi, 850));
+    s = zoom_span(s, 250, 2, full, 30);
+    CHECK(same_tick(s.width(), 512) && same_tick((250 - s.lo) / s.width(), 0.25));
+    // Back out the same three notches: the whole run again, exactly; and no further.
+    const TickSpan o = zoom_span(s, 250, -3, full, 30);
+    CHECK(o.lo == 0 && o.hi == 1000);
+    const TickSpan o2 = zoom_span(full, 500, -4, full, 30);
+    CHECK(o2.lo == 0 && o2.hi == 1000);
+    // About either end: that end stays put.
+    const TickSpan e = zoom_span(full, 1000, 2, full, 30), z = zoom_span(full, 0, 2, full, 30);
+    CHECK(e.hi == 1000 && same_tick(e.width(), 640) && z.lo == 0 && same_tick(z.width(), 640));
+    // In as far as it goes: the narrowest span, still about the tick.
+    const TickSpan m = zoom_span(full, 400, 100, full, 30);
+    CHECK(same_tick(m.width(), 30) && same_tick(m.lo, 388));
+    // Out near an edge: the wider span moves back inside the run.
+    const TickSpan q = zoom_span(TickSpan{900, 1000}, 990, -1, full, 30);
+    CHECK(q.hi == 1000 && same_tick(q.lo, 875));
+    // Panning keeps the width and stops at the ends.
+    const TickSpan p = pan_span(TickSpan{100, 300}, 50, full), p0 = pan_span(TickSpan{100, 300}, -500, full),
+                   p1 = pan_span(TickSpan{100, 300}, 5000, full), pf = pan_span(full, 10, full);
+    CHECK(same_tick(p.lo, 150) && same_tick(p.hi, 350) && p0.lo == 0 && p0.hi == 200);
+    CHECK(p1.lo == 800 && p1.hi == 1000 && pf.lo == 0 && pf.hi == 1000);
+}
+
+void chart_samples(ViewFrame& f, u64 from, u64 to, u64 every) {
+    for (u64 t = from; t <= to; t += every) {
+        f.sample_tick.push(t);
+        for (u32 k = 0; k < kStatsColumns; ++k)
+            f.sample.push(static_cast<double>(t % 97 + k));
+    }
+}
+
+// The charts' zoom in the viewer: the wheel over any chart zooms them all
+// about the tick under the mouse; a drag pans; zooming out stops at the whole
+// run; a double-click or Home shows it again; zoomed into the end the span
+// keeps up with new samples, elsewhere it stays.
+void test_chart_zoom() {
+    Viewer* v = new Viewer;
+    Canvas* c = new Canvas;
+    CHECK(c->resize(1400, 900, 1.0f));
+    RunStatus st;
+    UiInput none;
+    ViewFrame f;
+    small_frame(f, 1000);
+    chart_samples(f, 0, 1000, 10);
+    v->take(f);
+    v->frame(none, *c, st);
+    CHECK(!v->charts_zoomed() && v->chart_span().lo == 0 && v->chart_span().hi == 1000);
+    Rect p0, p3;
+    CHECK(v->chart_plot(0, &p0) && v->chart_plot(3, &p3) && p0.x == p3.x && p0.w == p3.w); // one timeline
+    const double across = p0.w - 1;
+    auto tick_at = [&](i32 x) {
+        const TickSpan t = v->chart_span();
+        return t.lo + (x - p0.x) / across * t.width();
+    };
+    const TickSpan full{0, 1000};
+    // Two notches over the first chart a quarter of the way across.
+    const i32 x = p0.x + static_cast<i32>(across / 4);
+    const double at = tick_at(x);
+    UiInput w;
+    w.mx = x;
+    w.my = p0.y + p0.h / 2;
+    w.wheel = 2;
+    v->frame(w, *c, st);
+    const TickSpan want = zoom_span(full, at, 2, full, 30);
+    TickSpan s = v->chart_span();
+    CHECK(v->charts_zoomed() && same_tick(s.lo, want.lo) && same_tick(s.hi, want.hi));
+    CHECK(same_tick(s.width(), 640) && same_tick(tick_at(x), at)); // the tick under the mouse stays under it
+    // Over the last chart, the same column: the one shared span zooms further.
+    w.my = p3.y + p3.h / 2;
+    w.wheel = 1;
+    v->frame(w, *c, st);
+    CHECK(same_tick(v->chart_span().width(), 512) && same_tick(tick_at(x), at));
+    // The wheel over a chart's header (its series) or the map: no change.
+    w.my = p0.y - 2;
+    v->frame(w, *c, st);
+    w.mx = 300;
+    w.my = 200;
+    v->frame(w, *c, st);
+    CHECK(same_tick(v->chart_span().width(), 512));
+    // A drag 100 pixels right shows 100 pixels' worth of ticks earlier; far
+    // past the start, it stops there.
+    const TickSpan before = v->chart_span();
+    UiInput d;
+    d.mx = x;
+    d.my = p0.y + 5;
+    d.pressed = d.down = true;
+    v->frame(d, *c, st);
+    d.pressed = false;
+    d.mx = x + 100;
+    v->frame(d, *c, st);
+    s = v->chart_span();
+    CHECK(same_tick(s.lo, before.lo - 100 / across * before.width()) && same_tick(s.width(), before.width()));
+    d.mx = x + 5000;
+    v->frame(d, *c, st);
+    CHECK(v->chart_span().lo == 0 && same_tick(v->chart_span().width(), before.width()));
+    d.down = false;
+    d.released = true;
+    v->frame(d, *c, st);
+    d.released = false;
+    d.mx = x;
+    v->frame(d, *c, st);
+    CHECK(v->chart_span().lo == 0); // (let go: no more panning)
+    // Out by more notches than it went in: the whole run, and no further.
+    w.mx = x;
+    w.my = p0.y + 5;
+    w.wheel = -20;
+    v->frame(w, *c, st);
+    CHECK(!v->charts_zoomed() && v->chart_span().lo == 0 && v->chart_span().hi == 1000);
+    // A double-click shows the whole run again; so does Home.
+    w.wheel = 3;
+    v->frame(w, *c, st);
+    CHECK(v->charts_zoomed());
+    UiInput dbl;
+    dbl.mx = x;
+    dbl.my = p0.y + 5;
+    dbl.pressed = dbl.dbl = dbl.released = true;
+    v->frame(dbl, *c, st);
+    CHECK(!v->charts_zoomed() && v->chart_span().lo == 0 && v->chart_span().hi == 1000);
+    v->frame(w, *c, st);
+    CHECK(v->charts_zoomed());
+    UiInput home;
+    home.keys[0] = 0x24; // Home
+    home.nkeys = 1;
+    v->frame(home, *c, st);
+    CHECK(!v->charts_zoomed() && v->chart_span().hi == 1000);
+    // Zoomed into the run's end: new samples move the span along with them.
+    w.mx = p0.x + static_cast<i32>(across);
+    w.wheel = 2;
+    v->frame(w, *c, st);
+    s = v->chart_span();
+    CHECK(v->charts_zoomed() && s.hi == 1000);
+    ViewFrame g;
+    small_frame(g, 1200);
+    chart_samples(g, 1010, 1200, 10);
+    v->take(g);
+    v->frame(none, *c, st);
+    CHECK(same_tick(v->chart_span().hi, 1200) && same_tick(v->chart_span().width(), s.width()));
+    // Zoomed into the middle, it stays where it is.
+    w.mx = x;
+    w.wheel = 1;
+    v->frame(w, *c, st);
+    const TickSpan mid = v->chart_span();
+    CHECK(mid.hi < 1200);
+    ViewFrame h;
+    small_frame(h, 1400);
+    chart_samples(h, 1210, 1400, 10);
+    v->take(h);
+    v->frame(none, *c, st);
+    CHECK(same_tick(v->chart_span().lo, mid.lo) && same_tick(v->chart_span().hi, mid.hi));
+    CHECK(png_ok(*c, "nova_test_viewer_zoom.png"));
+    delete c;
+    delete v;
+}
+
 } // namespace
 
 void viewer_more_view_tests() {
@@ -1180,4 +1575,11 @@ void viewer_more_viewer_tests() {
     test_life_panel();
     test_life_roles();
     test_ground_viewer();
+    // Scrollbars and the charts' zoom (2026-11-09).
+    test_scroll_maths();
+    test_scroll_bar();
+    test_list_scrollbars();
+    test_popup_scrollbar();
+    test_zoom_maths();
+    test_chart_zoom();
 }

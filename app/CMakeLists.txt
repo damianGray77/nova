@@ -5,7 +5,8 @@
 # The analysis UI's drawing half (Phase 6): the GDI canvas, the viewer's
 # panels and the setup page (docs/config-plan.md C2). A library so the tests
 # can drive it headless. user32 and gdi32 are Windows' own platform libraries.
-add_library(nova_viewer STATIC canvas.cpp viewer.cpp setup.cpp)
+add_library(nova_viewer STATIC canvas.cpp viewer.cpp setup.cpp
+    widgets.cpp) # the scrollbar and the charts' zoom, shared
 target_link_libraries(nova_viewer PUBLIC nova::core user32 gdi32)
 target_include_directories(nova_viewer PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 if(MSVC)

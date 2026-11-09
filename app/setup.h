@@ -258,8 +258,7 @@ class SetupPage {
     bool changed_only_ = false;
     Array<Row> rows_;
     i32 content_h_ = 0, scroll_ = 0;
-    bool drag_bar_ = false; // the scrollbar's thumb
-    i32 drag_bar_y_ = 0, drag_bar_scroll_ = 0;
+    ScrollBar list_bar_, check_bar_, popup_bar_; // the list's, the check's and the popup's (widgets.h)
     usize jump_ = kNoKey;   // scroll this setting into view next frame
     Array<Rect> row_r_, ctl_r_; // per key, the last frame's (w = 0: not drawn)
 
