@@ -356,13 +356,13 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 |---|---|---|---|---|
 | `disaster.enabled` | switch | true | true or false | **Disasters**. Rare random disasters: power surges, OS crashes, burnouts, disk failures and lightning storms. |
 | `disaster.surge` | switch | true | true or false | **Power surges**. A region collapses: every live node within a few hops of a random one (needs a map world). Needs `disaster.enabled`. |
-| `disaster.surge_every` | whole | 55 | at least 0 | **Surge interval**. Mean ticks between power surges anywhere in the world (0 = none). Needs `disaster.surge`. |
+| `disaster.surge_every` | whole | 275 | at least 0 | **Surge interval**. Mean ticks between power surges anywhere in the world (0 = none). Needs `disaster.surge`. |
 | `disaster.surge_hops_min` | whole | 1 | 0 to 64 | **Surge reach, least**. A surge's reach in hops along paths, drawn per surge from here ... Needs `disaster.surge`. |
 | `disaster.surge_hops_max` | whole | 2 | 0 to 64 | **Surge reach, most**. ... to here. Needs `disaster.surge`. |
 | `disaster.surge_lead_min` | whole | 300 | 1 to 1000000000 | **Surge warning, least**. Ticks of brownout before a surge (its symptoms), drawn per surge from here ... Needs `disaster.surge`. |
 | `disaster.surge_lead_max` | whole | 1500 | 1 to 1000000000 | **Surge warning, most**. ... to here. Needs `disaster.surge`. |
 | `disaster.crash` | switch | true | true or false | **OS crashes**. A node reboots: nothing runs and nothing arrives meanwhile; some of its programs are deleted and the rest restart. Needs `disaster.enabled`. |
-| `disaster.crash_every` | whole | 3 | at least 0 | **Crash interval**. Mean ticks between OS crashes anywhere in the world (0 = none). Needs `disaster.crash`. |
+| `disaster.crash_every` | whole | 15 | at least 0 | **Crash interval**. Mean ticks between OS crashes anywhere in the world (0 = none). Needs `disaster.crash`. |
 | `disaster.reboot_min` | whole | 20 | 1 to 1000000000 | **Reboot, shortest**. Ticks a crashed node takes to reboot, drawn per crash from here ... Needs `disaster.crash`. |
 | `disaster.reboot_max` | whole | 100 | 1 to 1000000000 | **Reboot, longest**. ... to here. Needs `disaster.crash`. |
 | `disaster.crash_share_min` | number | 0.3 | 0 to 1 | **Crash deletes, least**. The share of a crashed node's running programs deleted (ordinary deaths), drawn per crash from here ... Needs `disaster.crash`. |
@@ -384,7 +384,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `disaster.diskfail_lead_min` | whole | 500 | 1 to 1000000000 | **Disk warning, least**. Ticks of faster disk rot before a disk failure (its symptoms), drawn from here ... Needs `disaster.diskfail`. |
 | `disaster.diskfail_lead_max` | whole | 2000 | 1 to 1000000000 | **Disk warning, most**. ... to here. Needs `disaster.diskfail`. |
 | `disaster.storm` | switch | true | true or false | **Lightning storms**. Storms travel over the map with a heading, striking the node they're over: runs of random codons. Needs `disaster.enabled`. |
-| `disaster.storm_every` | whole | 300 | at least 0 | **Storm interval**. Mean ticks between storms forming anywhere in the world (0 = none). Needs `disaster.storm`. |
+| `disaster.storm_every` | whole | 1500 | at least 0 | **Storm interval**. Mean ticks between storms forming anywhere in the world (0 = none). Needs `disaster.storm`. |
 | `disaster.storm_life_min` | whole | 2000 | 1 to 1000000000 | **Storm life, shortest**. A storm's lifetime in ticks, drawn per storm from here ... Needs `disaster.storm`. |
 | `disaster.storm_life_max` | whole | 10000 | 1 to 1000000000 | **Storm life, longest**. ... to here. Needs `disaster.storm`. |
 | `disaster.storm_move_min` | whole | 200 | 1 to 1000000000 | **Storm moves, soonest**. Ticks between a storm's moves along a path, drawn per move from here ... Needs `disaster.storm`. |

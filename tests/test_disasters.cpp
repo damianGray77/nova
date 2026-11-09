@@ -894,8 +894,8 @@ void test_defaults_world() {
 }
 
 // The engine defaults: every disaster on, symptoms and sounds too; the test
-// runner's legacy defaults: off. Storms, crashes and surges at the rates
-// docs/bites-plan.md section 7 set (2026-11-08) for about a tenth of deaths.
+// runner's legacy defaults: off. Storms, crashes and surges at a fifth of
+// the rates docs/bites-plan.md section 7 first set (Damian, 2026-11-09).
 void test_defaults() {
     SoupParams p;
     CHECK(make_params(&p, "", 1024) && !p.disasters); // (the legacy fallback)
@@ -906,8 +906,8 @@ void test_defaults() {
                    1));
     const DisasterParams& d = run.world().disaster_params();
     CHECK(run.world().disasters() && d.symptoms && d.sounds && d.false_alarms == 0.25);
-    CHECK(d.every[kDisSurge] == 55 && d.every[kDisCrash] == 3 && d.every[kDisBurnout] == 2000 &&
-          d.every[kDisDiskfail] == 10000 && d.every[kDisStorm] == 300);
+    CHECK(d.every[kDisSurge] == 275 && d.every[kDisCrash] == 15 && d.every[kDisBurnout] == 2000 &&
+          d.every[kDisDiskfail] == 10000 && d.every[kDisStorm] == 1500);
     CHECK(d.hops_min == 1 && d.hops_max == 2 && d.reboot_min == 20 && d.reboot_max == 100 && d.crash_min == 0.3 &&
           d.crash_max == 0.8 && d.burn_min == 0.1 && d.burn_max == 0.4 && d.repair_min == 200 &&
           d.repair_max == 2000 && d.grace_chance == 0.5 && d.grace == 32);

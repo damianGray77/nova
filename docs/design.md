@@ -1899,8 +1899,11 @@ code a lightning strike changed) and the gauges `open_ends` and `infected`;
 **Disasters at about a tenth of deaths** (plan section 7): storms every 300
 ticks with strikes every 30-120 of 512-2,048 codons, OS crashes every 3
 ticks deleting 30-80% of running programs with 100-400 ticks of warning,
-power surges every 55 with 300-1,500. These are the plan's starting values;
-the calibration sweep hasn't run yet.
+power surges every 55 with 300-1,500. These were the plan's starting values,
+not calibrated. In long5's first 7,000 ticks they caused 23% of deaths, 94
+surges had collapsed 520 nodes and 184 were down at once, so Damian cut them
+to a fifth ("that is a fuck ton of disasters"): storms every 1,500, crashes
+every 15, surges every 275; strikes, shares and warnings unchanged.
 
 **Tests.** Every suite runs the new rules (no fallback for them, Damian).
 The shared test ancestors carry NOP caps; tests that isolate another

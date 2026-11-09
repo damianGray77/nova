@@ -138,7 +138,7 @@ In long4 surges, crashes and burnouts together caused about 0.01% of deaths and 
 
 | Setting | Today | New default (to calibrate) | Why |
 |---|---|---|---|
-| `disaster.storm_every` | 5,000 | 300 | about 20 storms at a time instead of 1-2 |
+| `disaster.storm_every` | 5,000 | 300 (built; then 1,500, see below) | about 20 storms at a time instead of 1-2 |
 | `disaster.strike_every_min` / `_max` | 100 / 400 | 30 / 120 | a storm strikes every ~75 ticks |
 | `disaster.strike_min` / `_max` | 64 / 512 | 512 / 2,048 | a strike takes out a few to a dozen programs |
 | `disaster.crash_every` | 5,000 | 3 | each node every ~3,000 ticks; a crash deletes only *running* programs, so sleeping through one is an escape |
@@ -147,6 +147,7 @@ In long4 surges, crashes and burnouts together caused about 0.01% of deaths and 
 | `disaster.surge_every` | 50,000 | 55 | each node every ~11,000 ticks; drifting out of the region is the escape |
 | `disaster.surge_lead_min` / `_max` | 1,000 / 5,000 | 300 / 1,500 | brownout heat and hum |
 
+- **Cut to a fifth (Damian, 2026-11-09).** In long5's first 7,000 ticks these rates caused 23% of deaths, 94 surges had collapsed 520 nodes and 184 of 1,000 were down at once. Storms now come every 1,500 ticks, crashes every 15 and surges every 275 (the table's crash and surge rows were 3 and 55 as built); strike sizes, crash shares and warnings are unchanged.
 - These are on by default (Damian's rule). Burnouts and disk failures are unchanged: burnouts send programs dormant automatically, so they can't select for a behaviour.
 - The hazard sketch's other changes (longer lives through lower wear, rays that a few NOPs can stop) aren't part of this revision.
 - **Measuring it:** crash, surge and burnout deaths are counted today; strikes aren't tied to the deaths they cause. A new count, `struck_bodies`, records each living body whose code a strike changed, so the sweep can read storms' share.

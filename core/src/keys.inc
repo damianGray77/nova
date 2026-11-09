@@ -634,7 +634,7 @@ NOVA_FLAG("disaster.enabled", true, 0, "Disasters", "Disasters", "",
 // X2: power surges
 NOVA_FLAG("disaster.surge", true, 0, "Disasters", "Power surges", "disaster.enabled",
           "A region collapses: every live node within a few hops of a random one (needs a map world).")
-NOVA_WHOLE("disaster.surge_every", 55, 0, kKeyNoMax, 0, "Disasters", "Surge interval", "disaster.surge",
+NOVA_WHOLE("disaster.surge_every", 275, 0, kKeyNoMax, 0, "Disasters", "Surge interval", "disaster.surge",
            "Mean ticks between power surges anywhere in the world (0 = none).")
 NOVA_WHOLE("disaster.surge_hops_min", 1, 0, 64, 0, "Disasters", "Surge reach, least", "disaster.surge",
            "A surge's reach in hops along paths, drawn per surge from here ...")
@@ -648,7 +648,7 @@ NOVA_WHOLE("disaster.surge_lead_max", 1500, 1, 1000000000, 0, "Disasters", "Surg
 NOVA_FLAG("disaster.crash", true, 0, "Disasters", "OS crashes", "disaster.enabled",
           "A node reboots: nothing runs and nothing arrives meanwhile; some of its programs are deleted and the rest "
           "restart.")
-NOVA_WHOLE("disaster.crash_every", 3, 0, kKeyNoMax, 0, "Disasters", "Crash interval", "disaster.crash",
+NOVA_WHOLE("disaster.crash_every", 15, 0, kKeyNoMax, 0, "Disasters", "Crash interval", "disaster.crash",
            "Mean ticks between OS crashes anywhere in the world (0 = none).")
 NOVA_WHOLE("disaster.reboot_min", 20, 1, 1000000000, 0, "Disasters", "Reboot, shortest", "disaster.crash",
            "Ticks a crashed node takes to reboot, drawn per crash from here ...")
@@ -696,7 +696,7 @@ NOVA_WHOLE("disaster.diskfail_lead_max", 2000, 1, 1000000000, 0, "Disasters", "D
 // X6: lightning storms
 NOVA_FLAG("disaster.storm", true, 0, "Disasters", "Lightning storms", "disaster.enabled",
           "Storms travel over the map with a heading, striking the node they're over: runs of random codons.")
-NOVA_WHOLE("disaster.storm_every", 300, 0, kKeyNoMax, 0, "Disasters", "Storm interval", "disaster.storm",
+NOVA_WHOLE("disaster.storm_every", 1500, 0, kKeyNoMax, 0, "Disasters", "Storm interval", "disaster.storm",
            "Mean ticks between storms forming anywhere in the world (0 = none).")
 NOVA_WHOLE("disaster.storm_life_min", 2000, 1, 1000000000, 0, "Disasters", "Storm life, shortest", "disaster.storm",
            "A storm's lifetime in ticks, drawn per storm from here ...")
