@@ -2062,6 +2062,51 @@ reference's).
 **Groupshared room.** A 1,024-lane group needs 2 words a lane of its own,
 so a groupshared tier is at most 5,632 words (was 7,680).
 
+*(Since 6.29 the node's width is the most lanes a warp there may have; each
+warp has its own, and a step costs those.)*
+
+### 6.29 Each warp its own lanes; swallowed prey hand over their cores [built 2026-11-09]
+
+Built from `docs/lanes-plan.md`, agreed by Damian ("agreed"). Damian asked
+why small programs paid more on wide nodes ("I thought the lane cost was
+consistent regardless of size?"): every warp was its node's width and every
+step paid for all its lanes, so a 30-codon program on a 1,024-lane node paid
+32 times what it did on a 32-lane one. Of the fixes offered he chose letting
+a program choose its lanes ("I also think #3 is more natural"). On bites:
+"Even if the biter can't utilize those resources immediately, the victim
+should not be able to either"; of freezing a swallowed prey's cores or
+handing them over as it is digested, he chose the second ("fairer for both
+swallower and victim").
+
+**Lanes (L1-L4).** Each warp has its own lanes (`Warp::lanes`), a power of
+two from `warp.lanes_min` up to its node's width.
+- A launch asks for CX lanes (rounded up to a power of two; 0 gets the
+  narrowest). A daughter born by a warp's DIVIDE gets its lanes, carried as
+  cargo if she disperses and cut to the width where she lands. Any other
+  body born on the GPU (sparks, the seed, a CPU's daughter holding only GPU
+  units) gets the fewest that cover its code. A dormant program wakes with
+  its warp's lanes, and a crash restarts a warp with them.
+- Only its lanes run: heads move by them, SENSE 21 reads them, the lockstep
+  and write phase are over them; the rest of its slot is halted.
+- A step costs its own lanes: with a timed table lanes x a GPU lane-op, every
+  lane whether it runs or not; with the classic table as before. Upkeep paid
+  from warps, and a warp's host instructions, cost a step of the body's first
+  warp.
+- The record's warp entries carry each warp's lanes and step work (`WW_LANES`,
+  `WW_STEPC`; `WB_STEP_COST` is free). The kernel hands the warp's lanes to
+  every thread (`g_nl`) and runs lanes below it; the GPU's group is still the
+  node's width (threads past a warp's lanes idle), and each slot still holds
+  the node's width of lanes, so memory and GPU time don't shrink yet.
+- `stats.csv` gains `lanes`, the lanes of every warp alive.
+
+**Swallowed prey (H1).** Each tick a swallowed body's digested codons take
+the same share of its millicores (each kind), GPU and NPU units to its eater,
+rounded to the nearest, each unit keeping its heat. It runs on what it has
+left and may still INJECT its way out; its eater can use what it took at
+once. Its threads, warps and disk go at the end, with the rest of it.
+
+Snapshot v10 (older refused); the warp round dump is version 6.
+
 ## 7. Technical direction [decided via 7.1]
 
 - C++ (or Rust) core; Python only for analysis. *Superseded by 7.1 A and B: C++20, no STL, no third-party, no Python.*

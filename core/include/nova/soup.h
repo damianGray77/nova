@@ -418,8 +418,14 @@ struct Warp {
     u32 wait_ip;
     u64 steps;    // steps run since launch
     u64 lane_instr; // lane instructions run since launch
+    // Its lanes (docs/lanes-plan.md L1, Damian 2026-11-09): a power of two
+    // from warp.lanes_min to its node's width, chosen at launch (CX), a
+    // daughter's from the warp that divided her. Its slot holds the node's
+    // width; the lanes past these are halted and never run.
+    u32 lanes;
+    u32 pad_;
 };
-static_assert(sizeof(Warp) == 4 * 4 + 16, "Warp must have no implicit padding");
+static_assert(sizeof(Warp) == 6 * 4 + 16, "Warp must have no implicit padding");
 
 // An action in progress (Phase 9, design.md 6.15): with a timed cost table,
 // ENGULF and INJECT, and any instruction longer than a tick, take ticks. It
@@ -759,6 +765,9 @@ struct Departure {
     // Voluntary dormancy (docs/lifehistory-plan.md V): a sleeper's flags << 16
     // | its timer (Dormant::flags, Dormant::spare); 0 for anything else.
     u32 sleep;
+    // docs/lanes-plan.md L2: a GPU-born daughter's lanes, her divider's (a
+    // dormant program's, its warp's when it slept); 0: fit to her code.
+    u32 lanes;
 };
 
 // A dormant program resting on this node (docs/dormancy-plan.md): a body with
@@ -781,8 +790,9 @@ struct Dormant {
     u16 spare;        // V6: a voluntary sleep's ticks left (0: the rest of the old u32 kind, in older files)
     u32 hops;         // hops it has drifted
     u32 archive_reserve; // disk tiers (W4): its archive holding, spent last (was padding: 0 without one)
+    u32 lanes;        // docs/lanes-plan.md L2: its warp's lanes when it slept (0: fit to its code)
 };
-static_assert(sizeof(Dormant) == 48, "Dormant must have no implicit padding");
+static_assert(sizeof(Dormant) == 52, "Dormant must have no implicit padding");
 static_assert(offsetof(Dormant, kind) == 36 && offsetof(Dormant, flags) == 37 &&
                   offsetof(Dormant, hops) == 40 && offsetof(Dormant, archive_reserve) == 44,
               "Dormant's bytes are its snapshot format (v3 files hold kind as a u32 at 36)");
@@ -1220,8 +1230,10 @@ class Soup {
     // her thread prefers `kind` (her divider's).
     // W4: `disk` is fast disk; she also claims `archive` codons of free
     // archive (capped), after it.
+    // docs/lanes-plan.md L2: a warp of `lanes`, cut to this node's width (0:
+    // fit to her code).
     bool arrive(const u8* code, u32 len, u32 millicores, u32 gpus, u32 npus, u32 disk, const CargoTag& tag,
-                u32 form = kFormCpu, u32 emillicores = 0, u8 kind = kKindP, u32 archive = 0);
+                u32 form = kFormCpu, u32 emillicores = 0, u8 kind = kKindP, u32 archive = 0, u32 lanes = 0);
 
     // --- warps (Phase 8, design.md 6.14) ------------------------------------
     // The tick in parts, so that the world can run every node's warps on the
@@ -1285,7 +1297,20 @@ class Soup {
     Array<Lane>& lanes_mut() { return lanes_; }
     // Inspection.
     bool warps_on() const { return p_->warps; }
-    u32 lanes_per_warp() const { return p_->warp_lanes; }
+    u32 lanes_per_warp() const { return p_->warp_lanes; } // the node's width: each warp slot's room
+    u32 warp_lanes(u32 w) const { return warps_[w].lanes; } // warp w's own lanes (docs/lanes-plan.md L1)
+    // docs/lanes-plan.md L1: lanes asked for -> the warp's: the first power of
+    // two from warp.lanes_min that holds them, at most the node's width.
+    u32 fit_lanes(u32 want) const {
+        u32 n = p_->warp_lanes_min;
+        while (n < want && n < p_->warp_lanes)
+            n <<= 1;
+        return n < p_->warp_lanes ? n : p_->warp_lanes;
+    }
+    // The work a step of a warp of `lanes` costs (L3): with a timed table its
+    // lanes x a GPU lane-op, every lane whether it runs or not; with the
+    // classic table warp.step_cost (and warp.lane_cost a lane that runs).
+    u32 warp_step_price(u32 lanes) const;
     usize warp_slots() const { return warps_.size(); }
     u32 warps_alive() const { return static_cast<u32>(warps_.size() - free_warps_.size()); }
     u32 warp_count(u32 b) const { return b < warp_count_.size() ? warp_count_[b] : 0; }
@@ -1482,13 +1507,16 @@ class Soup {
     Array<u64> wuntil_;
     void resolve_warp_actions(); // round 0: warps' actions whose end has come
     void count_lanes(u32 w);    // wlive_, wact_ from the host's lanes
-    u32 new_warp(u32 body, u32 ip, const Cpu* launcher);
+    u32 new_warp(u32 body, u32 ip, const Cpu* launcher, u32 lanes); // lanes: fit_lanes's
+    double warp_serial(u32 b) const; // a one-instruction step's work for body b's warps (upkeep, host steps)
     void free_warp(u32 w);
     void release_warp_slot(u32 w);
     void kill_warps(u32 b);
     void merge_warps(u32 prey, u32 eater);
     u32 warp_adv(u32 body, u32 a, u32 n) const; // warp_isa.inc's w_adv, on the soup
-    u32 birth(u32 body, u32 start, u32 form);   // a new body's first CPU or warp
+    // A new body's first CPU or warp; a warp of `lanes` (fit to the node), or
+    // with 0 fit to her code (docs/lanes-plan.md L2).
+    u32 birth(u32 body, u32 start, u32 form, u32 lanes = 0);
     bool cpu_runs(u32 b) const;
     bool warp_runs(u32 b) const;
     bool sense_reading(u32 b, u32 r, u32 ci, u32* v) const;
@@ -1579,6 +1607,7 @@ class Soup {
     // disk, warps (a digested body's end, S2; its threads end). Its own
     // guests move on to the eater, their memory now the eater's.
     void absorb(u32 prey, u32 eater);
+    void hand_over(u32 prey, u32 eater, u32 eaten, u32 had); // docs/lanes-plan.md H1: digestion's share of its cores
     bool has_guests(u32 h) const;
     // A dying host's guests, listed while its first block's span is known,
     // freed once its blocks are waste (M5, S5).

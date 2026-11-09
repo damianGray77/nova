@@ -218,7 +218,7 @@ void test_stats_header() {
                          "role_copier,role_idle,work_len,action_kinds_x100,novelty,novel_share,novel_success,"
                          "wipe_warnings,wipe_false_alarms,wipe_flickers,sleeps,sleep_woke,sleep_expired,ray_inserts,ray_deletes,corpse_codons,"
                          "wounds,bled,repairs,parasite_threads,parasite_divides,struck_bodies,swallows,digested,escapes,freed,open_ends,"
-                         "infected,parasites,swallowed,compress,ambient\n";
+                         "infected,parasites,swallowed,lanes,compress,ambient\n";
     CHECK(bytes.size() > strlen(header) && memcmp(bytes.data(), header, strlen(header)) == 0);
     remove(path);
 }

@@ -67,6 +67,8 @@ const char* const kColumns[kStatsColumns] = {
     // bites as wounds, parasites and guests (docs/bites-plan.md, docs/inject-plan.md): ten sums, then four gauges
     "wounds", "bled", "repairs", "parasite_threads", "parasite_divides", "struck_bodies", "swallows", "digested",
     "escapes", "freed", "open_ends", "infected", "parasites", "swallowed",
+    // each warp's own lanes (docs/lanes-plan.md L4): the lanes of every warp alive
+    "lanes",
     // the two floating-point columns, last as always
     "compress",     "ambient"};
 // The first 39 tally fields fill columns 3-41; Phase 8's five go after
@@ -128,12 +130,14 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
     const u64 links = total_links(w, LinkKind::all), parasite = total_links(w, LinkKind::parasite),
               gpu = total_links(w, LinkKind::gpu);
     u64 gpu_held = 0, npu_held = 0, max_depth = 0, lineages = 0, top = 0, top_genos = 0, colonised = 0,
-        disk_held = 0, warps = 0, gpu_bodies = 0, e_held = 0, archive_held = 0, fast_held = 0;
+        disk_held = 0, warps = 0, gpu_bodies = 0, e_held = 0, archive_held = 0, fast_held = 0, lanes = 0;
     double comp = 0, ambient = 0;
     for (u32 n = 0; n < w.node_count(); ++n) {
         const Soup& s = w.node_soup(n);
         if (s.warps_on()) { // Phase 8: warps alive, bodies born on a GPU alive
             warps += s.warps_alive();
+            for (usize k = 0; k < s.warp_slots(); ++k) // (L4: their lanes)
+                lanes += s.warp(static_cast<u32>(k)).body != kNone ? s.warp_lanes(static_cast<u32>(k)) : 0;
             for (usize k = 0; k < s.body_count(); ++k)
                 gpu_bodies += s.body(s.body_at(k)).form == kFormGpu;
         }
@@ -169,7 +173,7 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
     static_assert(3 + kTallyEarly + sizeof tail / sizeof tail[0] + kTallyWarp + 2 + kTallyAction + kTallyThread + 1 +
                           kTallyLife + kTallyDormant + 2 + 1 + kTallyArchive + kFoundedColumns + kStatsDisasterColumns +
                           kStatsTierColumns + kStatsProfileColumns + kStatsNoveltyColumns + kStatsLifeColumns +
-                          kStatsBiteColumns ==
+                          kStatsBiteColumns + kStatsLaneColumns ==
                       kStatsIntColumns,
                   "stats row shape");
     for (usize i = 0; i < nt; ++i)
@@ -257,6 +261,7 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
     v[kStatsBiteFirst + kTallyBite + 1] = infected;
     v[kStatsBiteFirst + kTallyBite + 2] = parasites;
     v[kStatsBiteFirst + kTallyBite + 3] = swallowed;
+    v[kStatsLaneFirst] = lanes; // docs/lanes-plan.md L4
     marks->links = links;
     marks->parasite = parasite;
     marks->gpu = gpu;

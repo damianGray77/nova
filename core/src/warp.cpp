@@ -166,7 +166,8 @@ struct WarpVM {
     u32 gs_min = 0, gs_count = 0;
     // (Not cleared: a step's lanes set theirs before its write phase reads
     // them. Cleared, 2 KB a record at 256 lanes.)
-    u32 gs_wa[kMaxLanes], gs_wv[kMaxLanes], gs_ctl[13] = {};
+    u32 gs_wa[kMaxLanes], gs_wv[kMaxLanes], gs_ctl[14] = {};
+    u32 g_nl = 0; // the running warp's lanes (docs/lanes-plan.md L1)
     // w_write_phase's addresses written this step (docs/inject-plan.md W3):
     // an open-addressing set, a slot taken when its generation is this step's.
     // Its size is the first power of two at least twice the record's lanes
@@ -296,7 +297,7 @@ struct WarpVM {
         default:
             return false;
         }
-        const uint nl = IMG(b + WB_LANES);
+        const uint nl = g_nl; // the warp's own lanes (docs/lanes-plan.md L1)
         u64 flaws[kMaxLanes / 64] = {}; // (64 lanes a word)
         for (uint w = 0; w * 64u < nl; ++w)
             flaws[w] = flaw_mask(ks, w * 64u, nl, IMG(b + WB_FLAW_THR), WD_FLAW);
@@ -528,8 +529,26 @@ u32 Soup::warp_adv(u32 body, u32 a, u32 n) const {
     return (a + n % p_->size) % p_->size;
 }
 
-u32 Soup::new_warp(u32 body, u32 ip, const Cpu* launcher) {
+u32 Soup::warp_step_price(u32 lanes) const {
+    if (!p_->cost.timed)
+        return p_->warp_step_cost;
+    const double v = static_cast<double>(lanes) * static_cast<double>(p_->cost.gpu_thr);
+    return v < 1 ? 1u : (v > 4e9 ? 4000000000u : static_cast<u32>(v));
+}
+
+// The work of a step running one instruction, for body b's warps: what its
+// upkeep and its warps' host instructions cost at the serial rate. A step
+// fills its warp, so with a timed table it is a step of b's first warp
+// (docs/lanes-plan.md L3; the narrowest width if it has none).
+double Soup::warp_serial(u32 b) const {
+    const u32 w = b < warp_head_.size() ? warp_head_[b] : kNone;
+    const u32 lanes = w != kNone ? warps_[w].lanes : p_->warp_lanes_min;
+    return static_cast<double>(warp_step_price(lanes)) + p_->warp_lane_cost;
+}
+
+u32 Soup::new_warp(u32 body, u32 ip, const Cpu* launcher, u32 lanes) {
     const u32 L = p_->warp_lanes;
+    const u32 n = lanes == 0 || lanes > L ? L : lanes;
     u32 w;
     if (!free_warps_.empty()) {
         w = free_warps_.back();
@@ -551,6 +570,7 @@ u32 Soup::new_warp(u32 body, u32 ip, const Cpu* launcher) {
     W = Warp{};
     W.body = body;
     W.next = kNone;
+    W.lanes = n;
     if (warp_head_[body] == kNone) {
         warp_head_[body] = w;
     } else {
@@ -565,6 +585,10 @@ u32 Soup::new_warp(u32 body, u32 ip, const Cpu* launcher) {
     for (u32 l = 0; l < L; ++l) {
         Lane& x = lanes_[static_cast<usize>(w) * L + l];
         x = Lane{};
+        if (l >= n) { // past its lanes: the slot's room, halted, never run (docs/lanes-plan.md L1)
+            x.halted = 1;
+            continue;
+        }
         x.ip = ip;
         x.block = block;
         if (launcher) { // a kernel launch with its arguments: the launcher's registers and heads
@@ -583,7 +607,7 @@ u32 Soup::new_warp(u32 body, u32 ip, const Cpu* launcher) {
     wtime_[w] = 0;
     wuntil_[w] = 0;
     wagain_[w] = 0;
-    wlive_[w] = wact_[w] = L;
+    wlive_[w] = wact_[w] = n;
     wstate_[w] = kLanesHost; // new lanes: the GPU's copy (if any) is stale
     return w;
 }
@@ -617,9 +641,9 @@ void Soup::release_warp_slot(u32 w) {
 }
 
 void Soup::count_lanes(u32 w) {
-    const u32 L = p_->warp_lanes;
+    const u32 L = p_->warp_lanes, n = warps_[w].lanes;
     u32 live = 0, act = 0;
-    for (u32 l = 0; l < L; ++l) {
+    for (u32 l = 0; l < n; ++l) {
         const Lane& x = lanes_[static_cast<usize>(w) * L + l];
         live += x.halted ? 0 : 1;
         act += !x.halted && !x.yielded ? 1 : 0;
@@ -671,12 +695,14 @@ void Soup::merge_warps(u32 prey, u32 eater) {
 u32 Soup::launch_warp(u32 body, u32 ip) {
     if (!p_->warps || warp_count_[body] >= p_->warp_max)
         return kNone;
-    return new_warp(body, ip, nullptr);
+    return new_warp(body, ip, nullptr, p_->warp_lanes);
 }
 
 // A new body's runner: a CPU, or a warp for kFormGpu; the other form if it
 // holds only that one's units (a CPU when it holds neither: it dies as before).
-u32 Soup::birth(u32 body, u32 start, u32 form) {
+// Her warp's lanes (docs/lanes-plan.md L2): `lanes`, cut to this node's width;
+// with 0, the fewest that cover her code (her first block), a lane a codon.
+u32 Soup::birth(u32 body, u32 start, u32 form, u32 lanes) {
     const bool has_cpu = bodies_[body].units > 0;
     const bool has_gpu = gpu_count(body) > 0;
     u32 f = form;
@@ -687,7 +713,9 @@ u32 Soup::birth(u32 body, u32 start, u32 form) {
     else if (f == kFormCpu && !has_cpu)
         f = kFormGpu;
     if (f == kFormGpu) {
-        new_warp(body, start, nullptr);
+        const u32 k = bodies_[body].blocks;
+        const u32 want = lanes ? lanes : (k != kNone ? blocks_[k].len : 1);
+        new_warp(body, start, nullptr, fit_lanes(want));
         ++tally_.gpu_births;
     } else {
         new_cpu(body, start);
@@ -795,7 +823,6 @@ bool Soup::warp_pack(u32 round) {
                 best = i;
         }
     }
-    const double serial = static_cast<double>(p_->warp_step_cost) + p_->warp_lane_cost;
     // Memory tiers (docs/world-plan.md W3), timed tables: a lane's prices per
     // tier on this node, for every record. Today's GPU prices -- a body's
     // memory in the L2 (gpu_mem a load, a lane's add a store, gpu_scan a
@@ -852,7 +879,7 @@ bool Soup::warp_pack(u32 round) {
             double units = gpu_count(b) ? static_cast<double>(gpu_.cap[b]) / p_->gpu_elements : 0.0;
             if (units < 0)
                 units = 0;
-            const double work = units * p_->warp_capacity + warp_carry_[b] - warp_upkeep_[b] * serial;
+            const double work = units * p_->warp_capacity + warp_carry_[b] - warp_upkeep_[b] * warp_serial(b);
             warp_upkeep_[b] = 0.0;
             if (nrun == 0) {
                 warp_carry_[b] = work < 0 ? static_cast<float>(work) : 0.0f;
@@ -1073,8 +1100,7 @@ bool Soup::warp_pack(u32 round) {
         I[rec + WB_LO] = lo;
         I[rec + WB_HI] = hi;
         I[rec + WB_SIZE] = p_->size;
-        I[rec + WB_LANES] = p_->warp_lanes; // this node's width (docs/inject-plan.md W1)
-        I[rec + WB_STEP_COST] = p_->warp_step_cost;
+        I[rec + WB_LANES] = p_->warp_lanes; // this node's width: each slot's room (docs/inject-plan.md W1)
         I[rec + WB_KEY] = static_cast<u32>(z ^ (z >> 32));
         I[rec + WB_COPY_THR] = prob_threshold(p_->copy_rate * hazard_mult_ * gerr);
         I[rec + WB_FLAW_THR] = prob_threshold(p_->flaw_rate * hazard_mult_ * gerr);
@@ -1122,6 +1148,8 @@ bool Soup::warp_pack(u32 round) {
             I[e + WW_INDEX] = places[i];
             I[e + WW_STEP0] = wsteps_[run[i]];
             I[e + WW_TLEFT] = timed ? tick_time - wtime_[run[i]] : W_NONE; // its own clock (Phase 9b)
+            I[e + WW_LANES] = warps_[run[i]].lanes; // docs/lanes-plan.md L1, L3
+            I[e + WW_STEPC] = warp_step_price(warps_[run[i]].lanes);
         }
         u32 j = 0, cw = code, pe = page;
         for (u32 kb = B.blocks; kb != kNone; kb = blocks_[kb].next, ++j) {

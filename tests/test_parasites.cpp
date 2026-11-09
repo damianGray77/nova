@@ -257,6 +257,41 @@ void test_swallowed() {
     CHECK(soup_ok(h.s));
 }
 
+// docs/lanes-plan.md H1 (Damian: "fairer for both swallower and victim"): a
+// swallowed body's cores go to its eater with its codons, the same share each
+// tick (rounded to the nearest), so neither holds what the other has: a
+// 10-codon prey with 300 millicores and 10 GPU units, digested 2 codons a
+// tick, keeps 240 and 8, then 180 and 6, 120 and 4, 60 and 2; then it is gone
+// and its eater has them all.
+void test_handover() {
+    PFix f;
+    CHECK(f.init("life.bleed_every = 0\nworld.millicores = 2000\nworld.gpus = 64\nengulf.bite = true\n"
+                 "engulf.digest = 2\n"));
+    TextBuf eater_code;
+    eater_code.append("ENGULF NOP0");
+    for (int i = 0; i < 27; ++i)
+        eater_code.append(" INC");
+    eater_code.append(" NOP0");
+    const u32 e = plant(f.s, 100, eater_code.c_str(), 500); // [100, 130)
+    const u32 prey = plant(f.s, 200, "NOP1 INC INC INC INC INC INC INC INC INC", 300); // [200, 210)
+    CHECK(e != kNone && prey != kNone && f.s.claim_gpus(prey, 10) == 10);
+    f.s.cpu_mut(f.s.body(e).cpus).cx = 10; // a third of 30: the whole prey
+    f.s.run_cpu(f.s.body(e).cpus, 1);
+    CHECK(f.s.is_swallowed(prey) && f.s.body(e).units == 500 && f.s.body(prey).units == 300);
+    const u32 units[4] = {240, 180, 120, 60}, gpus[4] = {8, 6, 4, 2};
+    for (u32 i = 0; i < 4; ++i) {
+        f.s.digest();
+        CHECK(f.s.body(prey).alive && f.s.body(prey).mem == 8 - 2 * i);
+        CHECK(f.s.body(prey).units == units[i] && f.s.body(e).units == 800 - units[i]);
+        CHECK(f.s.gpu_count(prey) == gpus[i] && f.s.gpu_count(e) == 10 - gpus[i]);
+        CHECK(soup_ok(f.s));
+    }
+    f.s.digest(); // its last 2 codons: food, the rest of it its eater's
+    CHECK(!f.s.body(prey).alive && f.s.body(e).units == 800 && f.s.gpu_count(e) == 10 && f.s.tally().digested == 10);
+    f.s.death_sweep(); // (its slot leaves the schedule, as at a tick's end)
+    CHECK(soup_ok(f.s));
+}
+
 // A busy procedural world with bites on, digestion and fast bleeding:
 // wounds, bleeding, repairs-or-not, programs moving into hosts, swallows and
 // digestion all happen, and the world is the same at 1, 4 and 20 threads and
@@ -320,5 +355,6 @@ void suite_parasites() {
     test_parasite();
     test_parasite_limits();
     test_swallowed();
+    test_handover();
     test_world();
 }

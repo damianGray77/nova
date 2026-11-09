@@ -149,9 +149,10 @@ DisasterCount Soup::crash(double share, u64 restart, Rng& r) {
             }
         }
         if (p_->warps && warp_count_[b] > 0) {
+            const u32 lanes = warps_[warp_head_[b]].lanes; // (its first warp's: docs/lanes-plan.md L2)
             kill_warps(b);
             if (B.form == kFormGpu && gpu_count(b) > 0)
-                new_warp(b, start, nullptr);
+                new_warp(b, start, nullptr, lanes);
         }
         if (p_->frozen_ticks > 0)
             last_ran_[b] = restart;

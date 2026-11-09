@@ -1261,7 +1261,7 @@ void ViewSession::build(const ViewRequest& q, ViewFrame* f) {
             // Phase 8: its warps' lanes, and which run in each warp's next step.
             u32 wn = 0;
             for (u32 wi = s.warp_head(sel_body); wi != kNone; wi = s.warp(wi).next, ++wn) {
-                const u32 nl = s.lanes_per_warp();
+                const u32 nl = s.warp_lanes(wi); // its own lanes (docs/lanes-plan.md L1)
                 u32 minip = kNone;
                 for (u32 l = 0; l < nl; ++l) {
                     const Lane& x = s.lane(wi, l);

@@ -1385,8 +1385,8 @@ void Viewer::map_panel(const UiInput& in_raw, Canvas& c) {
                 at += snprintf(more + at, left(), "\noccupancy %.0f%%", 100.0 * v.occupancy);
                 clamp();
             }
-            if (v.warp_lanes) { // docs/inject-plan.md W1: its GPU's warp width
-                at += snprintf(more + at, left(), "\nwarps of %u lanes", v.warp_lanes);
+            if (v.warp_lanes) { // docs/inject-plan.md W1: its GPU's warp width (docs/lanes-plan.md L1: the most a warp has)
+                at += snprintf(more + at, left(), "\nwarps of up to %u lanes", v.warp_lanes);
                 clamp();
             }
             if ((v.known >> kColorSymptoms & 1) && (v.symptoms > 0 || v.struck || v.cores_offline)) {

@@ -48,14 +48,20 @@ The viewer also offers new kinds of life, substrate maps and disaster marks.
   (`contact.inject_ratio`) and is priced like a bite, not like COPY.
 - A bite that would swallow its prey whole now digests it, `engulf.digest`
   (2) codons a tick. The prey keeps running and can INJECT itself into its
-  eater to escape.
+  eater to escape. Its cores go to its eater with its codons, the same share
+  each tick (design.md 6.29), so each runs on what it holds.
 
 **Warp widths by node** (design.md 6.28): each node's GPU has its own warp
 width, a power of two drawn from the world seed between `warp.lanes_min`
-(16) and `warp.lanes_max` (1,024, the GPU's ceiling). A wide warp copies
-more codons a step and each step costs more. The GPU runs every width on
-its own kernel, compiled at build time, and gives the CPU reference's
-results word for word.
+(16) and `warp.lanes_max` (1,024, the GPU's ceiling). The GPU runs every
+width on its own kernel, compiled at build time, and gives the CPU
+reference's results word for word.
+
+**Each warp its own lanes** (design.md 6.29, `docs/lanes-plan.md`): the
+node's width is the most a warp there may have. A launch asks for CX lanes,
+a warp's daughter gets its lanes, and any other body born on the GPU the
+fewest that cover its code. A step costs the warp's own lanes, so a small
+program no longer pays for a wide node's lanes. `stats.csv` gains `lanes`.
 
 **Dormancy and drift** (design.md 6.17, `docs/dormancy-plan.md`): a program
 the watchdog would kill as frozen (200 ticks without running, typically buried

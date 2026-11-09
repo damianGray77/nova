@@ -547,6 +547,43 @@ void test_warp_clock() {
     CHECK(soup_ok(f.s) && soup_ok(g.s));
 }
 
+// docs/lanes-plan.md L3: a step costs the warp's own lanes, not its node's
+// width. On a node of 256 lanes, with 8 units each (152,000 of lane-time): a
+// 16-lane warp's step is 11,200, so its clock binds first (13 steps, as
+// above); a 256-lane warp's is 179,200, so it gets one step (overshooting).
+void test_warp_own_lanes_cost() {
+    SoupParams p;
+    TextBuf cfg;
+    cfg.append(kQuiet);
+    cfg.append("world.millicores = 2000\nworld.gpus = 400\ngpu.warps = true\ncost.table = home_v1\n"
+               "cpu.instr_per_core = 100\nwarp.lanes_min = 16\nwarp.lanes_max = 256\n");
+    CHECK(make_params(&p, cfg.c_str(), 1024));
+    set_warp_lanes(&p, 256); // a node of 256 lanes, as World::derive_node draws one
+    Soup s;
+    s.init(&p, 23, 0);
+    Array<u8> code;
+    TextBuf err;
+    TextBuf big;
+    for (u32 i = 0; i < 200; ++i)
+        big.append(i ? " INC" : "INC");
+    CHECK(genome_from_names(p.table, "INC INC INC INC", &code, &err));
+    for (usize i = 0; i < code.size(); ++i)
+        s.mem_mut()[100 + i] = code[i];
+    const u32 small = s.create_body_form(100, 4, 0, 8, kFormGpu);
+    CHECK(genome_from_names(p.table, big.c_str(), &code, &err));
+    for (usize i = 0; i < code.size(); ++i)
+        s.mem_mut()[300 + i] = code[i];
+    const u32 wide = s.create_body_form(300, 200, 0, 8, kFormGpu);
+    CHECK(small != kNone && wide != kNone);
+    const u32 ws = s.warp_head(small), ww = s.warp_head(wide);
+    CHECK(s.warp_lanes(ws) == 16 && s.warp_lanes(ww) == 256);
+    CHECK(s.warp_step_price(16) == 16 * 700 && s.warp_step_price(256) == 256 * 700);
+    s.tick(0);
+    CHECK(s.warp(ws).steps == 19000 / 1393 && s.warp(ws).lane_instr == 16 * (19000 / 1393));
+    CHECK(s.warp(ww).steps == 1 && s.warp(ww).lane_instr == 256);
+    CHECK(soup_ok(s));
+}
+
 // A host instruction: the warp waits a GPU round trip and the host's time,
 // (67 us + a kernel call) / 4.75 us a tick: 15 ticks.
 void test_host_wait() {
@@ -1393,6 +1430,7 @@ void suite_costs() {
     // Phase 9b
     test_device_table();
     test_warp_clock();
+    test_warp_own_lanes_cost();
     test_host_wait();
     test_warp_engulf();
     test_block_op_action();

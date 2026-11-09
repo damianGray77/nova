@@ -1782,8 +1782,9 @@ void World::warp_second_task(void* ctx, u32 node) {
 }
 
 // set_warp_dump's file, little-endian 32-bit words: "NWRD" (0x4452574E), the
-// version (5: a warp width per job and the record's WB_LANES, WB_STEP_COST,
-// docs/inject-plan.md W3; 4: salvage stamps as a list per record,
+// version (6: each warp entry's own lanes and step work, WW_LANES and
+// WW_STEPC, docs/lanes-plan.md L1; 5: a warp width per job and the record's
+// WB_LANES, WB_STEP_COST, docs/inject-plan.md W3; 4: salvage stamps as a list per record,
 // CW_STAMPED; 3: the block index's pair count, and overlapping blocks
 // indexed; 2: memory tiers' record words, W3; 1 before), 0 (was lanes a
 // warp), the constants' count, the jobs' count, the constants; then per job
@@ -1797,7 +1798,7 @@ bool World::warp_write_dump(const Array<u32>& cst) {
     auto put = [&](const void* p, usize words) {
         ok = ok && (words == 0 || fwrite(p, 4, words, f) == words);
     };
-    const u32 head[5] = {0x4452574Eu, 5u, 0u, static_cast<u32>(cst.size()), static_cast<u32>(warp_jobs_.size())};
+    const u32 head[5] = {0x4452574Eu, 6u, 0u, static_cast<u32>(cst.size()), static_cast<u32>(warp_jobs_.size())};
     put(head, 5);
     put(cst.data(), cst.size());
     Array<u32> words;
@@ -3019,6 +3020,7 @@ void World::take_departures() {
             c.hops = dep.hops;
             c.archive = dep.archive; // disk tiers (W4)
             c.sleep = dep.sleep;     // voluntary dormancy (docs/lifehistory-plan.md V)
+            c.lanes = dep.lanes;     // docs/lanes-plan.md L2
             c.ticks = static_cast<u32>(c.due - tick_);
             cargo_codons_.append(s.departure_codons() + dep.codon_off, dep.len);
             cargo_.push(c);
@@ -3104,6 +3106,7 @@ void World::deliver_dormant(Cargo& c) {
     d.gpus = c.gpus;
     d.npus = c.npus;
     d.form = c.form;
+    d.lanes = c.lanes; // docs/lanes-plan.md L2
     d.kind = static_cast<u8>(c.kind); // (kKindP or kKindE; Dormant::kind is a byte, soup.h)
     d.hops = c.hops;
     if ((live_.empty() || live_[dst]) && !(disasters_ && rebooting(dst))) // (a rebooting node: it passes through)
@@ -3165,7 +3168,7 @@ void World::deliver_cargo() {
         const bool placed =
             soups_[edge_dst_[c.edge]].arrive(cargo_codons_.data() + c.codon_off, c.len, c.millicores, c.gpus,
                                              c.npus, c.disk, c.tag, c.form, c.emillicores, static_cast<u8>(c.kind),
-                                             c.archive);
+                                             c.archive, c.lanes);
         if (placed && log_arrivals()) // behaviour profiles (A3): the arrivals log, observe-only
             note_arrival(c, edge_dst_[c.edge]);
         --in_flight_[c.edge];
@@ -3612,8 +3615,8 @@ u64 World::hash() const {
                 h.word(c.npus);
                 if (soup_params_.disk) // Phase 4: her disk share
                     h.word(c.disk);
-                if (soup_params_.warps) // Phase 8: her form
-                    h.word(c.form);
+                if (soup_params_.warps) // Phase 8: her form; her warp's lanes (docs/lanes-plan.md L2)
+                    h.word((static_cast<u64>(c.lanes) << 32) | c.form);
                 if (soup_params_.kinds) // Phase 9c: her E millicores, her kind
                     h.word((static_cast<u64>(c.emillicores) << 32) | c.kind);
                 if (soup_params_.dormancy) { // a drifting dormant program, its memory reserve and hops
@@ -3696,8 +3699,10 @@ void World::save_state(ByteWriter& w) const {
                 w.put_u32(c.npus);
                 if (soup_params_.disk)
                     w.put_u32(c.disk);
-                if (soup_params_.warps)
+                if (soup_params_.warps) {
                     w.put_u32(c.form);
+                    w.put_u32(c.lanes); // docs/lanes-plan.md L2 (v10)
+                }
                 if (soup_params_.kinds) { // Phase 9c
                     w.put_u32(c.emillicores);
                     w.put_u32(c.kind);
@@ -3853,8 +3858,10 @@ bool World::load_state(ByteReader& r, TextBuf* err, u32 version) {
                 r.get_u32(&c.npus);
                 if (soup_params_.disk)
                     r.get_u32(&c.disk);
-                if (soup_params_.warps)
+                if (soup_params_.warps) {
                     r.get_u32(&c.form);
+                    r.get_u32(&c.lanes); // docs/lanes-plan.md L2 (v10)
+                }
                 if (soup_params_.kinds) { // Phase 9c
                     r.get_u32(&c.emillicores);
                     r.get_u32(&c.kind);
@@ -3870,7 +3877,7 @@ bool World::load_state(ByteReader& r, TextBuf* err, u32 version) {
                     r.get_u32(&c.sleep);
                 if (!r.ok() || c.edge >= edge_src_.size() || c.len == 0 || c.len > r.remaining() ||
                     c.due < tick || c.seq >= next_seq_ || c.form > kFormGpu || c.kind > kKindE || c.dormant > 1 ||
-                    (c.sleep && !c.dormant)) {
+                    (c.sleep && !c.dormant) || c.lanes > kMaxLanes || (c.lanes & (c.lanes - 1)) != 0) {
                     err->append("snapshot: cargo out of range");
                     return false;
                 }

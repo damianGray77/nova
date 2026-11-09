@@ -30,9 +30,12 @@
 //                        the lane's stack in memory, since a local array
 //                        indexed at run time can't live in a barrier loop)
 //   GS_MIN(x, v) / GS_ADD(x, v) / GS_MAX(x, v) groupshared atomics on gs_min, gs_count, gs_ctl
-//   gs_min, gs_count, gs_wa[], gs_wv[], gs_ctl[13]  groupshared words
+//   gs_min, gs_count, gs_wa[], gs_wv[], gs_ctl[14]  groupshared words
 //   g_seen, g_tseen, g_tfast  the lane being run's search counts (thread-private:
 //                        Phase 9c; g_tseen and g_tfast for the memory tiers, W3)
+//   g_nl                 the running warp's lanes (thread-private, the same in
+//                        every thread: docs/lanes-plan.md L1); LANE_BEGIN runs
+//                        lanes [0, g_nl) only (on the GPU, threads past them idle)
 //   W_LOOP               [loop] (HLSL) / nothing
 //   W_TRACE(wr, l, step, ip, op, L)  after a lane's instruction: nothing on the
 //                        GPU; the C++ reference can log one lane (debugging)
@@ -681,7 +684,7 @@ bool w_host_op(uint op) {
 // the address after the instruction on entry and where the lane goes on exit.
 bool w_exec(uint b, INOUT(LANE_T) L, uint lane, uint op, uint ip, uint key, uint step, INOUT(uint) next,
             INOUT(uint) wto, INOUT(uint) wval) {
-    uint lanes = IMG(b + WB_LANES);
+    uint lanes = g_nl; // the warp's own (docs/lanes-plan.md L1): heads move by them, SENSE 21 reads them
     uint size = IMG(b + WB_SIZE);
     bool ok = true;
     uint t0 = 0u;
@@ -1104,7 +1107,7 @@ void w_run_warp(uint b, uint wi) {
     uint tsearch = 0u;
     uint key = w_mix(IMG(b + WB_KEY) ^ (IMG(wr + WW_INDEX) * 0x27D4EB2Fu));
     uint step = IMG(wr + WW_STEP0);
-    uint nl = IMG(b + WB_LANES);
+    uint nl = 0u; // its lanes (docs/lanes-plan.md L1), handed over below
     uint used = 0u;
     uint steps = 0u;
     uint lins = 0u;
@@ -1132,13 +1135,17 @@ void w_run_warp(uint b, uint wi) {
         gs_ctl[0] = IMG(wr + WW_QUOTA);
         gs_ctl[7] = IMG(wr + WW_TLEFT);
         gs_ctl[11] = IMG(b + WB_FAST);
-        gs_ctl[12] = IMG(b + WB_STEP_COST); // (the node's: docs/inject-plan.md W2)
+        gs_ctl[12] = IMG(wr + WW_STEPC); // (its own lanes': docs/lanes-plan.md L3)
+        gs_ctl[13] = IMG(wr + WW_LANES);
     ONCE_END
     SYNC
     quota = gs_ctl[0];
     tleft = gs_ctl[7];
     fast = gs_ctl[11];
     stepc = gs_ctl[12];
+    nl = gs_ctl[13];
+    g_nl = nl;
+    SYNC
     LANES_LOAD(lane0)
     LANE_BEGIN(lane0)
         if (step == 0u)

@@ -509,8 +509,10 @@ class World {
         // Voluntary dormancy (docs/lifehistory-plan.md V): a drifting sleeper's
         // flags << 16 | timer (Departure::sleep); 0 otherwise (was padding).
         u32 sleep;
+        u32 lanes; // docs/lanes-plan.md L2: her warp's lanes (Departure::lanes; 0: fit to her code)
+        u32 pad_;
     };
-    static_assert(sizeof(Cargo) == 112, "Cargo must have no implicit padding");
+    static_assert(sizeof(Cargo) == 120, "Cargo must have no implicit padding");
 
     bool build_edges(const u64* keys, usize n); // keys: (src << 32 | dst), strictly increasing
     void update_node(u32 node);

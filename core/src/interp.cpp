@@ -58,6 +58,9 @@ struct Exec {
         a->cpu = warp ? wslot : ci;
         a->warp = warp ? 1u : 0u;
     }
+    // A daughter's lanes (docs/lanes-plan.md L2): the dividing warp's; 0 for
+    // a CPU's (a GPU-born daughter of a CPU fits her code).
+    u32 divider_lanes() const { return warp && wslot != kNone ? s.warps_[wslot].lanes : 0u; }
 
     // --- memory tiers (docs/world-plan.md W3) ---------------------------------
     // With a timed table and fast memory on the node (SoupParams::fast_end),
@@ -617,9 +620,10 @@ struct Exec {
                                static_cast<u32>(static_cast<u64>(ha) * share / 64));
         }
         // Phase 8: she is born on what divided her (a warp's daughter as a
-        // warp), once she holds her shares.
+        // warp), once she holds her shares; a warp's daughter with its lanes
+        // (docs/lanes-plan.md L2).
         if (p.warps)
-            s.birth(d, s.blocks_[k].start, warp ? kFormGpu : kFormCpu);
+            s.birth(d, s.blocks_[k].start, warp ? kFormGpu : kFormCpu, divider_lanes());
         // Phase 9c: her thread prefers the kind of core the thread that divided her does.
         if (s.kinds_on() && s.bodies_[d].cpus != kNone)
             s.cpu_kind_[s.bodies_[d].cpus] = warp ? kKindP : s.cpu_kind(ci);
@@ -662,6 +666,7 @@ struct Exec {
         d.nbr = nbr;
         d.len = B.len;
         d.form = p.warps && warp ? kFormGpu : kFormCpu; // Phase 8: she travels as what divided her
+        d.lanes = divider_lanes(); // ... with its lanes (docs/lanes-plan.md L2)
         d.codon_off = static_cast<u32>(s.departure_codons_.size());
         s.departure_codons_.append(s.mem_.data() + B.start, B.len);
         Body& Pb = s.bodies_[parent];
@@ -2113,7 +2118,9 @@ struct Exec {
     // at the code after the template that follows it, found as JMP finds
     // one. Every lane starts with this CPU's (or lowest lane's) registers and
     // heads, lane L's heads L past. Fails without a template or a match,
-    // without GPU units, or at warp.max. Costs gpu.setup.
+    // without GPU units, or at warp.max. Costs gpu.setup. It asks for CX
+    // lanes: the first power of two from warp.lanes_min that holds them, at
+    // most the node's width (docs/lanes-plan.md L1, Damian).
     bool launch(u32 ip, u32* next, u32* cost) {
         u8 bits[64];
         const u32 n = read_template(next_ip(ip), bits);
@@ -2124,7 +2131,7 @@ struct Exec {
         if (to == kNone || s.gpu_count(c.body) == 0 || s.warp_count_[c.body] >= p.warp_max ||
             s.is_parasite(c.body)) // (a parasite runs as CPU threads: docs/inject-plan.md M3)
             return false;
-        const u32 w = s.new_warp(c.body, to, &c);
+        const u32 w = s.new_warp(c.body, to, &c, s.fit_lanes(c.cx)); // CX lanes (docs/lanes-plan.md L1)
         *cost = max_of<u32>(1, p.gpu_setup);
         if (p.cost.timed) { // Phase 9b: a kernel launch is a call; the warp starts after the GPU's start-up
             t_ps += costs().call;
@@ -3396,7 +3403,7 @@ bool Soup::sense_reading(u32 b, u32 r, u32 ci, u32* v) const {
 // ENGULF, INJECT and long instructions are actions: begun here (the warp
 // waits at the instruction until their end), finished by resolve_warp_actions.
 bool Soup::host_step(u32 w, const Action* resolving) {
-    const u32 L = p_->warp_lanes;
+    const u32 L = warps_[w].lanes; // its own lanes (docs/lanes-plan.md L1)
     const u32 body = warps_[w].body;
     NOVA_ASSERT(wstate_[w] != kLanesDevice); // the world fetched them from the GPU
     u32 minip = kNone, lowest = kNone;
@@ -3520,7 +3527,7 @@ bool Soup::host_step(u32 w, const Action* resolving) {
                 wuntil_[w] = tick_ + (whole < 1 ? 1 : whole);
             }
         } else {
-            const double serial = static_cast<double>(p_->warp_step_cost) + p_->warp_lane_cost;
+            const double serial = static_cast<double>(warp_step_price(warps_[w].lanes)) + p_->warp_lane_cost;
             warp_carry_[now] -= static_cast<float>(static_cast<double>(cost) * serial);
         }
         count_lanes(w);

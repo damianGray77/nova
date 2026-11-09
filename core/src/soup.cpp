@@ -1144,7 +1144,7 @@ u32 Soup::create_body_form(u32 start, u32 len, u32 units, u32 gpus, u32 form) {
 }
 
 bool Soup::arrive(const u8* code, u32 len, u32 millicores, u32 gpus, u32 npus, u32 disk, const CargoTag& tag,
-                  u32 form, u32 emillicores, u8 kind, u32 archive) {
+                  u32 form, u32 emillicores, u8 kind, u32 archive, u32 lanes) {
     if (len == 0 || len > p_->size) {
         ++tally_.lost;
         return false;
@@ -1190,7 +1190,7 @@ bool Soup::arrive(const u8* code, u32 len, u32 millicores, u32 gpus, u32 npus, u
     if (archive && p_->archive) // W4: and her archive share, the same way in the archive
         disk_.claim_any(rng_, b, archive, true);
     if (p_->warps)
-        birth(b, at, form);
+        birth(b, at, form, lanes); // (L2: her divider's lanes, cut to this node's width)
     if (kinds_on() && bodies_[b].cpus != kNone) // Phase 9c: her thread prefers her divider's kind
         cpu_kind_[bodies_[b].cpus] = kind;
     origin_[b] = kOriginArrival;
@@ -1329,6 +1329,7 @@ bool Soup::go_dormant(u32 b, u64 offline_until, u32 grace, u32 sleep, bool drift
     d.gpus = p_->gpus ? gpu_.count[b] : 0;
     d.npus = p_->npus ? npu_.count[b] : 0;
     d.form = B.form;
+    d.lanes = p_->warps && warp_head_[b] != kNone ? warps_[warp_head_[b]].lanes : 0; // L2: its warp's lanes
     d.kind = kinds_on() && B.cpus != kNone ? cpu_kind_[B.cpus] : kKindP;
     // Its lineage tag waits with it, and it leaves its lineage now, wherever
     // it will rest; it rejoins on waking (X12). So neither its departure nor
@@ -1416,6 +1417,7 @@ void Soup::depart_dormant(u32 b, u32 nbr) {
     dep.disk = d.disk_reserve;
     dep.archive = d.archive_reserve; // W4
     dep.form = d.form;
+    dep.lanes = d.lanes; // docs/lanes-plan.md L2
     dep.kind = d.kind;
     dep.dormant = 1;
     dep.mem_reserve = d.mem_reserve;
@@ -1468,7 +1470,7 @@ void Soup::wake(u32 b) {
         disk_.claim_any(rng_, b, d.archive_reserve, true);
     d.on = 0;
     if (p_->warps)
-        birth(b, start, d.form);
+        birth(b, start, d.form, d.lanes); // (L2: its warp's lanes, cut to this node's width)
     else
         new_cpu(b, start);
     if (kinds_on() && B.cpus != kNone)
@@ -1814,6 +1816,10 @@ void Soup::free_guests(const GuestRelease& r) {
 // then its others) to its eater, appended to the eater's latest block when
 // they lie next to it (the eater's stomach), else as a new latest block.
 // When nothing of it is left its eater takes the rest of it (absorb).
+// docs/lanes-plan.md H1 (Damian): its cores go with its codons, the same
+// share each tick -- its millicores (each kind), GPU and NPU units, each with
+// its heat -- so it runs on what it has left and its eater on what it has
+// taken. Its threads, warps and disk go at the end, with the rest of it.
 void Soup::digest() {
     const u32 per = p_->digest;
     for (usize i = 0; i < order_.size(); ++i) {
@@ -1827,6 +1833,7 @@ void Soup::digest() {
             continue;
         }
         const u32 g = genome_len(b);
+        const u32 had = bodies_[b].mem; // its memory before this tick's digestion (H1's share)
         u32 left = per;
         while (left > 0 && bodies_[b].blocks != kNone) {
             // The last codon it owns of its last block (its first block last).
@@ -1889,8 +1896,40 @@ void Soup::digest() {
             ++tally_.digested;
             --left;
         }
-        if (bodies_[b].blocks == kNone || bodies_[b].mem == 0)
+        if (bodies_[b].blocks == kNone || bodies_[b].mem == 0) {
             absorb(b, eater); // nothing of it left: it is food
+            continue;
+        }
+        hand_over(b, eater, per - left, had);
+    }
+}
+
+// docs/lanes-plan.md H1: a swallowed body's cores, the share of them its
+// digested codons were of its memory (`eaten` of `had`, rounded to the
+// nearest), to its eater: each kind of millicore, its GPU and NPU units, the
+// oldest first, each keeping its heat.
+void Soup::hand_over(u32 prey, u32 eater, u32 eaten, u32 had) {
+    if (eaten == 0 || had == 0)
+        return;
+    auto share = [eaten, had](u32 x) {
+        const u64 v = (static_cast<u64>(x) * eaten + had / 2) / had;
+        return static_cast<u32>(v < x ? v : x);
+    };
+    const u32 pe = e_units(prey);
+    const u32 pm = share(bodies_[prey].units - pe), em = share(pe);
+    if (pm)
+        move_kind(prey, eater, pm, false);
+    if (em)
+        move_kind(prey, eater, em, true);
+    if (p_->gpus) {
+        const u32 n = share(gpu_.count[prey]);
+        if (n)
+            gpu_.move(prey, eater, n);
+    }
+    if (p_->npus) {
+        const u32 n = share(npu_.count[prey]);
+        if (n)
+            npu_.move(prey, eater, n);
     }
 }
 
@@ -4999,10 +5038,17 @@ bool Soup::check(TextBuf* why) const {
                     return fail("warp list out of range or cyclic at body", b);
                 if (warps_[w].body != b)
                     return fail("warp list crosses bodies at warp", w);
+                const u32 wl = warps_[w].lanes; // docs/lanes-plan.md L1: a power of two, at most the node's width
+                if (wl == 0 || (wl & (wl - 1)) != 0 || wl > p_->warp_lanes ||
+                    (wl < p_->warp_lanes_min && wl != p_->warp_lanes))
+                    return fail("warp's lanes out of range, warp", w);
                 if (wstate_[w] != kLanesDevice) { // the counts follow the lanes the host holds
                     u32 running = 0;
-                    for (u32 l = 0; l < p_->warp_lanes; ++l)
+                    for (u32 l = 0; l < p_->warp_lanes; ++l) {
                         running += lane(w, l).halted ? 0 : 1;
+                        if (l >= wl && !lane(w, l).halted)
+                            return fail("a lane past its warp's lanes runs, warp", w);
+                    }
                     if (running != wlive_[w])
                         return fail("warp's running-lane count wrong, warp", w);
                 }

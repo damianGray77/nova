@@ -54,11 +54,11 @@ bool load_dump(const char* path, Dump* d, TextBuf* err) {
         return false;
     }
     u32 head[5] = {};
-    // (version 5: a warp width per job, docs/inject-plan.md W3; earlier dumps' records are laid out otherwise)
-    bool ok = read_words(f, head, 5) && head[0] == 0x4452574Eu && head[1] == 5u;
+    // (version 6: each warp's own lanes, docs/lanes-plan.md L1; earlier dumps' records are laid out otherwise)
+    bool ok = read_words(f, head, 5) && head[0] == 0x4452574Eu && head[1] == 6u;
     if (!ok) {
         fclose(f);
-        err->append("not a warp round dump (version 5: dump the round again)");
+        err->append("not a warp round dump (version 6: dump the round again)");
         return false;
     }
     d->cst.resize(head[3]);

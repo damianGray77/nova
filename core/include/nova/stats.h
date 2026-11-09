@@ -185,7 +185,10 @@ inline constexpr u32 kStatsLifeFirst = kStatsNoveltyFirst + kStatsNoveltyColumns
 // Bites as wounds, parasites and guests (docs/bites-plan.md, docs/inject-plan.md): ten sums, then four gauges.
 inline constexpr u32 kStatsBiteSums = 10, kStatsBiteColumns = kStatsBiteSums + 4;
 inline constexpr u32 kStatsBiteFirst = kStatsLifeFirst + kStatsLifeColumns;
-inline constexpr u32 kStatsIntColumns = kStatsBiteFirst + kStatsBiteColumns;
+// Each warp's own lanes (docs/lanes-plan.md L4): the lanes of every warp alive, a gauge.
+inline constexpr u32 kStatsLaneColumns = 1;
+inline constexpr u32 kStatsLaneFirst = kStatsBiteFirst + kStatsBiteColumns;
+inline constexpr u32 kStatsIntColumns = kStatsLaneFirst + kStatsLaneColumns;
 inline constexpr u32 kStatsColumns = kStatsIntColumns + 2; // compress, ambient
 const char* stats_column(u32 i);
 // Index of a column by name, or kStatsColumns if there is none.

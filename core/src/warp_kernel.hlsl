@@ -1,7 +1,8 @@
 // The warp kernel (Phase 8, design.md 6.14; docs/dxc-plan.md D1): the warp
 // interpreter, warp_isa.inc itself (the very source the CPU reference runs as
 // C++), between a head that binds its macros to HLSL and a main that picks the
-// body record: one thread group per record, one thread per lane.
+// body record: one thread group per record, one thread per lane of its node's
+// width (a warp of fewer lanes leaves the rest idle: docs/lanes-plan.md L1).
 //
 // Two compilers take this file. The Windows SDK's DXC compiles it at build
 // time for 32 lanes (core/CMakeLists.txt, embedded in nova.exe); FXC compiles
@@ -26,7 +27,7 @@
 #define SYNC GroupMemoryBarrierWithGroupSync();
 #define ONCE_BEGIN if (g_tid == 0u) {
 #define ONCE_END }
-#define LANE_BEGIN(l0) { uint l = g_tid; {
+#define LANE_BEGIN(l0) { uint l = g_tid; if (l < g_nl) {
 #define LANE_END } }
 #define LANES_LOAD(l0) LaneR L = lane_load((l0) + g_tid);
 #define LANES_STORE(l0) lane_store((l0) + g_tid, L);
@@ -60,6 +61,7 @@ static uint g_lbase;
 static uint g_tid;
 static uint g_rec;
 static uint g_lidx; // this thread's lane in g_lanes
+static uint g_nl;   // the running warp's lanes (docs/lanes-plan.md L1): threads past them idle
 static uint g_seen; // this lane's template codons read and places searched this step (Phase 9c)
 static uint g_tseen; // memory tiers (W3): ... their time, each at its tier
 static uint g_tfast; // ... and its last template's codons in fast memory
@@ -123,7 +125,7 @@ groupshared uint gs_min;
 groupshared uint gs_count;
 groupshared uint gs_wa[W_LANES];
 groupshared uint gs_wv[W_LANES];
-groupshared uint gs_ctl[13];
+groupshared uint gs_ctl[14];
 
 #include "warp_layout.inc"
 #include "warp_isa.inc"

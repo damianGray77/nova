@@ -56,10 +56,11 @@
 #define WB_TLOAD 47u      // 2 words: fast, slow
 #define WB_TSTORE 49u     // 2 words
 #define WB_TSCAN 51u      // 2 words
-// Warp widths by node (docs/inject-plan.md W1-W3): the record's node's lanes a
-// warp, and the work a step costs there (with a timed table, lanes x a lane-op).
+// Warp widths by node (docs/inject-plan.md W1-W3): the record's node's width,
+// each warp slot's room (the kernel's group runs that many threads). Each
+// warp's own lanes and its step's work are its entry's (docs/lanes-plan.md L1, L3).
 #define WB_LANES 53u
-#define WB_STEP_COST 54u
+#define WB_FREE54 54u     // (free: the work a step costs moved into each warp's entry, WW_STEPC)
 #define WB_WARPS 55u      // per warp, WW_SIZE words
 #define WW_LANE0 0u       // its first lane in LANES
 #define WW_QUOTA 1u       // work it may do
@@ -74,7 +75,9 @@
 #define WW_ACTIVE 10u     // out: ... nor yielded
 #define WW_TLEFT 11u      // its own clock this tick (Phase 9b): time it may still take (W_NONE: none)
 #define WW_TUSED 12u      // out: time it took
-#define WW_SIZE 13u
+#define WW_LANES 13u      // its lanes (docs/lanes-plan.md L1): at most the record's WB_LANES
+#define WW_STEPC 14u      // the work a step of it costs (L3)
+#define WW_SIZE 15u
 // block table entry
 #define WK_START 0u
 #define WK_LEN 1u

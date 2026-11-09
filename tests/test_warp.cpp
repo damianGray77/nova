@@ -238,6 +238,123 @@ void test_launch() {
     CHECK(soup_ok(s));
 }
 
+// docs/lanes-plan.md L1, L2 (Damian, 2026-11-09): each warp its own lanes,
+// on a node of 256. A body born on the GPU gets the fewest that cover its
+// code (16 at least, the node's width at most); a launch asks for CX lanes.
+// Only its lanes run (the rest of its slot is halted), heads move by them and
+// SENSE 21 reads them.
+void test_own_lanes() {
+    TextBuf cfg;
+    cfg.append(kQuiet);
+    cfg.append("world.millicores = 1000\nworld.gpus = 64\ngpu.warps = true\nwarp.lanes_min = 16\nwarp.lanes_max = 256\n"
+               "warp.step_cost = 1\nwarp.lane_cost = 1\nwarp.capacity = 10\nwarp.max = 4\n");
+    SoupParams p;
+    CHECK(make_params(&p, cfg.c_str(), 4096));
+    set_warp_lanes(&p, 256); // a node of 256 lanes, as World::derive_node draws one
+    Soup s;
+    s.init(&p, 5, 0);
+    u32 v21 = 0; // SENSE's BX for reading 21, the lanes in my warp
+    while (v21 < p.sel.sense_n && p.sel.sense[v21] != 21)
+        ++v21;
+    CHECK(v21 < p.sel.sense_n);
+    auto gpu_body = [&](u32 at, u32 len, const char* first) {
+        TextBuf prog;
+        prog.append(first);
+        for (u32 i = 1; i < len; ++i)
+            prog.append(" NOP0");
+        Array<u8> code;
+        TextBuf err;
+        if (!genome_from_names(p.table, prog.c_str(), &code, &err))
+            return kNone;
+        for (usize i = 0; i < code.size(); ++i)
+            s.mem_mut()[at + i] = code[i];
+        return s.create_body_form(at, len, 0, 1, kFormGpu);
+    };
+    const u32 a = gpu_body(100, 20, "SENSE"), b = gpu_body(200, 3, "NOP0"), c = gpu_body(300, 100, "NOP0"),
+              d = gpu_body(500, 300, "NOP0");
+    CHECK(a != kNone && b != kNone && c != kNone && d != kNone);
+    const u32 wa = s.warp_head(a);
+    CHECK(s.warp_lanes(wa) == 32 && s.warp_lanes(s.warp_head(b)) == 16 && s.warp_lanes(s.warp_head(c)) == 128 &&
+          s.warp_lanes(s.warp_head(d)) == 256);
+    CHECK(s.lanes_per_warp() == 256 && s.warp_live(wa) == 32);
+    for (u32 l = 0; l < 256; ++l)
+        s.lane_mut(wa, l).bx = v21;
+    s.tick(0); // one step each (1 + 1 a lane > 10): SENSE 21 on its 32 lanes, the rest never run
+    CHECK(s.warp(wa).steps == 1 && s.warp(wa).lane_instr == 32);
+    bool own = true, idle = true;
+    for (u32 l = 0; l < 32; ++l)
+        own = own && s.lane(wa, l).cx == 32 && s.lane(wa, l).ip == 101 && s.lane(wa, l).rh == 100 + l % 20;
+    for (u32 l = 32; l < 256; ++l)
+        idle = idle && s.lane(wa, l).halted && s.lane(wa, l).cx == 0 && s.lane(wa, l).ip == 0;
+    CHECK(own && idle && s.tally().halts == 0);
+    CHECK(soup_ok(s));
+    // A launch asks for CX lanes: 40 -> 64, 0 -> 16, 5,000 -> the node's 256.
+    const u32 cb = plant(s, 1000, "GPU NOP1 INC NOP0 INC INC", 500);
+    CHECK(cb != kNone && s.claim_gpus(cb, 4) == 4);
+    s.begin_tick(1);
+    s.prepare_gpu();
+    const u32 cc = s.body(cb).cpus;
+    const u32 asks[3] = {40, 0, 5000}, want[3] = {64, 16, 256};
+    u32 w = kNone;
+    for (u32 i = 0; i < 3; ++i) {
+        Cpu& cpu = s.cpu_mut(cc);
+        cpu.ip = 1000;
+        cpu.bx = kLaunchOp;
+        cpu.cx = asks[i];
+        s.run_cpu(cc, 1);
+        CHECK(s.cpu(cc).err == 0);
+        w = s.warp_head(cb);
+        while (s.warp(w).next != kNone)
+            w = s.warp(w).next;
+        CHECK(s.warp_lanes(w) == want[i] && s.warp_live(w) == want[i]);
+    }
+    CHECK(s.warp_count(cb) == 3 && s.lane(w, 255).cx == 5000 && s.lane(w, 255).rh == 1000 + 255 % 6);
+    CHECK(soup_ok(s));
+}
+
+// L2: a warp's daughter is born with its lanes, not fit to her code: a CPU
+// launches a 128-lane warp (CX 100) that ALLOCs 16 codons and DIVIDEs them
+// off with half its holdings; she is GPU-born with 128 lanes.
+void test_lanes_inherited() {
+    TextBuf cfg;
+    cfg.append(kQuiet);
+    cfg.append("world.millicores = 1000\nworld.gpus = 64\ngpu.warps = true\nwarp.lanes_min = 16\nwarp.lanes_max = 256\n"
+               "warp.step_cost = 1\nwarp.lane_cost = 0\nwarp.capacity = 1000\n");
+    SoupParams p;
+    CHECK(make_params(&p, cfg.c_str(), 4096));
+    set_warp_lanes(&p, 256);
+    Soup s;
+    s.init(&p, 5, 0);
+    // The warp's code, after NOP0: AX <-> BX (BX 0: memory, here), CX = 16,
+    // ALLOC; CX = 32, DIVIDE (32/64 of its holdings).
+    const u32 b = plant(s, 100, "GPU NOP1 INC NOP0 SWAP ZERO INC SHL SHL SHL SHL ALLOC ZERO INC SHL SHL SHL SHL SHL "
+                        "DIVIDE", 500);
+    CHECK(b != kNone && s.claim_gpus(b, 8) == 8);
+    s.begin_tick(0);
+    s.prepare_gpu();
+    const u32 c = s.body(b).cpus;
+    Cpu& cpu = s.cpu_mut(c);
+    cpu.ax = 0;
+    cpu.bx = kLaunchOp;
+    cpu.cx = 100;
+    s.run_cpu(c, 1);
+    CHECK(s.warp_count(b) == 1 && s.warp_lanes(s.warp_head(b)) == 128);
+    s.cpu_mut(c).halted = 1; // (the CPU stops: only the warp runs on)
+    u32 d = kNone;
+    for (u64 t = 1; t < 20 && d == kNone; ++t) {
+        s.tick(t);
+        for (usize k = 0; k < s.body_count(); ++k)
+            if (s.body_at(k) != b && s.body(s.body_at(k)).form == kFormGpu)
+                d = s.body_at(k);
+    }
+    CHECK(d != kNone);
+    if (d == kNone)
+        return;
+    CHECK(s.block(s.body(d).blocks).len == 16 && s.warp_count(d) == 1);
+    CHECK(s.warp_lanes(s.warp_head(d)) == 128 && s.tally().births == 1); // (fit to her code she'd have 16)
+    CHECK(soup_ok(s));
+}
+
 // The two forms of birth: what a body is born on, with the fallback to the
 // other form when it holds only that one's units.
 void test_forms() {
@@ -1123,6 +1240,8 @@ void suite_warp() {
     test_host_instruction();
     test_block_ops_fail();
     test_launch();
+    test_own_lanes();
+    test_lanes_inherited();
     test_forms();
     test_gpu_sparks();
     test_death_rule();

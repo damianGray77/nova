@@ -393,7 +393,9 @@ NOVA_FLAG("gpu.warps", true, 0, "GPU", "Warps", "",
 NOVA_WHOLE("warp.lanes_min", 16, 1, 1024, 0, "GPU", "Narrowest warps", "gpu.warps",
            "Each node's GPU has its own warp width, a power of two drawn from the world seed between this and "
            "warp.lanes_max, each width equally likely (docs/inject-plan.md W1). A power of two. A soup outside a "
-           "world runs this width.")
+           "world runs this width. It is also the fewest lanes a warp has: each warp runs its own lanes, up to its "
+           "node's width -- a launch asks for CX, a daughter gets her divider's, a body born on the GPU otherwise "
+           "the fewest that cover its code -- and a step costs those lanes (docs/lanes-plan.md L1-L3).")
 NOVA_WHOLE("warp.lanes_max", 1024, 1, 1024, 0, "GPU", "Widest warps", "gpu.warps",
            "... and this (a power of two, at least warp.lanes_min).")
 NOVA_WHOLE("warp.max", 4, 1, 64, 0, "GPU", "Most warps", "gpu.warps", "Warps a body may hold.")
@@ -563,9 +565,10 @@ NOVA_NUMBER("engulf.bite_share", 1.0 / 3.0, 0.000001, 1, 0, "Contact and eating"
             "A bite takes at most this share of the biter's own size (rounded up): prey no bigger than that is "
             "swallowed whole, a bigger one loses a piece from its nearest end (1 = up to the biter's whole size).")
 NOVA_WHOLE("engulf.digest", 2, 0, 1000000, 0, "Contact and eating", "Digestion", "engulf.bite",
-           "Codons a body swallowed whole by a bite loses to its eater a tick. It lives on meanwhile, and may INJECT "
-           "itself into its eater to stop the digestion (docs/inject-plan.md S, Damian; 0 = swallowed at once, as "
-           "before).")
+           "Codons a body swallowed whole by a bite loses to its eater a tick, and with them the same share of its "
+           "millicores, GPU and NPU units (docs/lanes-plan.md H1). It lives on meanwhile on what it has left, and may "
+           "INJECT itself into its eater to stop the digestion (docs/inject-plan.md S, Damian; 0 = swallowed at once, "
+           "as before).")
 NOVA_FLAG("engulf.tissue", true, 0, "Contact and eating", "NOPs as tissue", "engulf.bite",
           "A bitten body loses cores in proportion to the code taken, not counting NOPs: padding is tissue that "
           "protects the code and the cores inside (off: in proportion to every codon taken).")
