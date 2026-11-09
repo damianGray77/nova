@@ -1095,6 +1095,71 @@ void test_life_roles() {
     remove_dir(dir, files, 2);
 }
 
+// The ground by substrate (2026-11-08): a cell's colour by its families'
+// advantages, and a made-up land of two nodes -- GPU 2x on the left, CPU 2x
+// on the right -- blended between them, water left as water.
+void test_ground_colors() {
+    auto ch = [](u32 c, u32 k) { return (c >> (16 - 8 * k)) & 255; }; // k: 0 red, 1 green, 2 blue
+    const double even[kGroundFamilies] = {}, gpu[kGroundFamilies] = {0, 1, 0, 0, 0},
+                 poor[kGroundFamilies] = {-1, -1, -1, -1, -1};
+    const u32 ce = substrate_ground_color(even), cg = substrate_ground_color(gpu), cp = substrate_ground_color(poor);
+    CHECK(ch(cg, 1) > ch(cg, 0) && ch(cg, 1) > ch(cg, 2)); // green the strongest
+    CHECK(ch(cp, 0) + ch(cp, 1) + ch(cp, 2) < ch(ce, 0) + ch(ce, 1) + ch(ce, 2)); // poor: darker
+    const u32 W = 40, H = 20;
+    Array<u32> land;
+    land.resize(W * H);
+    for (u32 y = 0; y < H; ++y)
+        for (u32 x = 0; x < W; ++x)
+            land[y * W + x] = x == W - 1 ? kWaterColor : 0x37442F;
+    NodeView nodes[2] = {};
+    for (u32 i = 0; i < 2; ++i) {
+        nodes[i].known = 1u << kColorSubstrate;
+        for (u32 t = 0; t < kSubstrateTypes; ++t)
+            nodes[i].sub[t] = 1.0f;
+        nodes[i].y = 0.5f;
+    }
+    nodes[0].x = 0.15f;
+    nodes[0].sub[2] = 2.0f; // GPU
+    nodes[1].x = 0.8f;
+    nodes[1].sub[0] = nodes[1].sub[1] = 2.0f; // P and E cores
+    const float box[4] = {0, 0, 1, 1};
+    Array<u32> out;
+    CHECK(substrate_ground(land.data(), W, H, box, nodes, 2, &out) && out.size() == W * H);
+    if (out.size() == W * H) {
+        const u32 left = out[10 * W + 6], right = out[10 * W + 32], mid = out[10 * W + 19];
+        CHECK(ch(left, 1) > ch(left, 0)); // greener than red: the GPU's side
+        CHECK(ch(right, 0) > ch(right, 1) && ch(right, 0) > ch(right, 2)); // orange: the CPU's
+        CHECK(mid != left && mid != right);                                // between, a blend of both
+        CHECK(out[5 * W + W - 1] == kWaterColor);
+    }
+    nodes[0].known = nodes[1].known = 0; // nothing known: no ground
+    CHECK(!substrate_ground(land.data(), W, H, box, nodes, 2, &out) && out.empty());
+    printf("  ground: a GPU-rich side green, a CPU-rich side orange, a blend between, water left as water\n");
+}
+
+// The viewer's ground by substrate on a landscape with substrates: on by
+// default, B switching to the plain land and back, drawn on the map.
+void test_ground_viewer() {
+    Rig2* r = new Rig2;
+    CHECK(r->start("seed = 3\nworld.model = soup\nworld.graph = landscape\nworld.nodes = 60\nland.scale = 4\n"
+                   "land.resolution = 64\nworld.soup_size = 2048\nworld.millicores = 600\n"
+                   "substrate.enabled = true\nspark.initial = 10\n",
+                   5));
+    UiInput none;
+    r->draw(none);
+    CHECK(r->viewer.ground_shown());
+    UiInput key;
+    key.keys[0] = 0x42; // 'B'
+    key.nkeys = 1;
+    r->draw(key);
+    CHECK(!r->viewer.ground_shown());
+    r->draw(key);
+    CHECK(r->viewer.ground_shown());
+    r->draw(none);
+    CHECK(png_ok(r->canvas, "nova_test_viewer_ground.png"));
+    delete r;
+}
+
 } // namespace
 
 void viewer_more_view_tests() {
@@ -1103,6 +1168,7 @@ void viewer_more_view_tests() {
     test_live_picks();
     test_archive_columns();
     test_life_map();
+    test_ground_colors();
 }
 
 void viewer_more_viewer_tests() {
@@ -1113,4 +1179,5 @@ void viewer_more_viewer_tests() {
     test_series_picker();
     test_life_panel();
     test_life_roles();
+    test_ground_viewer();
 }

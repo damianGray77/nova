@@ -223,6 +223,124 @@ u32 substrate_level_color(u32 level) {
     return level < kSubstrateLevels ? k[level] : 0x606060;
 }
 
+// --- the ground by substrate (see view.h) ------------------------------------
+
+namespace {
+
+const u32 kGroundEven = 0x5A644E; // all at 1x: muted ground
+const u32 kGroundPoor = 0x3B2D27; // everything below 1x: barren
+
+// Each family's substrate types (P and E cores; GPU; NPU; fast and slow
+// memory; fast and slow disk: landscape.cpp's substrate_label order).
+const u32 kFamilyFirst[kGroundFamilies] = {0, 2, 3, 4, 6}, kFamilyCount[kGroundFamilies] = {2, 1, 1, 2, 2};
+
+double family_advantage(const NodeView& v, u32 f) {
+    double sum = 0;
+    for (u32 t = kFamilyFirst[f]; t < kFamilyFirst[f] + kFamilyCount[f]; ++t)
+        sum += v.sub[t] > 0 ? log2(static_cast<double>(v.sub[t])) : -3.0;
+    return sum / kFamilyCount[f];
+}
+
+} // namespace
+
+u32 ground_family_color(u32 f) {
+    static const u32 k[kGroundFamilies] = {0xE08A3C, 0x4FD07A, 0xB06CE6, 0x4AA8E8, 0xD8C27A};
+    return f < kGroundFamilies ? k[f] : kGroundEven;
+}
+
+const char* ground_family_name(u32 f) {
+    static const char* const n[kGroundFamilies] = {"CPU", "GPU", "NPU", "memory", "disk"};
+    return f < kGroundFamilies ? n[f] : "?";
+}
+
+u32 ground_poor_color() { return kGroundPoor; }
+
+u32 substrate_ground_color(const double* adv) {
+    double wsum = 0, best = 0, poor = 0, r = 0, g = 0, b = 0;
+    for (u32 f = 0; f < kGroundFamilies; ++f) {
+        const double p = adv[f] > 0 ? (adv[f] > 1 ? 1.0 : adv[f]) : 0.0;
+        const double q = p * p; // (the strongest family dominates the hue)
+        const u32 c = ground_family_color(f);
+        r += q * ((c >> 16) & 255);
+        g += q * ((c >> 8) & 255);
+        b += q * (c & 255);
+        wsum += q;
+        best = p > best ? p : best;
+        poor += adv[f] < 0 ? -adv[f] : 0.0;
+    }
+    u32 c = kGroundEven;
+    if (wsum > 0) {
+        const u32 hue = static_cast<u32>(r / wsum + 0.5) << 16 | static_cast<u32>(g / wsum + 0.5) << 8 |
+                        static_cast<u32>(b / wsum + 0.5);
+        c = mix_color(kGroundEven, hue, 0.85 * pow(best, 0.7));
+    }
+    poor /= kGroundFamilies;
+    return mix_color(c, kGroundPoor, poor * 0.45 > 0.6 ? 0.6 : poor * 0.45);
+}
+
+bool substrate_ground(const u32* land, u32 w, u32 h, const float* box, const NodeView* nodes, u32 n,
+                      Array<u32>* out) {
+    out->clear();
+    if (!land || w == 0 || h == 0)
+        return false;
+    const double bw = box[2] - box[0], bh = box[3] - box[1];
+    if (!(bw > 0) || !(bh > 0))
+        return false;
+    Array<double> px, py, adv; // the known nodes' cells and their families' advantages
+    for (u32 i = 0; i < n; ++i) {
+        if (!(nodes[i].known >> kColorSubstrate & 1))
+            continue;
+        px.push((nodes[i].x - box[0]) / bw * w);
+        py.push((nodes[i].y - box[1]) / bh * h);
+        for (u32 f = 0; f < kGroundFamilies; ++f)
+            adv.push(family_advantage(nodes[i], f));
+    }
+    if (px.empty())
+        return false;
+    usize land_cells = 0;
+    for (usize c = 0; c < static_cast<usize>(w) * h; ++c)
+        land_cells += land[c] != kWaterColor ? 1 : 0;
+    const double spacing = sqrt(static_cast<double>(land_cells ? land_cells : 1) / static_cast<double>(px.size()));
+    const double sigma = spacing * 0.75 > 1.0 ? spacing * 0.75 : 1.0;
+    const double inv = 1.0 / (2.0 * sigma * sigma);
+    const i32 reach = static_cast<i32>(ceil(3.0 * sigma));
+    constexpr u32 kGAcc = 1 + kGroundFamilies; // weight, then each family's weighted advantage
+    Array<double> acc;
+    acc.resize(static_cast<usize>(w) * h * kGAcc);
+    acc.fill(0.0);
+    for (usize k = 0; k < px.size(); ++k) {
+        const i32 cx = static_cast<i32>(floor(px[k])), cy = static_cast<i32>(floor(py[k]));
+        for (i32 y = cy - reach; y <= cy + reach; ++y) {
+            if (y < 0 || y >= static_cast<i32>(h))
+                continue;
+            for (i32 x = cx - reach; x <= cx + reach; ++x) {
+                if (x < 0 || x >= static_cast<i32>(w))
+                    continue;
+                const double dx = x + 0.5 - px[k], dy = y + 0.5 - py[k];
+                const double wt = exp(-(dx * dx + dy * dy) * inv);
+                double* a = acc.data() + (static_cast<usize>(y) * w + x) * kGAcc;
+                a[0] += wt;
+                for (u32 f = 0; f < kGroundFamilies; ++f)
+                    a[1 + f] += wt * adv[k * kGroundFamilies + f];
+            }
+        }
+    }
+    out->resize(static_cast<usize>(w) * h);
+    for (usize c = 0; c < static_cast<usize>(w) * h; ++c) {
+        if (land[c] == kWaterColor) {
+            (*out)[c] = land[c];
+            continue;
+        }
+        const double* a = acc.data() + c * kGAcc;
+        double av[kGroundFamilies] = {};
+        if (a[0] > 1e-6)
+            for (u32 f = 0; f < kGroundFamilies; ++f)
+                av[f] = a[1 + f] / a[0];
+        (*out)[c] = substrate_ground_color(av);
+    }
+    return true;
+}
+
 u32 substrate_level_of(double mult, double floor_mult) {
     const double m[kSubstrateLevels] = {floor_mult, 0.5, 1.0, 1.5, 2.0};
     u32 best = 0;

@@ -278,6 +278,24 @@ class Viewer {
 
     // W8: the substrate colour mode's type.
     u32 sub_type_ = 0;
+    // The ground by substrate (2026-11-08): the land recoloured by the nodes'
+    // substrates (substrate_ground), on by default where they're known; B
+    // switches to the plain land. Rebuilt when the substrates change (they
+    // drift with world.drift), at most every kGroundEvery frames.
+    bool ground_on_ = true;
+    bool ground_ok_ = false;
+    Array<u32> ground_img_;
+    u64 ground_sum_ = 0;
+    u32 ground_age_ = 0;
+    static constexpr u32 kGroundEvery = 60;
+    void update_ground();
+    const Array<u32>& shown_land() const { return ground_on_ && ground_ok_ ? ground_img_ : land_img_; }
+
+  public:
+    bool ground_shown() const { return ground_on_ && ground_ok_; }
+    void set_ground(bool on) { ground_on_ = on; }
+
+  private:
     bool solo_ = false; // set_solo
     // X7: the disasters' strikes (tick, node, kind), the newest kMaxStrikes.
     struct Strike {

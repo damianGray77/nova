@@ -79,6 +79,30 @@ const char* color_by_name(u32 c);
 u32 substrate_level_color(u32 level);
 u32 substrate_level_of(double mult, double floor_mult);
 
+// The ground by substrate (2026-11-08, Damian: the landscape colour-coded by
+// substrate, regions "fading into each other, a bit like Minecraft"). Five
+// families of the substrate types -- CPU (P and E cores), GPU, NPU, memory
+// (fast and slow), disk (fast and slow) -- each with its colour; a family's
+// advantage somewhere is the mean log2 of its types' multipliers there (+1
+// at 2x, 0 at 1x, -1 at 0.5x).
+inline constexpr u32 kGroundFamilies = 5;
+inline constexpr u32 kWaterColor = 0x0E1A2C; // the land image's water
+u32 ground_family_color(u32 family);
+const char* ground_family_name(u32 family);
+u32 ground_poor_color();
+// A land cell's colour from the families' advantages: the families above 1x
+// tint it toward their colours (the strongest most); below 1x it darkens
+// toward barren ground; all at 1x it is plain, muted ground.
+u32 substrate_ground_color(const double* adv);
+struct NodeView;
+// The land image (w x h over box, water kWaterColor) recoloured by
+// substrate: each land cell takes the nodes near it, blended by a Gaussian of
+// their distance (sigma 0.75 of the nodes' typical spacing on land), so
+// regions fade into each other; water stays water. Only nodes whose
+// substrates are known count. False (out empty) if none is.
+bool substrate_ground(const u32* land, u32 w, u32 h, const float* box, const NodeView* nodes, u32 n,
+                      Array<u32>* out);
+
 // How the memory strip is coloured.
 enum StripBy : u32 { kStripOwner, kStripLineage, kStripHeat, kStripStamp, kStripCodon, kStripCount };
 const char* strip_by_name(u32 s);

@@ -1815,6 +1815,28 @@ codon and, on a timed table, in the bite's time. The same codons move.
 Stat `corpse_codons`. Snapshot v7 and replay v5, since long3 had begun
 writing v6 and v4 files: older ones keep 1 (legacy.h's third text).
 
+### 6.25 The ground by substrate [built 2026-11-08]
+
+Damian: the landscape colour-coded by substrate, "GPU being better than CPU
+and sort of fading into each other, a bit like Minecraft". The viewer's map
+paints the land, under the nodes and paths, from the substrates of the
+nodes it knows (`substrate_ground` in view.cpp). The eight types fall into
+five families, each with a colour: CPU (P and E cores, orange), GPU
+(green), NPU (violet), memory (fast and slow, blue) and disk (fast and
+slow, sand). A family's advantage at a node is the mean log2 of its types'
+multipliers (the floor counts as -3): 0 at 1x, +1 at 2x. Each land cell
+takes a Gaussian-weighted mean of every known node's advantages (sigma 0.75
+of the mean node spacing on the land, out to 3 sigma), so neighbouring
+regions fade into each other. A cell's colour starts from a muted olive for
+"all even" and moves toward the mix of its above-1x families' colours,
+weighted by the square of each advantage so the strongest family sets the
+hue; families below 1x darken it toward a barren brown. Water stays water.
+It's on by default (Damian's rule for new features); B switches to the
+plain land and back. A key at the map's top-left names the colours. The
+image is rebuilt when the known substrates or node positions change (drift,
+recovery), at most every 60 frames. It's a view only: no simulation state,
+format or hash changes.
+
 ## 7. Technical direction [decided via 7.1]
 
 - C++ (or Rust) core; Python only for analysis. *Superseded by 7.1 A and B: C++20, no STL, no third-party, no Python.*

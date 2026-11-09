@@ -153,6 +153,8 @@ void Viewer::take(ViewFrame& f) {
         land_w_ = f.land_w;
         land_h_ = f.land_h;
         swap_arr(land_img_, f.land);
+        ground_ok_ = false; // (its substrate colours are made again)
+        ground_sum_ = 0;
         swap_arr(masses_, f.masses);
         memcpy(box_, f.box, sizeof box_);
     }
@@ -650,10 +652,14 @@ void Viewer::frame(const UiInput& input, Canvas& c, const RunStatus& st) {
             }
         }
     } else {
-        // W8: T cycles the substrate type the map shows.
-        for (u32 i = 0; i < in.nkeys; ++i)
+        // W8: T cycles the substrate type the map shows; B switches the
+        // ground between substrate colours and the plain land.
+        for (u32 i = 0; i < in.nkeys; ++i) {
             if (in.keys[i] == 0x54 && color_by_ == kColorSubstrate) // 'T'
                 sub_type_ = (sub_type_ + 1) % kSubstrateTypes;
+            if (in.keys[i] == 0x42) // 'B'
+                ground_on_ = !ground_on_;
+        }
     }
 
     bool consumed = false;
@@ -1034,11 +1040,12 @@ void Viewer::map_panel(const UiInput& in_raw, Canvas& c) {
 
     c.clip(inner);
     if (landscape_ && land_w_ && land_h_) { // land and water behind everything
+        update_ground();
         i32 x0, y0, x1, y1;
         to_screen(box_[0], box_[1], &x0, &y0);
         to_screen(box_[2], box_[3], &x1, &y1);
         c.fill(inner, 0x0C1520);
-        c.image(Rect{x0, y0, x1 - x0, y1 - y0}, land_img_.data(), static_cast<i32>(land_w_),
+        c.image(Rect{x0, y0, x1 - x0, y1 - y0}, shown_land().data(), static_cast<i32>(land_w_),
                 static_cast<i32>(land_h_));
     }
     const u32 kBridgeOpen = 0xE8A840, kBridgeShut = 0x6E5A34;
@@ -1229,7 +1236,7 @@ void Viewer::map_panel(const UiInput& in_raw, Canvas& c) {
     // The overview map: the whole land and the view's frame.
     if (minimap_.w > 0) {
         c.fill(Rect{minimap_.x - 1, minimap_.y - 1, minimap_.w + 2, minimap_.h + 2}, 0x404858);
-        c.image(minimap_, land_img_.data(), static_cast<i32>(land_w_), static_cast<i32>(land_h_));
+        c.image(minimap_, shown_land().data(), static_cast<i32>(land_w_), static_cast<i32>(land_h_));
         double wx0, wy0, wx1, wy1;
         to_world(inner.x, inner.y, &wx0, &wy0);
         to_world(inner.right(), inner.bottom(), &wx1, &wy1);
@@ -1247,6 +1254,27 @@ void Viewer::map_panel(const UiInput& in_raw, Canvas& c) {
             const i32 sx = mx(cur_.node[sel_node_].x), sy = my(cur_.node[sel_node_].y);
             c.fill(Rect{sx - 2, sy - 2, 4, 4}, 0xFFFFFF);
         }
+    }
+
+    // The ground's key (top left): each substrate family's colour, and barren.
+    if (ground_shown()) {
+        const i32 ky = inner.y + c.px(6);
+        i32 w = c.text_w("ground by substrate:", kFontSmall) + c.px(6);
+        for (u32 f = 0; f < kGroundFamilies; ++f)
+            w += c.px(13) + c.text_w(ground_family_name(f), kFontSmall) + c.px(8);
+        w += c.px(13) + c.text_w("poor", kFontSmall) + c.px(8) + c.text_w("(B: plain land)", kFontSmall);
+        c.fill(Rect{inner.x + c.px(3), ky - c.px(3), w + c.px(8), c.line_h(kFontSmall) + c.px(6)}, 0x0C1520);
+        i32 kx = inner.x + c.px(7);
+        c.text(kx, ky, "ground by substrate:", kFontSmall, kDim);
+        kx += c.text_w("ground by substrate:", kFontSmall) + c.px(6);
+        for (u32 f = 0; f <= kGroundFamilies; ++f) {
+            const bool poor = f == kGroundFamilies;
+            const char* name = poor ? "poor" : ground_family_name(f);
+            c.fill(Rect{kx, ky + c.px(2), c.px(10), c.px(9)}, poor ? ground_poor_color() : ground_family_color(f));
+            c.text(kx + c.px(13), ky, name, kFontSmall, kDim);
+            kx += c.px(13) + c.text_w(name, kFontSmall) + c.px(8);
+        }
+        c.text(kx, ky, "(B: plain land)", kFontSmall, kFaint);
     }
 
     // The legend and a summary line.
@@ -1378,6 +1406,34 @@ void Viewer::map_panel(const UiInput& in_raw, Canvas& c) {
 }
 
 // Zooms and pans so a landmass's nodes fill most of the map.
+// The ground by substrate: rebuilt when the nodes' substrates change (a
+// checksum of them), at most every kGroundEvery frames (they drift with
+// world.drift, a little every tick).
+void Viewer::update_ground() {
+    ++ground_age_;
+    if (!ground_on_ || !landscape_ || !land_w_ || !land_h_ || land_img_.size() != static_cast<usize>(land_w_) * land_h_)
+        return;
+    u64 sum = 1469598103934665603ull;
+    for (usize i = 0; i < cur_.node.size(); ++i) {
+        const NodeView& v = cur_.node[i];
+        sum = (sum ^ (v.known >> kColorSubstrate & 1)) * 1099511628211ull;
+        for (u32 t = 0; t < kSubstrateTypes; ++t) {
+            u32 bits = 0;
+            memcpy(&bits, &v.sub[t], 4);
+            sum = (sum ^ bits) * 1099511628211ull;
+        }
+        u32 xb = 0;
+        memcpy(&xb, &v.x, 4);
+        sum = (sum ^ xb) * 1099511628211ull;
+    }
+    if (ground_ok_ && (sum == ground_sum_ || ground_age_ < kGroundEvery))
+        return;
+    ground_ok_ = substrate_ground(land_img_.data(), land_w_, land_h_, box_, cur_.node.data(),
+                                 static_cast<u32>(cur_.node.size()), &ground_img_);
+    ground_sum_ = sum;
+    ground_age_ = 0;
+}
+
 void Viewer::fit_mass(u32 mass) {
     float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
     for (usize i = 0; i < cur_.node.size(); ++i) {
