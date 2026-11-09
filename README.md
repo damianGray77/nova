@@ -50,6 +50,13 @@ The viewer also offers new kinds of life, substrate maps and disaster marks.
   (2) codons a tick. The prey keeps running and can INJECT itself into its
   eater to escape.
 
+**Warp widths by node** (design.md 6.28): each node's GPU has its own warp
+width, a power of two drawn from the world seed between `warp.lanes_min`
+(16) and `warp.lanes_max` (1,024, the GPU's ceiling). A wide warp copies
+more codons a step and each step costs more. The GPU runs every width on
+its own kernel, compiled at build time, and gives the CPU reference's
+results word for word.
+
 **Dormancy and drift** (design.md 6.17, `docs/dormancy-plan.md`): a program
 the watchdog would kill as frozen (200 ticks without running, typically buried
 in upkeep debt) now goes dormant, like a bacterial spore, if it has reserves.

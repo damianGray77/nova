@@ -9,7 +9,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 - **Families:** a key with a `<placeholder>` stands for one setting per member listed.
 - **Needs:** the switch the setting depends on; it does nothing while that is off.
 
-384 settings, 83 of them from 14 families; 11 hidden (tests and demos).
+385 settings, 83 of them from 14 families; 11 hidden (tests and demos).
 
 ## Contents
 
@@ -229,7 +229,8 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `gpu.cpu_per_element` | number | 0.0009765625 (computed) | 0 to 1000000 | **CPU per element**. CPU instructions per element done (default 1/1024 with async devices, else 1/16). Needs `world.gpus`. |
 | `gpu.wear` | number, log | 0 | 0 to 1 | **GPU wear**. The chance per held GPU unit per tick that it fails back to the pool. Needs `world.gpus`. |
 | `gpu.warps` | switch | true | true or false | **Warps**. Warps: programs that run on the GPU in lockstep lanes. |
-| `warp.lanes` | whole | 32 | 1 to 64 | **Lanes**. Lanes per warp. Needs `gpu.warps`. |
+| `warp.lanes_min` | whole | 16 | 1 to 1024 | **Narrowest warps**. Each node's GPU has its own warp width, a power of two drawn from the world seed between this and warp.lanes_max, each width equally likely (docs/inject-plan.md W1). A power of two. A soup outside a world runs this width. Needs `gpu.warps`. |
+| `warp.lanes_max` | whole | 1024 | 1 to 1024 | **Widest warps**. ... and this (a power of two, at least warp.lanes_min). Needs `gpu.warps`. |
 | `warp.max` | whole | 4 | 1 to 64 | **Most warps**. Warps a body may hold. Needs `gpu.warps`. |
 | `warp.capacity` | whole | 256 | 1 to 100000000 | **Warp capacity**. Warp work a GPU unit gives per tick at full speed (a timed cost table sets it). Needs `gpu.warps`. |
 | `warp.step_cost` | whole | 16 | 0 to 1000000 | **Step cost**. Warp work a step costs (a timed cost table sets it). Needs `gpu.warps`. |

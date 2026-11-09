@@ -1449,11 +1449,41 @@ namespace {
 #include "warp_kernel_bytes.inc"
 
 #if NOVA_DXC
+#include "warp_dxil_16_0.inc"
+#include "warp_dxil_16_256.inc"
+#include "warp_dxil_16_512.inc"
+#include "warp_dxil_16_1024.inc"
+#include "warp_dxil_16_2048.inc"
 #include "warp_dxil_32_0.inc"
 #include "warp_dxil_32_256.inc"
 #include "warp_dxil_32_512.inc"
 #include "warp_dxil_32_1024.inc"
 #include "warp_dxil_32_2048.inc"
+#include "warp_dxil_64_0.inc"
+#include "warp_dxil_64_256.inc"
+#include "warp_dxil_64_512.inc"
+#include "warp_dxil_64_1024.inc"
+#include "warp_dxil_64_2048.inc"
+#include "warp_dxil_128_0.inc"
+#include "warp_dxil_128_256.inc"
+#include "warp_dxil_128_512.inc"
+#include "warp_dxil_128_1024.inc"
+#include "warp_dxil_128_2048.inc"
+#include "warp_dxil_256_0.inc"
+#include "warp_dxil_256_256.inc"
+#include "warp_dxil_256_512.inc"
+#include "warp_dxil_256_1024.inc"
+#include "warp_dxil_256_2048.inc"
+#include "warp_dxil_512_0.inc"
+#include "warp_dxil_512_256.inc"
+#include "warp_dxil_512_512.inc"
+#include "warp_dxil_512_1024.inc"
+#include "warp_dxil_512_2048.inc"
+#include "warp_dxil_1024_0.inc"
+#include "warp_dxil_1024_256.inc"
+#include "warp_dxil_1024_512.inc"
+#include "warp_dxil_1024_1024.inc"
+#include "warp_dxil_1024_2048.inc"
 #endif
 
 // DXC's kernels in this build: lanes, groupshared words, the bytecode.
@@ -1463,13 +1493,14 @@ struct DxilKernel {
     usize size;
 };
 #if NOVA_DXC
+#define NOVA_DXIL(w, l) {w, l, kWarpDxil##w##_##l, sizeof kWarpDxil##w##_##l - 1}
+#define NOVA_DXIL_WIDTH(w) NOVA_DXIL(w, 0), NOVA_DXIL(w, 256), NOVA_DXIL(w, 512), NOVA_DXIL(w, 1024), NOVA_DXIL(w, 2048)
 const DxilKernel kDxil[] = {
-    {32, 0, kWarpDxil32_0, sizeof kWarpDxil32_0 - 1},
-    {32, 256, kWarpDxil32_256, sizeof kWarpDxil32_256 - 1},
-    {32, 512, kWarpDxil32_512, sizeof kWarpDxil32_512 - 1},
-    {32, 1024, kWarpDxil32_1024, sizeof kWarpDxil32_1024 - 1},
-    {32, 2048, kWarpDxil32_2048, sizeof kWarpDxil32_2048 - 1},
+    NOVA_DXIL_WIDTH(16),  NOVA_DXIL_WIDTH(32),  NOVA_DXIL_WIDTH(64),   NOVA_DXIL_WIDTH(128),
+    NOVA_DXIL_WIDTH(256), NOVA_DXIL_WIDTH(512), NOVA_DXIL_WIDTH(1024),
 };
+#undef NOVA_DXIL_WIDTH
+#undef NOVA_DXIL
 constexpr u32 kDxilCount = sizeof kDxil / sizeof kDxil[0];
 #else
 const DxilKernel* const kDxil = nullptr;
@@ -1502,8 +1533,11 @@ struct WarpIncludes : ID3DInclude {
 };
 
 // A groupshared tier's largest size (WarpKernelOptions::lds): its image, the
-// constants and the step's own words within D3D12's 32 KB a group.
-constexpr u32 kWarpLdsMax = 7680;
+// constants (256 words) and the step's own words (two a lane, and a few)
+// within D3D12's 32 KB a group, at the widest warps (1,024 lanes:
+// docs/inject-plan.md W3).
+constexpr u32 kWarpLdsMax = 5632;
+static_assert(kWarpLdsMax + 256 + 2 * kMaxLanes + 32 <= 8192, "the widest warps' groupshared words fit 32 KB");
 static_assert(WC_COUNT <= 256, "the constants fit gs_cst");
 
 static_assert(sizeof(Lane) == 29 * 4 && kMaxStack == 16, "the kernel's Lane is soup.h's");
@@ -1617,7 +1651,9 @@ bool ensure_buffer(Queue& q, ID3D12Resource*& res, u64& cap, u64 need, D3D12_HEA
 
 // The lanes' own small kernel: moves whole warps' lanes between a packed list
 // and the GPU's lane heap (mode 0: list into the heap, sending them; mode 1:
-// heap into the list, fetching them). Lanes are 29 words. A group a warp, so
+// heap into the list, fetching them). Lanes are 29 words. Each warp has three
+// words in g_at: its first lane in the heap, its first lane in the list, and
+// its lanes (its node's width: docs/inject-plan.md W1). A group a warp, so
 // no integer division (which this GPU can get wrong, warp_isa.inc's w_ulong:
 // a word's warp as t / words once landed lanes in the wrong warp).
 const char* const kLaneMoveHlsl = R"(
@@ -1625,14 +1661,14 @@ StructuredBuffer<uint> g_at : register(t0);
 StructuredBuffer<uint> g_src : register(t1);
 RWStructuredBuffer<uint> g_heap : register(u0);
 RWStructuredBuffer<uint> g_out : register(u1);
-cbuffer K : register(b0) { uint g_warps; uint g_warp_words; uint g_mode; uint g_row; };
+cbuffer K : register(b0) { uint g_warps; uint g_unused; uint g_mode; uint g_row; };
 [numthreads(64, 1, 1)]
 void main(uint3 g : SV_GroupID, uint3 l : SV_GroupThreadID) {
     uint w = g.y * g_row + g.x;
     if (w >= g_warps)
         return;
-    uint h = g_at[w] * 29u, s = w * g_warp_words;
-    for (uint k = l.x; k < g_warp_words; k += 64u) {
+    uint h = g_at[3u * w] * 29u, s = g_at[3u * w + 1u] * 29u, words = g_at[3u * w + 2u] * 29u;
+    for (uint k = l.x; k < words; k += 64u) {
         if (g_mode == 0u)
             g_heap[h + k] = g_src[s + k];
         else
@@ -1644,50 +1680,59 @@ void main(uint3 g : SV_GroupID, uint3 l : SV_GroupThreadID) {
 // The lanes of warps that stopped at a host instruction, gathered after the
 // round's run into one buffer that comes back with the round (so the host
 // needn't fetch them in a round trip of their own). A group per record and
-// warp: the first thread checks the warp's wait flag and takes a slot (in any
-// order: the host finds each warp by its lane index); the group copies the
-// lanes. g_out: [0] the count, [1, 1 + cap) each slot's heap lane index, then
-// the slots' lanes. A warp past the capacity isn't gathered (the host
-// fetches it as before). Groups: x the warp in its record, y + z x g_row the
-// record (no integer division: see kLaneMoveHlsl).
+// warp: the first thread checks the warp's wait flag and takes a slot and
+// room for its lanes (in any order: the host finds each warp by its lane
+// index); the group copies the lanes. Each warp takes its own record's width
+// of room (WB_LANES: docs/inject-plan.md W1, nodes' widths differ). g_out:
+// [0] warps that wanted a slot, [1] lanes they wanted, [2, 2 + 2 x cap) each
+// slot's heap lane index and its first lane in the lanes (none: no room),
+// then the lanes, room for lcap of them. A warp past either capacity isn't
+// gathered (the host fetches it as before). Groups: x the warp in its
+// record, y + z x g_row the record (no integer division: see kLaneMoveHlsl).
 const char* const kLaneGatherHlsl = R"(
 StructuredBuffer<uint4> g_tab : register(t0);
 StructuredBuffer<uint> g_img : register(t1);
 RWStructuredBuffer<uint> g_heap : register(u0);
 RWStructuredBuffer<uint> g_out : register(u1);
-cbuffer K : register(b0) { uint g_n; uint g_cap; uint g_lw; uint g_row; };
-groupshared uint gs_slot;
+cbuffer K : register(b0) { uint g_n; uint g_cap; uint g_lcap; uint g_row; };
+groupshared uint gs_dst;
 groupshared uint gs_at;
 [numthreads(64, 1, 1)]
 void main(uint3 g : SV_GroupID, uint3 t : SV_GroupThreadID) {
     uint r = g.z * g_row + g.y;
     if (r >= g_n)
         return;
-    uint lanes = g_lw & 0xFFFFu;
     uint4 e = g_tab[r];
     uint i = g.x;
     uint rec = e.x + e.y;
+    uint lanes = g_img[rec + WB_LANES];
     if (t.x == 0u) {
-        gs_slot = 0xFFFFFFFFu;
+        gs_dst = 0xFFFFFFFFu;
         if (i < g_img[rec + WB_NWARP] && g_img[rec + WB_WARPS + i * WW_SIZE + WW_WAIT] != 0u) {
             uint at = e.z + g_img[rec + WB_WARPS + i * WW_SIZE + WW_LANE0];
             uint k = 0u;
+            uint off = 0u;
             InterlockedAdd(g_out[0], 1u, k);
+            InterlockedAdd(g_out[1], lanes, off);
             if (k < g_cap) {
-                gs_slot = k;
-                gs_at = at;
-                g_out[1u + k] = at;
+                bool fits = off + lanes <= g_lcap;
+                g_out[2u + 2u * k] = at;
+                g_out[3u + 2u * k] = fits ? off : 0xFFFFFFFFu;
+                if (fits) {
+                    gs_dst = off;
+                    gs_at = at;
+                }
             }
         }
     }
     GroupMemoryBarrierWithGroupSync();
-    uint slot = gs_slot;
-    if (slot == 0xFFFFFFFFu)
+    uint dst = gs_dst;
+    if (dst == 0xFFFFFFFFu)
         return;
     uint words = lanes * 29u;
-    uint src = gs_at * 29u, dst = 1u + g_cap + slot * words;
+    uint src = gs_at * 29u, o = 2u + 2u * g_cap + dst * 29u;
     for (uint w = t.x; w < words; w += 64u)
-        g_out[dst + w] = g_heap[src + w];
+        g_out[o + w] = g_heap[src + w];
 }
 )";
 
@@ -1696,10 +1741,12 @@ void main(uint3 g : SV_GroupID, uint3 t : SV_GroupThreadID) {
 struct WarpBatch {
     Queue* q = nullptr; // batch 0's is the device's own queue; batch 1 has its own on the same device
     // The gathered lanes: their buffer and readback, the round's capacity in
-    // warps (from the last round's count), and whether the last round has them.
+    // warps and in lanes (each from the last round's count), and whether the
+    // last round has them.
     ID3D12Resource *gout = nullptr, *grb = nullptr;
     u64 gout_cap = 0, grb_cap = 0;
     u32 gcap = 256, gcap_round = 0;
+    u32 glcap = 256 * 32, glcap_round = 0;
     bool gathered = false;
     Array<u64> gpairs; // take_gathered's scratch
     // A round's buffers.
@@ -1713,7 +1760,7 @@ struct WarpBatch {
     bool busy = false, grew = false;
     const WarpJob* jobs = nullptr;
     u32 njobs = 0;
-    u64 img_words = 0, nrec = 0, sent = 0;
+    u64 img_words = 0, nrec = 0, sent = 0, sent_lanes = 0; // (sent: warps; sent_lanes: their lanes)
     double in_s = 0, t_exec = 0;
     double prep_s = 0, post_s = 0; // (profiling) submit before the copy in, and after it
     Array<u32> table, at;
@@ -1727,14 +1774,39 @@ struct WarpBatch {
     ID3D12Resource* qrb = nullptr;
 };
 
+// A warp width's kernels (docs/inject-plan.md W3): the plain one and its
+// groupshared tiers, DXC's or FXC's.
+struct WarpWidth {
+    ID3D12PipelineState* pso = nullptr;    // records in memory
+    ID3D12PipelineState* pso_tier[4] = {}; // records of at most tier[k] words, in groupshared memory
+    u32 tier[4] = {}, ntier = 0;
+    bool dxc = false;
+};
+constexpr u32 kWidths = 11; // warps of 2^0 to 2^10 lanes (kMaxLanes)
+
+u32 width_index(u32 lanes) { // log2 of a power of two
+    u32 k = 0;
+    while ((1u << k) < lanes)
+        ++k;
+    return k;
+}
+
+u32 popcount32(u32 v) {
+    u32 n = 0;
+    for (; v; v &= v - 1)
+        ++n;
+    return n;
+}
+
 struct WarpGpu::Impl {
     Queue q, q2; // the device's queue (batch 0) and a second on it (batch 1)
     char name[128] = {};
-    u32 lanes = 32; // a warp's
+    u32 widths = 0; // the widths it has kernels for (bit k: 2^k lanes)
     ID3D12RootSignature* root = nullptr;
-    ID3D12PipelineState* pso = nullptr;      // records in memory
-    ID3D12PipelineState* pso_tier[4] = {};   // records of at most tier[k] words, in groupshared memory
-    u32 tier[4] = {}, ntier = 0;
+    WarpWidth width[kWidths];
+    // Each node's lanes a warp, as its jobs gave them (a node's width is its
+    // site's, fixed: docs/inject-plan.md W1).
+    Array<u32> nwl;
     bool long_first = false; // WarpKernelOptions
     ID3D12PipelineState* pso_move = nullptr; // sending and fetching lanes
     ID3D12PipelineState* pso_gather = nullptr; // waiting warps' lanes into the round's readback
@@ -1763,12 +1835,12 @@ bool warp_dxc_built() {
     return kDxilCount > 0;
 }
 
-bool WarpGpu::open(u32 index, u32 lanes, TextBuf* err, double* compile_ms, const WarpKernelOptions* options) {
+bool WarpGpu::open(u32 index, u32 widths, TextBuf* err, double* compile_ms, const WarpKernelOptions* options) {
     close();
     dxc_ = false;
     kernel_[0] = 0;
-    if (lanes == 0 || lanes > kMaxLanes) {
-        say(err, "warp.lanes out of range");
+    if (widths == 0 || widths >= (kMaxLanes << 1)) {
+        say(err, "warp widths out of range");
         return false;
     }
     const WarpKernelOptions opt = options ? *options : WarpKernelOptions{};
@@ -1783,7 +1855,7 @@ bool WarpGpu::open(u32 index, u32 lanes, TextBuf* err, double* compile_ms, const
         const u32* t = pass == 0 ? opt.lds : opt.fxc_lds;
         for (u32 k = 0; k < (pass == 0 ? ndxc : nfxc); ++k)
             if (t[k] > kWarpLdsMax || (k > 0 && t[k] <= t[k - 1])) {
-                say(err, "groupshared tiers must ascend, each at most 7,680 words");
+                say(err, "groupshared tiers must ascend, each at most 5,632 words");
                 return false;
             }
     }
@@ -1795,7 +1867,7 @@ bool WarpGpu::open(u32 index, u32 lanes, TextBuf* err, double* compile_ms, const
         return false;
     }
     Impl* m = new Impl;
-    m->lanes = lanes;
+    m->widths = widths;
     m->long_first = opt.long_first;
     strncpy(m->name, found[index].d.name, sizeof m->name - 1);
     bool ok = m->q.init(found[index].adapter, true, err);
@@ -1838,70 +1910,94 @@ bool WarpGpu::open(u32 index, u32 lanes, TextBuf* err, double* compile_ms, const
         hr = m->q.dev->CreateComputePipelineState(&pd, IID_PPV_ARGS(out));
         return SUCCEEDED(hr);
     };
-    // The warp kernel: DXC's where it can run (docs/dxc-plan.md D3), else FXC's.
-    const char* why_fxc = nullptr;
+    // The warp kernels, a set for each width the world's nodes have
+    // (docs/inject-plan.md W3): DXC's where they can run (docs/dxc-plan.md
+    // D3), else FXC's.
+    const char* why_fxc = nullptr; // (the first width that runs FXC's: why)
+    u32 first_width = kWidths;
     if (ok) {
         D3D12_FEATURE_DATA_SHADER_MODEL sm = {};
         sm.HighestShaderModel = D3D_SHADER_MODEL_6_0;
         const bool sm6 = SUCCEEDED(m->q.dev->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &sm, sizeof sm)) &&
                          sm.HighestShaderModel >= D3D_SHADER_MODEL_6_0;
-        if (opt.fxc)
-            why_fxc = "warp.kernel = fxc";
-        else if (kDxilCount == 0)
-            why_fxc = "this build has no DXC kernels";
-        else if (!find_dxil(lanes, 0))
-            why_fxc = "DXC's kernels are built for 32 lanes";
-        else if (!sm6)
-            why_fxc = "the device doesn't take Shader Model 6.0";
-        for (u32 k = 0; k < ndxc && !why_fxc; ++k)
-            if (!find_dxil(lanes, opt.lds[k]))
-                why_fxc = "a groupshared tier the build didn't compile";
-        if (!why_fxc) {
-            const DxilKernel* p = find_dxil(lanes, 0);
-            bool made = pipeline(p->code, p->size, &m->pso);
-            for (u32 k = 0; k < ndxc && made; ++k) {
-                p = find_dxil(lanes, opt.lds[k]);
-                made = pipeline(p->code, p->size, &m->pso_tier[k]);
+        for (u32 wi = 0; wi < kWidths && ok; ++wi) {
+            if (!(widths & (1u << wi)))
+                continue;
+            first_width = first_width < wi ? first_width : wi;
+            const u32 lanes = 1u << wi;
+            WarpWidth& W = m->width[wi];
+            const char* why = nullptr;
+            if (opt.fxc)
+                why = "warp.kernel = fxc";
+            else if (kDxilCount == 0)
+                why = "this build has no DXC kernels";
+            else if (!find_dxil(lanes, 0))
+                why = "DXC's kernels are built for 16 to 1,024 lanes";
+            else if (!sm6)
+                why = "the device doesn't take Shader Model 6.0";
+            for (u32 k = 0; k < ndxc && !why; ++k)
+                if (!find_dxil(lanes, opt.lds[k]))
+                    why = "a groupshared tier the build didn't compile";
+            if (!why) {
+                const DxilKernel* p = find_dxil(lanes, 0);
+                bool made = pipeline(p->code, p->size, &W.pso);
+                for (u32 k = 0; k < ndxc && made; ++k) {
+                    p = find_dxil(lanes, opt.lds[k]);
+                    made = pipeline(p->code, p->size, &W.pso_tier[k]);
+                }
+                if (made) {
+                    W.dxc = true;
+                    W.ntier = ndxc;
+                    for (u32 k = 0; k < ndxc; ++k)
+                        W.tier[k] = opt.lds[k];
+                } else {
+                    release(W.pso);
+                    for (u32 k = 0; k < 4; ++k)
+                        release(W.pso_tier[k]);
+                    why = "the device refused DXC's kernels";
+                }
             }
-            if (made) {
-                m->ntier = ndxc;
-                for (u32 k = 0; k < ndxc; ++k)
-                    m->tier[k] = opt.lds[k];
-            } else {
-                release(m->pso);
-                for (u32 k = 0; k < 4; ++k)
-                    release(m->pso_tier[k]);
-                why_fxc = "the device refused DXC's kernels";
-            }
-        }
-        if (why_fxc) {
-            Array<u8> code;
-            ok = warp_fxc_bytecode(lanes, 0, &code, err);
-            if (ok && !pipeline(code.data(), code.size(), &m->pso)) {
-                say_hr(err, "pipeline failed", hr);
-                ok = false;
-            }
-            for (u32 k = 0; k < nfxc && ok; ++k) {
-                ok = warp_fxc_bytecode(lanes, opt.fxc_lds[k], &code, err);
-                if (ok && !pipeline(code.data(), code.size(), &m->pso_tier[k])) {
+            if (why) {
+                why_fxc = why_fxc ? why_fxc : why;
+                Array<u8> code;
+                ok = warp_fxc_bytecode(lanes, 0, &code, err);
+                if (ok && !pipeline(code.data(), code.size(), &W.pso)) {
                     say_hr(err, "pipeline failed", hr);
                     ok = false;
                 }
+                for (u32 k = 0; k < nfxc && ok; ++k) {
+                    ok = warp_fxc_bytecode(lanes, opt.fxc_lds[k], &code, err);
+                    if (ok && !pipeline(code.data(), code.size(), &W.pso_tier[k])) {
+                        say_hr(err, "pipeline failed", hr);
+                        ok = false;
+                    }
+                }
+                W.ntier = nfxc;
+                for (u32 k = 0; k < nfxc; ++k)
+                    W.tier[k] = opt.fxc_lds[k];
             }
-            m->ntier = nfxc;
-            for (u32 k = 0; k < nfxc; ++k)
-                m->tier[k] = opt.fxc_lds[k];
         }
     }
     if (ok) { // what runs, for the warp notes and --profile
         dxc_ = why_fxc == nullptr;
+        const WarpWidth& W0 = m->width[first_width < kWidths ? first_width : 0];
         TextBuf d;
         d.append(dxc_ ? "DXC's kernel" : "FXC's kernel");
-        if (m->ntier) {
-            d.append(m->ntier == 1 ? ", groupshared images up to " : ", groupshared tiers of ");
-            for (u32 k = 0; k < m->ntier; ++k) {
+        d.append(" for warps of ");
+        for (u32 wi = 0, said = 0, all = popcount32(widths); wi < kWidths; ++wi) {
+            if (!(widths & (1u << wi)))
+                continue;
+            char w[32];
+            snprintf(w, sizeof w, "%s%u", said == 0 ? "" : (said + 1 == all ? " and " : ", "), 1u << wi);
+            d.append(w);
+            ++said;
+        }
+        d.append(" lanes");
+        if (W0.ntier) {
+            d.append(W0.ntier == 1 ? ", groupshared images up to " : ", groupshared tiers of ");
+            for (u32 k = 0; k < W0.ntier; ++k) {
                 char w[32];
-                snprintf(w, sizeof w, "%s%u", k == 0 ? "" : (k + 1 == m->ntier ? " and " : ", "), m->tier[k]);
+                snprintf(w, sizeof w, "%s%u", k == 0 ? "" : (k + 1 == W0.ntier ? " and " : ", "), W0.tier[k]);
                 d.append(w);
             }
             d.append(" words");
@@ -1999,9 +2095,11 @@ void WarpGpu::close() {
     release(m->fup);
     release(m->fstage);
     release(m->frb);
-    release(m->pso);
-    for (u32 k = 0; k < 4; ++k)
-        release(m->pso_tier[k]);
+    for (u32 wi = 0; wi < kWidths; ++wi) {
+        release(m->width[wi].pso);
+        for (u32 k = 0; k < 4; ++k)
+            release(m->width[wi].pso_tier[k]);
+    }
     release(m->pso_move);
     release(m->pso_gather);
     release(m->root);
@@ -2024,21 +2122,21 @@ struct WarpCopy {
     const u64* img_at;  // per job: its image's byte offset in the buffer
     const u64* send_at; // per job: where its sent lanes go, in bytes
     unsigned char* buf;
-    u32 lanes; // a warp's
     u64 size;  // the buffer's bytes
 };
 
 void warp_copy_in(void* ctx, u32 j) {
     const WarpCopy& c = *static_cast<const WarpCopy*>(ctx);
     const WarpJob& job = c.jobs[j];
+    const u32 wl = job.wl; // (its node's width: docs/inject-plan.md W1)
     NOVA_ASSERT(c.img_at[j] + static_cast<u64>(job.img_words) * 4 <= c.size);
     memcpy(c.buf + c.img_at[j], job.img, static_cast<usize>(job.img_words) * 4);
     const Lane* src = static_cast<const Lane*>(job.lanes);
     Lane* dst = reinterpret_cast<Lane*>(c.buf + c.send_at[j]);
-    NOVA_ASSERT(c.send_at[j] + static_cast<u64>(job.nsend) * c.lanes * sizeof(Lane) <= c.size);
-    for (u32 i = 0; i < job.nsend; ++i, dst += c.lanes) {
-        NOVA_ASSERT(static_cast<u64>(job.send[i] + 1) * c.lanes <= job.nlanes);
-        memcpy(dst, src + static_cast<usize>(job.send[i]) * c.lanes, c.lanes * sizeof(Lane));
+    NOVA_ASSERT(c.send_at[j] + static_cast<u64>(job.nsend) * wl * sizeof(Lane) <= c.size);
+    for (u32 i = 0; i < job.nsend; ++i, dst += wl) {
+        NOVA_ASSERT(static_cast<u64>(job.send[i] + 1) * wl <= job.nlanes);
+        memcpy(dst, src + static_cast<usize>(job.send[i]) * wl, wl * sizeof(Lane));
     }
 }
 
@@ -2086,7 +2184,6 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
     Impl* m = impl_;
     WarpBatch& B = m->batch[batch];
     Queue& Q = *B.q;
-    const u32 wl = m->lanes;
     const double t_sub = clock_seconds();
     if (B.rb_map) { // the last round's results, read in place, are done with
         D3D12_RANGE none = {0, 0};
@@ -2096,30 +2193,41 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
     B.jobs = jobs;
     B.njobs = njobs;
     B.grew = false;
-    // Each job's image, and its node's room for lanes.
+    // Each job's image, its node's width and room for lanes, and where its
+    // sent warps' lanes go in the round's list (in lanes: each node's warps
+    // are its own width, docs/inject-plan.md W1).
     B.img_at.clear();
     B.send_at.clear();
-    u64 img_words = 0, nrec = 0, sent = 0;
+    u64 img_words = 0, nrec = 0, sent = 0, sent_lanes = 0;
     bool grow = m->heap == nullptr;
     for (u32 j = 0; j < njobs; ++j) {
+        const u32 wl = jobs[j].wl;
+        if (wl == 0 || wl > kMaxLanes || (wl & (wl - 1)) || !m->width[width_index(wl)].pso) {
+            say(err, "a node's warps have a width the GPU has no kernel for");
+            return false;
+        }
         B.img_at.push(img_words);
-        B.send_at.push(sent);
+        B.send_at.push(sent_lanes);
         img_words += jobs[j].img_words;
         nrec += jobs[j].nrec;
         sent += jobs[j].nsend;
+        sent_lanes += static_cast<u64>(jobs[j].nsend) * wl;
         const u32 node = jobs[j].node;
         if (node >= m->rcap.size()) {
             const usize was = m->rcap.size();
             m->rcap.resize(node + 1);
             m->rbase.resize(node + 1);
+            m->nwl.resize(node + 1);
             for (usize k = was; k <= node; ++k)
-                m->rcap[k] = m->rbase[k] = 0;
+                m->rcap[k] = m->rbase[k] = m->nwl[k] = 0;
         }
+        m->nwl[node] = wl;
         grow = grow || jobs[j].nlanes > m->rcap[node];
     }
     B.img_words = img_words;
     B.nrec = nrec;
     B.sent = sent;
+    B.sent_lanes = sent_lanes;
     if (nrec == 0)
         return true;
     if (img_words > 0x3FFFFFFFull) {
@@ -2145,8 +2253,9 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
             cap[k] = m->rcap[k];
         for (u32 j = 0; j < njobs; ++j) {
             u64& c = cap[jobs[j].node];
+            const u64 least = 64ull * jobs[j].wl;
             if (jobs[j].nlanes > c)
-                c = static_cast<u64>(jobs[j].nlanes) * 2 > 64ull * wl ? static_cast<u64>(jobs[j].nlanes) * 2 : 64ull * wl;
+                c = static_cast<u64>(jobs[j].nlanes) * 2 > least ? static_cast<u64>(jobs[j].nlanes) * 2 : least;
         }
         u64 total = 0;
         for (usize k = 0; k < cap.size(); ++k) {
@@ -2193,23 +2302,29 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
         for (u32 j = 0; j < njobs; ++j)
             for (u32 r = 0; r < jobs[j].nrec && jobs[j].rec_chain; ++r)
                 cmax = jobs[j].rec_chain[r] > cmax ? jobs[j].rec_chain[r] : cmax;
-    // The order is the keys' (long ? 0 : 1) << 59 | kind << 56 | (~chain if
-    // long) << 24 | entry, ascending. Most records aren't long, and their
-    // keys are already in entry order within their kind, so only the long
-    // ones are sorted; the short ones go by kind in entry order (a counting
-    // pass). The same order a sort of every key gives (2026-11-08: sorting
-    // all of a mature round's 160,000 took 2.5 ms on one thread, before both
-    // the GPU and the CPU threads could start).
+    // A record's kind is its node's width (docs/inject-plan.md W3) and its
+    // tier there: width index x 8 + tier (each width's kernels are their own
+    // dispatches). The order is the keys' (long ? 0 : 1) << 63 | kind << 56 |
+    // (~chain if long) << 24 | entry, ascending. Most records aren't long, and
+    // their keys are already in entry order within their kind, so only the
+    // long ones are sorted; the short ones go by kind in entry order (a
+    // counting pass). The same order a sort of every key gives (2026-11-08:
+    // sorting all of a mature round's 160,000 took 2.5 ms on one thread,
+    // before both the GPU and the CPU threads could start).
     B.keys.clear();
     B.ents.resize(nrec * 4);
     B.kinds.resize(nrec);
-    u64 per_kind[9] = {}; // short records of each kind (kinds 0-7, ntier at most 7)
-    for (u32 j = 0, e = 0; j < njobs; ++j)
+    constexpr u32 kKinds = kWidths * 8;
+    u64 per_kind[kKinds] = {}; // short records of each kind
+    for (u32 j = 0, e = 0; j < njobs; ++j) {
+        const u32 wi = width_index(jobs[j].wl);
+        const WarpWidth& W = m->width[wi];
         for (u32 r = 0; r < jobs[j].nrec; ++r, ++e) {
             const u32 size = warp_job_rec_words(jobs[j], r);
-            u32 kind = 0;
-            while (kind < m->ntier && size > m->tier[kind])
-                ++kind;
+            u32 tier = 0;
+            while (tier < W.ntier && size > W.tier[tier])
+                ++tier;
+            const u32 kind = wi * 8 + tier;
             const u32 chain = jobs[j].rec_chain ? jobs[j].rec_chain[r] : 0;
             const bool lng = cmax && static_cast<u64>(chain) * 4 > cmax;
             if (lng)
@@ -2222,10 +2337,11 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
             B.ents[4 * e + 2] = static_cast<u32>(m->rbase[jobs[j].node]);
             B.ents[4 * e + 3] = size;
         }
+    }
     sort_u64(B.keys.data(), B.keys.size()); // (the long ones: by kind, longest chain first, then entry)
     const usize nlong = B.keys.size();
-    u64 kind_at[9] = {}; // where each kind's short records start, after the long ones
-    for (u32 k = 0, at = static_cast<u32>(nlong); k < 9; ++k) {
+    u64 kind_at[kKinds] = {}; // where each kind's short records start, after the long ones
+    for (u32 k = 0, at = static_cast<u32>(nlong); k < kKinds; ++k) {
         kind_at[k] = at;
         at += static_cast<u32>(per_kind[k]);
     }
@@ -2233,7 +2349,7 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
     for (u64 e = 0; e < nrec; ++e) {
         const u8 k = B.kinds[e];
         if (k != 0xFF)
-            B.keys[kind_at[k]++] = 1ull << 59 | static_cast<u64>(k) << 56 | e;
+            B.keys[kind_at[k]++] = 1ull << 63 | static_cast<u64>(k) << 56 | e;
     }
     B.table.resize(nrec * 4);
     B.runs.clear(); // (kind, first entry, count) a dispatch
@@ -2248,14 +2364,20 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
         }
         ++B.runs[B.runs.size() - 1];
     }
-    // Where each sent warp's lanes go in the heap.
-    B.at.resize(sent ? sent : 1);
-    for (u32 j = 0, k = 0; j < njobs; ++j)
-        for (u32 i = 0; i < jobs[j].nsend; ++i)
-            B.at[k++] = static_cast<u32>(m->rbase[jobs[j].node] + static_cast<u64>(jobs[j].send[i]) * wl);
+    // Each sent warp, for the lane kernel: where its lanes go in the heap,
+    // where they are in the round's list, and how many (its node's width).
+    B.at.resize(sent ? 3 * sent : 3);
+    for (u32 j = 0, k = 0; j < njobs; ++j) {
+        const u32 wl = jobs[j].wl;
+        for (u32 i = 0; i < jobs[j].nsend; ++i, ++k) {
+            B.at[3 * k] = static_cast<u32>(m->rbase[jobs[j].node] + static_cast<u64>(jobs[j].send[i]) * wl);
+            B.at[3 * k + 1] = static_cast<u32>(B.send_at[j] + static_cast<u64>(i) * wl);
+            B.at[3 * k + 2] = wl;
+        }
+    }
     const u64 cst_b = align256(static_cast<u64>(ncst) * 4), tab_b = align256(nrec * 16);
     const u64 img_b = align256((img_words ? img_words : 1) * 4);
-    const u64 send_b = align256((sent ? sent : 1) * wl * sizeof(Lane)), at_b = align256((sent ? sent : 1) * 4);
+    const u64 send_b = align256((sent_lanes ? sent_lanes : 1) * sizeof(Lane)), at_b = align256((sent ? sent : 1) * 12);
     const u64 zero_at = cst_b + tab_b + img_b + send_b + at_b; // 256 zero bytes (the gather's count)
     // The gather (waiting warps' lanes back with the round): its capacity in
     // warps, and the most warps a record holds.
@@ -2267,7 +2389,8 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
         }
     B.gathered = false;
     B.gcap_round = m->pso_gather && wmax ? B.gcap : 0;
-    const u64 g_bytes = align256((1ull + B.gcap_round + static_cast<u64>(B.gcap_round) * wl * 29) * 4);
+    B.glcap_round = B.gcap_round ? B.glcap : 0; // (room in lanes: each warp its own width)
+    const u64 g_bytes = align256((2ull + 2ull * B.gcap_round + static_cast<u64>(B.glcap_round) * 29) * 4);
     if (!ensure_buffer(Q, B.up, B.up_cap, zero_at + 256, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ,
                        false) ||
         !ensure_buffer(Q, B.img, B.img_cap, img_b, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, true) ||
@@ -2289,14 +2412,14 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
     }
     memcpy(up, cst, static_cast<usize>(ncst) * 4);
     memcpy(up + cst_b, B.table.data(), nrec * 16);
-    memcpy(up + cst_b + tab_b + img_b + send_b, B.at.data(), sent * 4);
+    memcpy(up + cst_b + tab_b + img_b + send_b, B.at.data(), sent * 12);
     memset(up + zero_at, 0, 256);
     Array<u64> img_off, send_off;
     for (u32 j = 0; j < njobs; ++j) {
         img_off.push(cst_b + tab_b + B.img_at[j] * 4);
-        send_off.push(cst_b + tab_b + img_b + B.send_at[j] * wl * sizeof(Lane));
+        send_off.push(cst_b + tab_b + img_b + B.send_at[j] * sizeof(Lane));
     }
-    WarpCopy cin = {jobs, img_off.data(), send_off.data(), up, wl, B.up_cap};
+    WarpCopy cin = {jobs, img_off.data(), send_off.data(), up, B.up_cap};
     if (pool)
         pool->run(njobs, &warp_copy_in, &cin);
     else
@@ -2321,7 +2444,7 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
         L->SetComputeRootShaderResourceView(1, va + cst_b + tab_b + img_b);
         L->SetComputeRootUnorderedAccessView(2, m->heap->GetGPUVirtualAddress());
         L->SetComputeRootUnorderedAccessView(3, m->heap->GetGPUVirtualAddress());
-        m->dispatch_rows(L, sent, static_cast<u32>(sent), wl * 29, 0); // a group a warp
+        m->dispatch_rows(L, sent, static_cast<u32>(sent), 0, 0); // a group a warp (each its own width)
         Q.uav_barrier(m->heap);
     }
     if (stamps)
@@ -2331,9 +2454,11 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
     L->SetComputeRootUnorderedAccessView(3, m->heap->GetGPUVirtualAddress());
     // The dispatches touch different records: no barrier between them.
     for (usize d = 0; d + 2 < B.runs.size(); d += 3) {
-        const u32 kind = B.runs[d] & 7u;
+        const u32 kind = B.runs[d] & 0x7Fu; // (its width index x 8 + its tier)
+        const WarpWidth& W = m->width[kind >> 3];
+        const u32 tier = kind & 7u;
         const u64 first = B.runs[d + 1], count = B.runs[d + 2];
-        L->SetPipelineState(kind < m->ntier ? m->pso_tier[kind] : m->pso);
+        L->SetPipelineState(tier < W.ntier ? W.pso_tier[tier] : W.pso);
         L->SetComputeRootShaderResourceView(1, va + cst_b + first * 16);
         const u32 row = static_cast<u32>(count < 65535 ? count : 65535);
         const u32 rows = static_cast<u32>((count + row - 1) / row);
@@ -2350,7 +2475,7 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
         Q.barrier(B.img, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         img_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
         Q.barrier(B.gout, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
-        L->CopyBufferRegion(B.gout, 0, B.up, zero_at, 4); // the count starts at 0
+        L->CopyBufferRegion(B.gout, 0, B.up, zero_at, 8); // the counts start at 0
         Q.barrier(B.gout, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         L->SetPipelineState(m->pso_gather);
         L->SetComputeRootShaderResourceView(0, va + cst_b);
@@ -2359,7 +2484,7 @@ bool WarpGpu::submit(const u32* cst, u32 ncst, const WarpJob* jobs, u32 njobs, T
         L->SetComputeRootUnorderedAccessView(3, B.gout->GetGPUVirtualAddress());
         const u32 ry = nrec < 65535 ? static_cast<u32>(nrec) : 65535u; // records: y, then z
         const u32 rz = static_cast<u32>((nrec + ry - 1) / ry);
-        const u32 k[4] = {static_cast<u32>(nrec), B.gcap_round, wl | (wmax << 16), ry};
+        const u32 k[4] = {static_cast<u32>(nrec), B.gcap_round, B.glcap_round, ry};
         L->SetComputeRoot32BitConstants(4, 4, k, 0);
         L->Dispatch(wmax, ry, rz);
         Q.barrier(B.gout, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -2421,17 +2546,21 @@ bool WarpGpu::finish(TextBuf* err, ThreadPool* pool, u32 batch, bool copy_back) 
         for (u32 j = 0; j < B.njobs; ++j)
             warp_back_task(&wb, j);
     D3D12_RANGE none = {0, 0};
-    if (B.gcap_round) { // the gathered lanes are this round's; the next capacity follows the count
-        u32 count = 0;
+    if (B.gcap_round) { // the gathered lanes are this round's; the next capacities follow the counts
+        u32 count = 0, lanes = 0;
         void* gm = nullptr;
-        D3D12_RANGE first = {0, 4};
+        D3D12_RANGE first = {0, 8};
         if (SUCCEEDED(B.grb->Map(0, &first, &gm))) {
-            count = *static_cast<const u32*>(gm);
+            count = static_cast<const u32*>(gm)[0];
+            lanes = static_cast<const u32*>(gm)[1];
             B.grb->Unmap(0, &none);
             B.gathered = true;
         }
         const u64 want = static_cast<u64>(count) * 5 / 4 + 64;
         B.gcap = static_cast<u32>(want < 256 ? 256 : (want > 8192 ? 8192 : want));
+        // (room in lanes: from 8,192, at most 2,097,152, 243 MB of lanes)
+        const u64 lwant = static_cast<u64>(lanes) * 5 / 4 + 2048;
+        B.glcap = static_cast<u32>(lwant < 8192 ? 8192 : (lwant > 2097152 ? 2097152 : lwant));
     }
     u64 longest = 0; // the longest body's steps: a group runs its warps one after another
     stats_.img_words += B.img_words;
@@ -2462,7 +2591,7 @@ bool WarpGpu::finish(TextBuf* err, ThreadPool* pool, u32 batch, bool copy_back) 
     }
     if (last_ms_ == 0)
         last_ms_ = gpu_s * 1000.0;
-    const u64 lane_bytes = B.sent * m->lanes * sizeof(Lane);
+    const u64 lane_bytes = B.sent_lanes * sizeof(Lane);
     ++stats_.rounds;
     stats_.records += B.nrec;
     stats_.lanes_sent += B.sent;
@@ -2484,24 +2613,29 @@ u32 WarpGpu::take_gathered(const WarpFetch* list, u32 n, u8* got, ThreadPool* po
     Impl* m = impl_;
     WarpBatch& B = m->batch[batch];
     B.gathered = false; // once a round
-    const u32 wl = m->lanes, cap = B.gcap_round;
-    const u64 words = static_cast<u64>(wl) * 29;
+    const u32 cap = B.gcap_round, lcap = B.glcap_round;
     void* mapped = nullptr;
-    D3D12_RANGE head = {0, static_cast<SIZE_T>((1ull + cap) * 4)};
+    D3D12_RANGE head = {0, static_cast<SIZE_T>((2ull + 2ull * cap) * 4)};
     if (FAILED(B.grb->Map(0, &head, &mapped)))
         return 0;
     const u32* out = static_cast<const u32*>(mapped);
     const u32 ng = out[0] < cap ? out[0] : cap;
-    Array<u64> keys; // (heap lane index << 32 | slot), sorted
-    keys.resize(ng);
+    const u32 nl = out[1] < lcap ? out[1] : lcap; // (the lanes' room in use, at most)
+    Array<u64> keys; // (heap lane index << 32 | slot), sorted: the slots that got room for their lanes
+    keys.reserve(ng);
     for (u32 k = 0; k < ng; ++k)
-        keys[k] = (static_cast<u64>(out[1 + k]) << 32) | k;
+        if (out[3 + 2 * k] != 0xFFFFFFFFu)
+            keys.push((static_cast<u64>(out[2 + 2 * k]) << 32) | k);
+    Array<u32> first; // each slot's first lane in the lanes (none: no room)
+    first.resize(ng);
+    for (u32 k = 0; k < ng; ++k)
+        first[k] = out[3 + 2 * k];
     D3D12_RANGE none = {0, 0};
     B.grb->Unmap(0, &none);
-    if (ng == 0)
+    if (keys.empty())
         return 0;
     sort_u64(keys.data(), keys.size());
-    D3D12_RANGE all = {0, static_cast<SIZE_T>((1ull + cap + static_cast<u64>(ng) * words) * 4)};
+    D3D12_RANGE all = {0, static_cast<SIZE_T>((2ull + 2ull * cap + static_cast<u64>(nl) * 29) * 4)};
     if (FAILED(B.grb->Map(0, &all, &mapped)))
         return 0;
     out = static_cast<const u32*>(mapped);
@@ -2509,9 +2643,9 @@ u32 WarpGpu::take_gathered(const WarpFetch* list, u32 n, u8* got, ThreadPool* po
     Array<u64>& pairs = B.gpairs; // (gathered slot << 32 | list index), then copied
     pairs.clear();
     for (u32 i = 0; i < n; ++i) { // (the heap as this round saw it: another batch may have grown it since)
-        if (list[i].node >= B.rbase.size())
+        if (list[i].node >= B.rbase.size() || list[i].node >= m->nwl.size())
             continue;
-        const u64 at = B.rbase[list[i].node] + static_cast<u64>(list[i].slot) * wl;
+        const u64 at = B.rbase[list[i].node] + static_cast<u64>(list[i].slot) * m->nwl[list[i].node];
         usize lo = 0, hi = keys.size();
         while (lo < hi) { // the first key >= at << 32
             const usize mid = (lo + hi) / 2;
@@ -2532,18 +2666,21 @@ u32 WarpGpu::take_gathered(const WarpFetch* list, u32 n, u8* got, ThreadPool* po
         const WarpFetch* list;
         const u64* pairs;
         usize n;
-        const u32* src;
-        u64 words;
+        const u32* src;   // the lanes
+        const u32* first; // each slot's first lane in them
+        const u32* nwl;   // each node's lanes a warp (a warp's own lanes)
         static void task(void* ctx, u32 c) {
             const Copy& k = *static_cast<const Copy*>(ctx);
             const usize a = static_cast<usize>(c) * 64, b = a + 64 < k.n ? a + 64 : k.n;
             for (usize j = a; j < b; ++j) {
                 const u64 p = k.pairs[j];
-                memcpy(k.list[p & 0xFFFFFFFFu].dst, k.src + (p >> 32) * k.words, static_cast<usize>(k.words) * 4);
+                const WarpFetch& f = k.list[p & 0xFFFFFFFFu];
+                memcpy(f.dst, k.src + static_cast<u64>(k.first[p >> 32]) * 29,
+                       static_cast<usize>(k.nwl[f.node]) * sizeof(Lane));
             }
         }
     };
-    Copy copy = {list, pairs.data(), pairs.size(), out + 1 + cap, words};
+    Copy copy = {list, pairs.data(), pairs.size(), out + 2 + 2 * static_cast<u64>(cap), first.data(), m->nwl.data()};
     const u32 chunks = static_cast<u32>((pairs.size() + 63) / 64);
     if (pool && chunks > 1)
         pool->run(chunks, &Copy::task, &copy);
@@ -2552,7 +2689,7 @@ u32 WarpGpu::take_gathered(const WarpFetch* list, u32 n, u8* got, ThreadPool* po
             Copy::task(&copy, c);
     B.grb->Unmap(0, &none);
     stats_.lanes_gathered += taken;
-    stats_.bytes_down += static_cast<u64>(ng) * words * 4;
+    stats_.bytes_down += static_cast<u64>(nl) * sizeof(Lane);
     return taken;
 }
 
@@ -2564,17 +2701,24 @@ bool WarpGpu::fetch(const WarpFetch* list, u32 n, TextBuf* err, u32 batch) {
     Impl* m = impl_;
     Queue& Q = *m->batch[batch].q; // (its queue: the other batch may be running meanwhile)
     const double t0 = clock_seconds();
-    const u32 wl = m->lanes;
-    m->fat.resize(n);
+    // Each warp for the lane kernel: its lanes in the heap, where they go in
+    // the staging list, how many (its node's width: docs/inject-plan.md W1).
+    m->fat.resize(static_cast<usize>(n) * 3);
+    u64 lanes = 0;
     for (u32 i = 0; i < n; ++i) {
-        if (list[i].node >= m->rcap.size() || static_cast<u64>(list[i].slot + 1) * wl > m->rcap[list[i].node]) {
+        const u32 node = list[i].node;
+        const u32 wl = node < m->nwl.size() ? m->nwl[node] : 0;
+        if (node >= m->rcap.size() || wl == 0 || static_cast<u64>(list[i].slot + 1) * wl > m->rcap[node]) {
             say(err, "fetching lanes the GPU never had");
             return false;
         }
-        m->fat[i] = static_cast<u32>(m->rbase[list[i].node] + static_cast<u64>(list[i].slot) * wl);
+        m->fat[3 * i] = static_cast<u32>(m->rbase[node] + static_cast<u64>(list[i].slot) * wl);
+        m->fat[3 * i + 1] = static_cast<u32>(lanes);
+        m->fat[3 * i + 2] = wl;
+        lanes += wl;
     }
-    const u64 bytes = static_cast<u64>(n) * wl * sizeof(Lane);
-    if (!ensure_buffer(Q, m->fup, m->fup_cap, align256(static_cast<u64>(n) * 4), D3D12_HEAP_TYPE_UPLOAD,
+    const u64 bytes = lanes * sizeof(Lane);
+    if (!ensure_buffer(Q, m->fup, m->fup_cap, align256(static_cast<u64>(n) * 12), D3D12_HEAP_TYPE_UPLOAD,
                        D3D12_RESOURCE_STATE_GENERIC_READ, false) ||
         !ensure_buffer(Q, m->fstage, m->fstage_cap, bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON,
                        true) ||
@@ -2589,7 +2733,7 @@ bool WarpGpu::fetch(const WarpFetch* list, u32 n, TextBuf* err, u32 batch) {
         say(err, "fetch upload buffer would not map");
         return false;
     }
-    memcpy(up, m->fat.data(), static_cast<usize>(n) * 4);
+    memcpy(up, m->fat.data(), static_cast<usize>(n) * 12);
     m->fup->Unmap(0, nullptr);
     for (u32 o = 0; o < kBatches; ++o) // (a running batch's heap copy must land first)
         if (o != batch && m->batch[o].busy && m->batch[o].grew)
@@ -2604,7 +2748,7 @@ bool WarpGpu::fetch(const WarpFetch* list, u32 n, TextBuf* err, u32 batch) {
     L->SetComputeRootShaderResourceView(1, va);
     L->SetComputeRootUnorderedAccessView(2, m->heap->GetGPUVirtualAddress());
     L->SetComputeRootUnorderedAccessView(3, m->fstage->GetGPUVirtualAddress());
-    m->dispatch_rows(L, n, n, wl * 29, 1); // a group a warp
+    m->dispatch_rows(L, n, n, 0, 1); // a group a warp
     Q.barrier(m->fstage, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
     L->CopyBufferRegion(m->frb, 0, m->fstage, 0, bytes);
     if (!Q.exec(err) || !Q.wait(err)) {
@@ -2619,7 +2763,7 @@ bool WarpGpu::fetch(const WarpFetch* list, u32 n, TextBuf* err, u32 batch) {
     }
     const Lane* src = static_cast<const Lane*>(mapped);
     for (u32 i = 0; i < n; ++i)
-        memcpy(list[i].dst, src + static_cast<usize>(i) * wl, wl * sizeof(Lane));
+        memcpy(list[i].dst, src + m->fat[3 * i + 1], static_cast<usize>(m->fat[3 * i + 2]) * sizeof(Lane));
     m->frb->Unmap(0, &none);
     stats_.lanes_fetched += n;
     ++stats_.fetches;

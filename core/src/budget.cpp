@@ -188,7 +188,9 @@ double warp_rate(u32 index, u32 lanes) {
     Config::ParseError pe;
     TextBuf t;
     t.append("world.millicores = 1\nworld.gpus = 4096\ngpu.warps = true\nheat.enabled = false\nhazard.copy = 0\n"
-             "hazard.flaw = 0\nhazard.rot = 0\nmem.upkeep = 0\nwarp.capacity = 20000\nwarp.lanes = ");
+             "hazard.flaw = 0\nhazard.rot = 0\nmem.upkeep = 0\nwarp.capacity = 20000\nwarp.lanes_min = ");
+    t.append_u64(lanes);
+    t.append("\nwarp.lanes_max = ");
     t.append_u64(lanes);
     t.append_char('\n');
     if (!c.parse(t.view(), &pe))
@@ -211,7 +213,7 @@ double warp_rate(u32 index, u32 lanes) {
     }
     WarpGpu g;
     double rate = 0;
-    if (ok && g.open(index, lanes, &why)) {
+    if (ok && g.open(index, WarpGpu::width_bit(lanes), &why)) {
         u64 work = 0, tick = 0;
         const double t0 = clock_seconds();
         double el = 0;
@@ -223,15 +225,17 @@ double warp_rate(u32 index, u32 lanes) {
             s->tick_first(tick++);
             if (!s->warp_pack(0))
                 break;
-            WarpJob j = {0,
-                         s->warp_image().data(),
-                         static_cast<u32>(s->warp_image().size()),
-                         s->warp_records().data(),
-                         static_cast<u32>(s->warp_records().size()),
-                         s->lanes_mut().data(),
-                         static_cast<u32>(s->lanes_mut().size()),
-                         all.data(),
-                         reps == 0 ? n : 0};
+            WarpJob j = {};
+            j.node = 0;
+            j.img = s->warp_image().data();
+            j.img_words = static_cast<u32>(s->warp_image().size());
+            j.recs = s->warp_records().data();
+            j.nrec = static_cast<u32>(s->warp_records().size());
+            j.lanes = s->lanes_mut().data();
+            j.nlanes = static_cast<u32>(s->lanes_mut().size());
+            j.wl = lanes;
+            j.send = all.data();
+            j.nsend = reps == 0 ? n : 0;
             if (!g.run(s->warp_consts().data(), static_cast<u32>(s->warp_consts().size()), &j, 1, &why))
                 break;
             const u32* img = s->warp_image().data();
@@ -407,12 +411,20 @@ bool resolve_budgets(Config& cfg, u32 threads, TextBuf* notes, TextBuf* err) {
         if (warps) {
             // Phase 8: warp.capacity, so a world whose every GPU unit runs warps
             // flat out keeps the GPU about this busy.
-            const u64 lanes = key_peek_u64(cfg, "warp.lanes");
+            // (Each node its own width, docs/inject-plan.md W1: measured at the
+            // range's middle width, a power of two.)
+            const u64 lo = key_peek_u64(cfg, "warp.lanes_min"), hi = key_peek_u64(cfg, "warp.lanes_max");
+            u32 lanes = 1, k = 0, nw = 0;
+            for (u64 w = lo; w != 0 && w <= hi && w <= kMaxLanes; w <<= 1)
+                ++nw;
+            for (u64 w = lo; w != 0 && w <= hi && w <= kMaxLanes; w <<= 1, ++k)
+                if (k == nw / 2)
+                    lanes = static_cast<u32>(w);
             double wrate = 0;
             const char* wdev = "";
             for (u32 i = 0; i < nd && wrate == 0; ++i) {
                 if (devs[i].gpu && devs[i].hardware) {
-                    wrate = warp_rate(i, static_cast<u32>(lanes < 1 ? 1 : (lanes > kMaxLanes ? kMaxLanes : lanes)));
+                    wrate = warp_rate(i, lanes);
                     wdev = devs[i].name;
                 }
             }

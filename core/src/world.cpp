@@ -669,6 +669,10 @@ void World::derive_node(u32 n, const Array<double>* z, bool first) {
     auto factor = [&](u32 f) { return z[f].size() ? 1.0 + vary_[f] * z[f][n] : 1.0; };
     SoupParams& p = node_params_[n];
     p = m;
+    // Its GPU's warp width (docs/inject-plan.md W1), the site's for every
+    // life: drawn from the world seed alone.
+    if (m.warps)
+        set_warp_lanes(&p, draw_warp_lanes(m, map_seed_, n));
     // A varied world (docs/world-plan.md W1, W2): the site's substrate, from
     // the fields at its site as they stand now (fields_at), and what each
     // level makes its resources' speeds.
@@ -1346,8 +1350,9 @@ void World::warp_open(Config& cfg) {
     warp_verify_ = key_u32(cfg, "warp.verify");
     warp_groups_ = key_u32(cfg, "warp.groups"); // the overlap plan: 1 or 2 node groups a round
     warp_grouped_ticks_ = 0;
-    // warp.kernel (docs/dxc-plan.md D3): DXC's kernel where it can run (32
-    // lanes, Shader Model 6.0), else FXC's; or FXC's always. The same words.
+    // warp.kernel (docs/dxc-plan.md D3): DXC's kernels where they can run
+    // (16 to 256 lanes, Shader Model 6.0), else FXC's; or FXC's always. The
+    // same words.
     const Str kern = key_choice(cfg, "warp.kernel");
     if (check_only_ || !soup_params_.warps || d.eq("cpu")) // (the check opens no device)
         return;
@@ -1366,9 +1371,13 @@ void World::warp_open(Config& cfg) {
     if (!kern.eq("dxctiers"))
         for (u32 k = 0; k < 4; ++k)
             kopt.lds[k] = 0;
+    // A kernel for every width a node may draw (docs/inject-plan.md W1, W3).
+    u32 widths = 0;
+    for (u32 w = soup_params_.warp_lanes_min; w != 0 && w <= soup_params_.warp_lanes_max; w <<= 1)
+        widths |= WarpGpu::width_bit(w);
     if (pick == kNone) {
         warp_notes_.append("no hardware GPU found: warps run on the CPU reference\n");
-    } else if (!warp_gpu_.open(pick, soup_params_.warp_lanes, &why, &warp_compile_ms_, &kopt)) {
+    } else if (!warp_gpu_.open(pick, widths, &why, &warp_compile_ms_, &kopt)) {
         warp_notes_.append("GPU ");
         warp_notes_.append(devs[pick].name);
         warp_notes_.append(" failed to start warps (");
@@ -1773,11 +1782,13 @@ void World::warp_second_task(void* ctx, u32 node) {
 }
 
 // set_warp_dump's file, little-endian 32-bit words: "NWRD" (0x4452574E), the
-// version (4: salvage stamps as a list per record, CW_STAMPED; 3: the block
-// index's pair count, and overlapping blocks indexed; 2: memory tiers' record
-// words, W3; 1 before), lanes a warp, the constants' count, the jobs' count, the
-// constants; then per job its node, image words, records and lanes (Lane
-// count), the image, the record offsets, each record's words, and the lanes.
+// version (5: a warp width per job and the record's WB_LANES, WB_STEP_COST,
+// docs/inject-plan.md W3; 4: salvage stamps as a list per record,
+// CW_STAMPED; 3: the block index's pair count, and overlapping blocks
+// indexed; 2: memory tiers' record words, W3; 1 before), 0 (was lanes a
+// warp), the constants' count, the jobs' count, the constants; then per job
+// its node, image words, records, lanes (Lane count) and lanes a warp, the
+// image, the record offsets, each record's words, and the lanes.
 bool World::warp_write_dump(const Array<u32>& cst) {
     FILE* f = fopen(warp_dump_path_, "wb");
     if (!f)
@@ -1786,15 +1797,14 @@ bool World::warp_write_dump(const Array<u32>& cst) {
     auto put = [&](const void* p, usize words) {
         ok = ok && (words == 0 || fwrite(p, 4, words, f) == words);
     };
-    const u32 head[5] = {0x4452574Eu, 4u, soup_params_.warp_lanes, static_cast<u32>(cst.size()),
-                         static_cast<u32>(warp_jobs_.size())};
+    const u32 head[5] = {0x4452574Eu, 5u, 0u, static_cast<u32>(cst.size()), static_cast<u32>(warp_jobs_.size())};
     put(head, 5);
     put(cst.data(), cst.size());
     Array<u32> words;
     for (usize i = 0; i < warp_jobs_.size(); ++i) {
         const WarpJob& j = warp_jobs_[i];
-        const u32 jh[4] = {j.node, j.img_words, j.nrec, j.nlanes};
-        put(jh, 4);
+        const u32 jh[5] = {j.node, j.img_words, j.nrec, j.nlanes, j.wl};
+        put(jh, 5);
         put(j.img, j.img_words);
         put(j.recs, j.nrec);
         words.resize(j.nrec);
@@ -1958,6 +1968,7 @@ bool World::warp_round0_groups(ThreadPool& pool, double* cpu_s, double* gpu_s, d
             j.img_words = static_cast<u32>(s.warp_image().size());
             j.lanes = s.lanes_mut().data();
             j.nlanes = static_cast<u32>(s.lanes_mut().size());
+            j.wl = s.lanes_per_warp(); // (its node's width: docs/inject-plan.md W1)
             j.send = warp_send_.data() + warp_node_osend_[n];
             j.nsend = warp_node_nsend_[n];
             j.recs = warp_job_recs_.data() + warp_node_orec_[n];
@@ -2261,6 +2272,7 @@ void World::warp_step(ThreadPool& pool, bool use_gpu) {
             j.img_words = static_cast<u32>(s.warp_image().size());
             j.lanes = s.lanes_mut().data();
             j.nlanes = static_cast<u32>(s.lanes_mut().size());
+            j.wl = s.lanes_per_warp(); // (its node's width: docs/inject-plan.md W1)
             j.send = warp_send_.data() + warp_node_osend_[n];
             j.nsend = warp_node_nsend_[n];
             j.recs = warp_job_recs_.data() + warp_node_orec_[n];

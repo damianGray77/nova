@@ -108,7 +108,7 @@ void test_gestation_warp() {
     for (u32 g = 0; g < 2; ++g) {
         LFix f;
         TextBuf extra;
-        extra.append("world.millicores = 1000\nworld.gpus = 64\ngpu.warps = true\nwarp.lanes = 4\n"
+        extra.append("world.millicores = 1000\nworld.gpus = 64\ngpu.warps = true\nwarp.lanes_min = 4\nwarp.lanes_max = 4\n"
                      "warp.step_cost = 1\nwarp.lane_cost = 0\nwarp.capacity = 50\n");
         if (g)
             extra.append("life.gestation = 5\n");
@@ -863,7 +863,7 @@ void test_sleep_modes() {
 void test_sleep_warp() {
     LFix f;
     CHECK(f.init("life.sleep = true\ndormant.sleep_max = 8\ndormant.mem_loss = 0\nworld.millicores = 1000\n"
-                 "world.gpus = 64\ngpu.warps = true\nwarp.lanes = 4\nwarp.step_cost = 1\nwarp.lane_cost = 0\n"
+                 "world.gpus = 64\ngpu.warps = true\nwarp.lanes_min = 4\nwarp.lanes_max = 4\nwarp.step_cost = 1\nwarp.lane_cost = 0\n"
                  "warp.capacity = 50\n"));
     // CX 4, ALLOC a reserve of 4; then BX 1 (ROTB: CX into BX) and CX 5.
     Array<u8> code;

@@ -320,8 +320,10 @@ warp.capacity	u64	256	1	100000000
 warp.device	str	auto	-	-
 warp.kernel	str	dxc	-	-
 warp.lane_cost	u64	1	0	1000000
-warp.lanes	u64	32	-	-
-warp.lanes	u64	32	1	64
+warp.lanes_min	u64	16	-	-
+warp.lanes_max	u64	1024	-	-
+warp.lanes_min	u64	16	1	1024
+warp.lanes_max	u64	1024	1	1024
 warp.max	u64	4	1	64
 warp.rounds	u64	1	1	64
 warp.step_cost	u64	16	0	1000000

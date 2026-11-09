@@ -390,7 +390,12 @@ NOVA_NUMBER("gpu.wear", 0, 0, 1, kKeyLog, "GPU", "GPU wear", "world.gpus",
             "The chance per held GPU unit per tick that it fails back to the pool.")
 NOVA_FLAG("gpu.warps", true, 0, "GPU", "Warps", "",
           "Warps: programs that run on the GPU in lockstep lanes.")
-NOVA_WHOLE("warp.lanes", 32, 1, 64, 0, "GPU", "Lanes", "gpu.warps", "Lanes per warp.")
+NOVA_WHOLE("warp.lanes_min", 16, 1, 1024, 0, "GPU", "Narrowest warps", "gpu.warps",
+           "Each node's GPU has its own warp width, a power of two drawn from the world seed between this and "
+           "warp.lanes_max, each width equally likely (docs/inject-plan.md W1). A power of two. A soup outside a "
+           "world runs this width.")
+NOVA_WHOLE("warp.lanes_max", 1024, 1, 1024, 0, "GPU", "Widest warps", "gpu.warps",
+           "... and this (a power of two, at least warp.lanes_min).")
 NOVA_WHOLE("warp.max", 4, 1, 64, 0, "GPU", "Most warps", "gpu.warps", "Warps a body may hold.")
 NOVA_WHOLE("warp.capacity", 256, 1, 100000000, 0, "GPU", "Warp capacity", "gpu.warps",
            "Warp work a GPU unit gives per tick at full speed (a timed cost table sets it).")

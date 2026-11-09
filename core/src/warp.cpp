@@ -118,11 +118,14 @@ bool cpu_avx2() {
 }
 const bool g_avx2 = cpu_avx2();
 
-u64 flaw_mask(u32 ks, u32 nl, u32 thr, u32 what) {
+// Lanes [l0, nl) of a step, at most 64 of them: bit i is lane l0 + i's.
+u64 flaw_mask(u32 ks, u32 l0, u32 nl, u32 thr, u32 what) {
     if (thr == 0)
         return 0; // (no draw is under 0)
+    if (nl > l0 + 64)
+        nl = l0 + 64;
     u64 m = 0;
-    u32 l = 0;
+    u32 l = l0;
     if (g_avx2) {
         const __m256i c1 = _mm256_set1_epi32(static_cast<int>(0x85EBCA6Bu));
         const __m256i base = _mm256_set1_epi32(static_cast<int>(ks ^ 0u));
@@ -131,7 +134,8 @@ u64 flaw_mask(u32 ks, u32 nl, u32 thr, u32 what) {
         const __m256i m2 = _mm256_set1_epi32(static_cast<int>(0x846CA68Bu));
         const __m256i sign = _mm256_set1_epi32(static_cast<int>(0x80000000u));
         const __m256i t = _mm256_xor_si256(_mm256_set1_epi32(static_cast<int>(thr)), sign);
-        __m256i lane = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+        __m256i lane = _mm256_add_epi32(_mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7),
+                                        _mm256_set1_epi32(static_cast<int>(l0)));
         const __m256i eight = _mm256_set1_epi32(8);
         for (; l + 8 <= nl; l += 8) {
             __m256i x = _mm256_xor_si256(base, _mm256_add_epi32(_mm256_mullo_epi32(lane, c1), wk));
@@ -142,14 +146,14 @@ u64 flaw_mask(u32 ks, u32 nl, u32 thr, u32 what) {
             x = _mm256_xor_si256(x, _mm256_srli_epi32(x, 16));
             // x < thr, unsigned: both with the sign bit flipped, signed
             const __m256i lt = _mm256_cmpgt_epi32(t, _mm256_xor_si256(x, sign));
-            m |= static_cast<u64>(static_cast<u32>(_mm256_movemask_ps(_mm256_castsi256_ps(lt)))) << l;
+            m |= static_cast<u64>(static_cast<u32>(_mm256_movemask_ps(_mm256_castsi256_ps(lt)))) << (l - l0);
             lane = _mm256_add_epi32(lane, eight);
         }
         _mm256_zeroupper();
     }
     for (; l < nl; ++l)
         if (flaw_mix(ks ^ (l * 0x85EBCA6Bu + what * 0xC2B2AE35u)) < thr)
-            m |= 1ull << l;
+            m |= 1ull << (l - l0);
     return m;
 }
 
@@ -160,7 +164,16 @@ struct WarpVM {
     Lane* g_lanes = nullptr;
     // "groupshared": one group at a time here
     u32 gs_min = 0, gs_count = 0;
-    u32 gs_wa[kMaxLanes] = {}, gs_wv[kMaxLanes] = {}, gs_ctl[12] = {};
+    // (Not cleared: a step's lanes set theirs before its write phase reads
+    // them. Cleared, 2 KB a record at 256 lanes.)
+    u32 gs_wa[kMaxLanes], gs_wv[kMaxLanes], gs_ctl[13] = {};
+    // w_write_phase's addresses written this step (docs/inject-plan.md W3):
+    // an open-addressing set, a slot taken when its generation is this step's.
+    // Its size is the first power of two at least twice the record's lanes
+    // (a record's warps are all its node's width), cleared on first use: most
+    // records never need it.
+    static constexpr u32 kWriteSet = 2 * kMaxLanes;
+    u32 g_wkey[kWriteSet], g_wgen[kWriteSet], g_wnow = 0, g_wsize = 0;
     u32 g_seen = 0; // the lane being run's template codons read and places searched (Phase 9c)
     u32 g_tseen = 0, g_tfast = 0; // memory tiers (W3): its search's time; its last template's fast codons
     // The step's shared work (warp_isa.inc, w_step_begin): found by the step's
@@ -208,8 +221,55 @@ struct WarpVM {
 #define STACK_SET(L, i, v) ((L).stack[(i)] = (v))
 #define WARP_LANE0(wr, wi) IMG((wr) + WW_LANE0)
 #define W_FAST_EXEC(b, l0, op, ip, mine, obid, nx, ks) w_fast_exec((b), (l0), (op), (ip), (mine), (obid), (nx), (ks))
+#define W_WRITE_PHASE(b, nl) w_write_phase((b), (nl))
 
 #include "warp_isa.inc"
+
+    // A step's write phase in one pass (the reference only: warp_isa.inc's
+    // W_WRITE_PHASE hook). When lanes write one codon the highest lane's
+    // value stays; the GPU's lanes find that by each looking at every higher
+    // lane, O(lanes^2) on one thread, so here the lanes go from the highest
+    // down and an address already written is skipped. The same stores, to
+    // distinct codons, so the order between them changes nothing. (Up to 32
+    // lanes the plain pass is as quick.)
+    void w_write_phase(uint b, uint nl) {
+        if (nl <= 32u) {
+            for (uint l = 0; l < nl; ++l) {
+                if (gs_wa[l] == W_NONE)
+                    continue;
+                bool last = true;
+                for (uint m = l + 1u; m < nl && last; ++m)
+                    last = gs_wa[m] != gs_wa[l];
+                if (last)
+                    w_store(b, gs_wa[l], gs_wv[l]);
+            }
+            return;
+        }
+        uint size = 64u;
+        while (size < 2u * nl)
+            size <<= 1;
+        if (size != g_wsize || ++g_wnow == 0) {
+            memset(g_wgen, 0, size * sizeof(u32));
+            g_wnow = 1;
+            g_wsize = size;
+        }
+        for (uint l = nl; l-- > 0;) {
+            const uint a = gs_wa[l];
+            if (a == W_NONE)
+                continue;
+            uint h = flaw_mix(a) & (size - 1u);
+            bool seen = false;
+            while (g_wgen[h] == g_wnow && !seen) {
+                seen = g_wkey[h] == a;
+                h = (h + 1u) & (size - 1u);
+            }
+            if (seen)
+                continue;
+            g_wgen[h] = g_wnow;
+            g_wkey[h] = a;
+            w_store(b, a, gs_wv[l]);
+        }
+    }
 
     // A step of a simple instruction as one loop over the lanes (the
     // reference only: warp_isa.inc's W_FAST_EXEC hook). These instructions
@@ -236,8 +296,10 @@ struct WarpVM {
         default:
             return false;
         }
-        const uint nl = CST(WC_LANES);
-        const u64 flaws = flaw_mask(ks, nl, IMG(b + WB_FLAW_THR), WD_FLAW);
+        const uint nl = IMG(b + WB_LANES);
+        u64 flaws[kMaxLanes / 64] = {}; // (64 lanes a word)
+        for (uint w = 0; w * 64u < nl; ++w)
+            flaws[w] = flaw_mask(ks, w * 64u, nl, IMG(b + WB_FLAW_THR), WD_FLAW);
         const bool fails = op == OP_INERT; // (w_exec's default: not a warp instruction)
         uint skip = W_NONE;               // an IF's: the address after the next instruction
         for (uint l = 0; l < nl; ++l) {
@@ -291,7 +353,7 @@ struct WarpVM {
                     skip = w_adv(b, nx, 1u);
                 next = skip;
             }
-            if ((flaws >> l) & 1u) { // an execution flaw: one register comes out off by one
+            if ((flaws[l >> 6] >> (l & 63u)) & 1u) { // an execution flaw: one register comes out off by one
                 const uint fd = w_draw_k(ks, l, WD_FLAW_KIND);
                 const uint fdelta = (fd & 1u) != 0u ? 1u : 0xFFFFFFFFu;
                 const uint freg = w_below(fd, 3u);
@@ -315,6 +377,7 @@ struct WarpVM {
     }
 
 #undef W_FAST_EXEC
+#undef W_WRITE_PHASE
 #undef WARP_LANE0
 #undef LANE_T
 #undef STACK_GET
@@ -440,7 +503,7 @@ NOVA_OP_IS(OP_COUNT, count);
 #undef NOVA_OP_IS
 static_assert(kSenseReadingsMax <= WB_OUT - WB_SENSE, "the record holds every SENSE reading");
 static_assert(WC_HEAD - WC_SENSE >= kSenseReadingsMax, "the constants hold SENSE's whole selector");
-static_assert(kMaxLanes <= 64, "lanes fit the groupshared arrays");
+static_assert(kMaxLanes <= 1024 && kMaxLanes % 64 == 0, "lanes fit the flaw masks and the write set");
 
 // A probability as a 32-bit threshold: an event when a uniform draw is below.
 u32 prob_threshold(double p) {
@@ -660,13 +723,11 @@ void Soup::build_warp_consts() {
         wcst_[WC_SENSE + i] = p_->sel.sense[i];
     wcst_[WC_HEAD + 0] = p_->sel.head[0];
     wcst_[WC_HEAD + 1] = p_->sel.head[1];
-    wcst_[WC_LANES] = p_->warp_lanes;
     wcst_[WC_STACK] = p_->stack_depth;
     wcst_[WC_SEARCH] = p_->search_limit;
     wcst_[WC_TEMPLATE] = p_->max_template;
     wcst_[WC_HALT] = p_->halt_after;
     wcst_[WC_SENSE_N] = p_->sel.sense_n;
-    wcst_[WC_STEP_COST] = p_->warp_step_cost;
     wcst_[WC_LANE_COST] = p_->warp_lane_cost;
     // Phase 9b: a step's time on a GPU lane, by its instruction (classic: none).
     static_assert(WC_SCAN - WC_OPTIME == kOpCount + 1, "the constants hold a time per Op and one for a fault");
@@ -1012,6 +1073,8 @@ bool Soup::warp_pack(u32 round) {
         I[rec + WB_LO] = lo;
         I[rec + WB_HI] = hi;
         I[rec + WB_SIZE] = p_->size;
+        I[rec + WB_LANES] = p_->warp_lanes; // this node's width (docs/inject-plan.md W1)
+        I[rec + WB_STEP_COST] = p_->warp_step_cost;
         I[rec + WB_KEY] = static_cast<u32>(z ^ (z >> 32));
         I[rec + WB_COPY_THR] = prob_threshold(p_->copy_rate * hazard_mult_ * gerr);
         I[rec + WB_FLAW_THR] = prob_threshold(p_->flaw_rate * hazard_mult_ * gerr);

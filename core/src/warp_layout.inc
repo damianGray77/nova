@@ -9,13 +9,13 @@
 #define WC_TABLE 0u       // 64 words: Op per codon
 #define WC_SENSE 64u      // 28 words: SENSE's selector, BX -> reading
 #define WC_HEAD 92u       // 2 words: SETH/GETH's selector, BX -> head (0 read, 1 write)
-#define WC_LANES 94u      // lanes per warp
+#define WC_FREE94 94u     // (free: the lanes a warp moved into the record, WB_LANES)
 #define WC_STACK 95u      // stack depth
 #define WC_SEARCH 96u     // template search limit, each way
 #define WC_TEMPLATE 97u   // longest template
 #define WC_HALT 98u       // consecutive errors that halt a lane
 #define WC_SENSE_N 99u    // SENSE's readings
-#define WC_STEP_COST 100u // work per step
+#define WC_FREE100 100u   // (free: the work a step costs moved into the record, WB_STEP_COST)
 #define WC_LANE_COST 101u // work per lane in a step
 #define WC_OPTIME 102u    // 96 words (Phase 9b): a step's time by its Op, then for a lane that
                           // can't run the code (all 0: no clock)
@@ -56,7 +56,11 @@
 #define WB_TLOAD 47u      // 2 words: fast, slow
 #define WB_TSTORE 49u     // 2 words
 #define WB_TSCAN 51u      // 2 words
-#define WB_WARPS 53u      // per warp, WW_SIZE words
+// Warp widths by node (docs/inject-plan.md W1-W3): the record's node's lanes a
+// warp, and the work a step costs there (with a timed table, lanes x a lane-op).
+#define WB_LANES 53u
+#define WB_STEP_COST 54u
+#define WB_WARPS 55u      // per warp, WW_SIZE words
 #define WW_LANE0 0u       // its first lane in LANES
 #define WW_QUOTA 1u       // work it may do
 #define WW_INDEX 2u       // its place in the body's list (its key)

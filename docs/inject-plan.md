@@ -1,6 +1,6 @@
 # Plan: INJECT moves the program; swallowed prey are digested; warp widths by node
 
-> **Approved by Damian, 2026-11-09** ("Approved", after the points below were settled in conversation). M and S are built (`docs/design.md` 6.27, with the calls made while building); W is not built yet. Points marked *(Claude's call)* were filled in while writing this up; say if any should change.
+> **Approved by Damian, 2026-11-09** ("Approved", after the points below were settled in conversation). M and S are built (`docs/design.md` 6.27, with the calls made while building); W is built (6.28), with its ceiling raised to 1,024 lanes (Damian, while building). Points marked *(Claude's call)* were filled in while writing this up; say if any should change.
 >
 > Decided in conversation (Damian):
 > - **INJECT inserts the program, not a copy** (M1). "It should bring everything over, including machinery. The parasite is still a living functioning entity within the host program, so the old program should not die."
@@ -89,7 +89,7 @@
 
 ## 3. Warp widths by node (W)
 
-**W1. Widths** (Damian: 16 to 256). Each node's GPUs have their own warp width, drawn from the world seed like the node's other properties (`derive_node`):
+**W1. Widths** (Damian: 16 to 256; later "bump it up to 1024", then "Set the default range to the full range, 16 to 1024"). Each node's GPUs have their own warp width, drawn from the world seed like the node's other properties (`derive_node`):
 - a power of two from `warp.lanes_min` (16) to `warp.lanes_max` (256), each width equally likely *(Claude's call: powers of two, as real hardware has)*;
 - `warp.lanes` goes;
 - `nodes.csv` and the viewer show each node's width.

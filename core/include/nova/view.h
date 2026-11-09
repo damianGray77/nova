@@ -138,6 +138,7 @@ struct NodeView {
     // that time, and its cores offline now.
     float symptoms;
     u32 struck, cores_offline;
+    u32 warp_lanes; // its GPU's warp width (docs/inject-plan.md W1; 0: unknown, or no warps)
 };
 
 // A landmass with nodes on it (Phase 7): where to label it, and how many.
@@ -626,7 +627,7 @@ class RunArchive {
     Array<GenomeEntry> saves_;
     Array<char> save_text_;
     // nodes.csv's later columns, by name (W8, X7): which the file has
-    bool has_sub_ = false, has_occ_ = false, has_dis_ = false;
+    bool has_sub_ = false, has_occ_ = false, has_dis_ = false, has_wl_ = false;
     double sub_floor_ = 0.1; // the run's substrate.floor, for the levels
     // A2 and A5
     int want_life_ = -1, want_novelty_ = -1;

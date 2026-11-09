@@ -1045,7 +1045,7 @@ The plan and its calls C1–C14 are in `docs/phase8-plan.md`. Damian's direction
 
 **Off unless `gpu.warps = true`.** With it off nothing changes: every existing test and pinned hash is as before.
 
-**1. Warps (C1–C3).** A warp runs its body's code on `warp.lanes` lanes (default 32, up to 64), each a full CPU state.
+**1. Warps (C1–C3).** A warp runs its body's code on `warp.lanes` lanes (default 32, up to 64), each a full CPU state. *(Since 6.28 each node has its own width, 16 to 1,024 lanes.)*
 - *Lockstep:* each step runs the instruction at the lowest IP among the lanes still running, for every lane at that IP. Lanes that branch apart take turns, and lanes that reach the same address again merge.
 - *Offset heads:* lane L's heads sit L codons past the warp's. COPY, READ and WRITE move a head on by the lane count, inside the block that holds it (wrapping at its end), or along the soup outside the body's blocks. SETH puts lane L's head L past AX; GETH reads it back L before.
 - *SENSE 20 and 21:* my lane, and the lanes in my warp. A CPU reads lane 0 of 1.
@@ -2015,6 +2015,52 @@ establish. The roles test clusters from k = 5: the few, extreme predator
 and parasite samples would otherwise win the silhouette at k = 3. The
 bud-and-inject replicator no longer replicates at all (its buds are too
 small to take it).
+
+### 6.28 Warp widths by node [built 2026-11-09]
+
+Built from `docs/inject-plan.md` W, approved by Damian ("16-256 is a good
+range"), its ceiling raised to 1,024 lanes while building ("256 still feels
+like kicking the can down the road"), and the default range then made the
+full one (Damian: "Set the default range to the full range, 16 to 1024").
+Supersedes 6.14's one `warp.lanes`.
+
+**Each node its own width.** A node's GPU runs warps of a power of two
+lanes, drawn from the world seed when the world is made, the site's for
+every life: between `warp.lanes_min` (16) and `warp.lanes_max` (1,024),
+each of the seven widths equally likely. 1,024 is the ceiling: D3D12's
+most threads in a group, one a lane (the CPU reference could go further).
+A soup outside a world runs `warp.lanes_min`. A lane is 116 bytes, so at
+the full range a warp averages about 290 lanes, 33 KB, and a world of
+100,000 warps holds some 3.4 GB of lanes (twice that on the GPU, whose
+rooms double as they grow). `nodes.csv` gains `warp_lanes`, and the viewer's node
+panel says it. SENSE 21 reads the width, and a warp dispersing to another
+node is rebuilt at its width there, as before.
+
+**Costs.** As before, at the node's width: with a timed table a step costs
+width x a GPU lane-op (a step fills the warp's whole width whatever lanes
+run); with the classic table `step_cost + lane_cost x lanes`. A COPY on a
+1,024-lane warp copies 1,024 codons in a step, and that step costs 32 times
+a 32-lane one.
+
+**How it runs.** The width and the step's cost travel in each body's
+record (`WB_LANES`, `WB_STEP_COST`) instead of the shared constants, so one
+round's constants still serve every node. The GPU has a kernel for each
+width (16 to 1,024 lanes, one thread a lane, one group a body: D3D12's
+1,024 threads a group is the ceiling for this design), each with its
+groupshared tiers, all compiled by DXC at build time (FXC's at run time
+where DXC's can't run). A round dispatches each width's records on its own
+kernel. The lane heap keeps each node's lanes at its own width; the lane
+kernel moves each warp's own lanes, and the gather gives each waiting warp
+room for its own lanes only. The CPU reference runs any width: its flaw
+draws come 64 lanes at a time, and its write phase finds the highest
+writer of each codon in one pass instead of comparing every pair of lanes.
+Every width on the GPU is checked word for word against the reference
+(suite warp: a world with all seven widths, on the GPU and split between
+the GPU and the CPU, every round verified, the same world as the
+reference's).
+
+**Groupshared room.** A 1,024-lane group needs 2 words a lane of its own,
+so a groupshared tier is at most 5,632 words (was 7,680).
 
 ## 7. Technical direction [decided via 7.1]
 

@@ -658,7 +658,8 @@ void test_nodes_file() {
     const char* tail = ",life,born,sub_p_cores,sub_e_cores,sub_gpu,sub_npu,sub_mem_fast,sub_mem_slow,sub_disk_fast,"
                        "sub_disk_slow,occupancy,"
                        "symptom_ticks,struck,cores_offline," // (then the disasters', docs/disasters-plan.md X7)
-                       "sleeps,drifts\n";                     // (and docs/bites-plan.md section 7's)
+                       "sleeps,drifts,"                       // (and docs/bites-plan.md section 7's)
+                       "warp_lanes\n";                        // (and docs/inject-plan.md W1's)
     const char* nl = strchr(text, '\n');
     CHECK(nl != nullptr && strstr(text, tail) == nl + 1 - strlen(tail));
     // The last window's row for node 5 (the rows go window by window, node by
@@ -670,16 +671,16 @@ void test_nodes_file() {
             lines.push(p);
     CHECK(lines.size() == 1 + 2 * w.node_count());
     const char* row = lines[lines.size() - w.node_count() + 5];
-    double v[44] = {};
+    double v[45] = {};
     u32 col = 0;
-    for (const char* p = row; *p && *p != '\n' && col < 44; ++col) {
+    for (const char* p = row; *p && *p != '\n' && col < 45; ++col) {
         const char* e = p;
         while (*e && *e != ',' && *e != '\n')
             ++e;
         parse_f64(Str(p, static_cast<usize>(e - p)), &v[col]);
         p = *e == ',' ? e + 1 : e;
     }
-    bool ok = col == 43 && v[2] == 5;
+    bool ok = col == 44 && v[2] == 5 && v[43] == w.node_params(5).warp_lanes; // (the last: its warp width)
     for (u32 t = 0; t < kSubstrateTypes; ++t)
         ok = ok && fabs(v[29 + t] - w.substrate_mult(5, t)) < 1e-9;
     ok = ok && fabs(v[37] - w.node_soup(5).occupancy()) < 1e-6;

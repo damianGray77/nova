@@ -341,7 +341,9 @@ bool StatsCsv::open_nodes(const char* path, u32 every) {
                  // the disasters' (docs/disasters-plan.md X7, X10)
                  "symptom_ticks,struck,cores_offline,"
                  // bites as wounds (docs/bites-plan.md section 7): voluntary sleeps begun, dormant programs leaving
-                 "sleeps,drifts\n");
+                 "sleeps,drifts,"
+                 // the node's GPU's warp width (docs/inject-plan.md W1)
+                 "warp_lanes\n");
     node_sum_.clear();
     return true;
 }
@@ -485,6 +487,7 @@ void StatsCsv::write_node_rows(const World& w) {
         u(s.offline_count());
         u(sum ? sum[7] : 0); // docs/bites-plan.md: voluntary sleeps, dormant departures
         u(sum ? sum[8] : 0);
+        u(p.warp_lanes); // docs/inject-plan.md W1
         row.append_char('\n');
         nodes_.write(row.view());
     }

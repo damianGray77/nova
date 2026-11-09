@@ -30,7 +30,7 @@
 //                        the lane's stack in memory, since a local array
 //                        indexed at run time can't live in a barrier loop)
 //   GS_MIN(x, v) / GS_ADD(x, v) / GS_MAX(x, v) groupshared atomics on gs_min, gs_count, gs_ctl
-//   gs_min, gs_count, gs_wa[], gs_wv[], gs_ctl[12]  groupshared words
+//   gs_min, gs_count, gs_wa[], gs_wv[], gs_ctl[13]  groupshared words
 //   g_seen, g_tseen, g_tfast  the lane being run's search counts (thread-private:
 //                        Phase 9c; g_tseen and g_tfast for the memory tiers, W3)
 //   W_LOOP               [loop] (HLSL) / nothing
@@ -681,7 +681,7 @@ bool w_host_op(uint op) {
 // the address after the instruction on entry and where the lane goes on exit.
 bool w_exec(uint b, INOUT(LANE_T) L, uint lane, uint op, uint ip, uint key, uint step, INOUT(uint) next,
             INOUT(uint) wto, INOUT(uint) wval) {
-    uint lanes = CST(WC_LANES);
+    uint lanes = IMG(b + WB_LANES);
     uint size = IMG(b + WB_SIZE);
     bool ok = true;
     uint t0 = 0u;
@@ -1104,7 +1104,7 @@ void w_run_warp(uint b, uint wi) {
     uint tsearch = 0u;
     uint key = w_mix(IMG(b + WB_KEY) ^ (IMG(wr + WW_INDEX) * 0x27D4EB2Fu));
     uint step = IMG(wr + WW_STEP0);
-    uint nl = CST(WC_LANES);
+    uint nl = IMG(b + WB_LANES);
     uint used = 0u;
     uint steps = 0u;
     uint lins = 0u;
@@ -1118,6 +1118,7 @@ void w_run_warp(uint b, uint wi) {
     uint g = 0u;
     uint fast = 0u; // memory tiers (W3): the record's WB_FAST, 0 = one tier, every step as before
     uint tmem = 0u; // ... 1: this step's time is its lanes' memory traffic
+    uint stepc = 0u; // the work a step costs on the record's node (W2)
     bool mine = false;
 #if defined(W_FAST_EXEC)
     bool fast_done = false; // (C++: this step ran as w_fast_exec's one loop)
@@ -1131,11 +1132,13 @@ void w_run_warp(uint b, uint wi) {
         gs_ctl[0] = IMG(wr + WW_QUOTA);
         gs_ctl[7] = IMG(wr + WW_TLEFT);
         gs_ctl[11] = IMG(b + WB_FAST);
+        gs_ctl[12] = IMG(b + WB_STEP_COST); // (the node's: docs/inject-plan.md W2)
     ONCE_END
     SYNC
     quota = gs_ctl[0];
     tleft = gs_ctl[7];
     fast = gs_ctl[11];
+    stepc = gs_ctl[12];
     LANES_LOAD(lane0)
     LANE_BEGIN(lane0)
         if (step == 0u)
@@ -1297,6 +1300,11 @@ void w_run_warp(uint b, uint wi) {
 #if defined(W_FAST_EXEC)
         if (!fast_done) {
 #endif
+#if defined(W_WRITE_PHASE)
+        // (C++ only: the same stores in one pass over the lanes, warp.cpp's
+        // w_write_phase: the loop below is O(lanes^2) on one thread.)
+        W_WRITE_PHASE(b, nl);
+#else
         LANE_BEGIN(lane0)
             if (gs_wa[l] != W_NONE) {
                 bool last = true;
@@ -1309,6 +1317,7 @@ void w_run_warp(uint b, uint wi) {
                     w_store(b, gs_wa[l], gs_wv[l]);
             }
         LANE_END
+#endif
 #if defined(W_FAST_EXEC)
         }
 #endif
@@ -1322,7 +1331,7 @@ void w_run_warp(uint b, uint wi) {
             tused = w_sat_add(tused, tsearch); // W3: already a time, at each codon's tier
         else
             tused += tsearch * CST(WC_SCAN);
-        used += CST(WC_STEP_COST) + CST(WC_LANE_COST) * g;
+        used += stepc + CST(WC_LANE_COST) * g;
         steps++;
         lins += g;
         step++;

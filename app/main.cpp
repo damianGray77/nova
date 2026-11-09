@@ -978,7 +978,11 @@ int cmd_run(const Args& a) {
     }
     usize warp_notes_shown = 0;
     if (w.warps()) { // Phase 8
-        printf("nova: warps of %u lanes on %s", w.soup_params().warp_lanes, w.warp_device_name());
+        if (w.soup_params().warp_lanes_min == w.soup_params().warp_lanes_max)
+            printf("nova: warps of %u lanes on %s", w.soup_params().warp_lanes_min, w.warp_device_name());
+        else // (docs/inject-plan.md W1: each node its own width)
+            printf("nova: warps of %u to %u lanes on %s", w.soup_params().warp_lanes_min, w.soup_params().warp_lanes_max,
+                   w.warp_device_name());
         if (w.warp_compile_ms() > 100)
             printf(" (kernel compiled in %.1f s)", w.warp_compile_ms() / 1000.0);
         printf("\n");

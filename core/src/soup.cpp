@@ -159,6 +159,24 @@ bool genome_from_names(const CodonTable& t, Str names, Array<u8>* out, TextBuf* 
     return true;
 }
 
+void set_warp_lanes(SoupParams* p, u32 lanes) {
+    p->warp_lanes = lanes;
+    if (p->cost.timed) {
+        const double v = static_cast<double>(lanes) * static_cast<double>(p->cost.gpu_thr);
+        p->warp_step_cost = v < 1 ? 1u : (v > 4e9 ? 4000000000u : static_cast<u32>(v));
+    }
+}
+
+u32 draw_warp_lanes(const SoupParams& p, u64 seed, u32 node) {
+    u32 widths = 0; // how many powers of two from min to max
+    for (u32 w = p.warp_lanes_min; w != 0 && w <= p.warp_lanes_max; w <<= 1)
+        ++widths;
+    if (widths <= 1)
+        return p.warp_lanes_min;
+    Rng r(seed ^ 0x7761727077696474ull, node, 0); // "warpwidt": its own stream
+    return p.warp_lanes_min << static_cast<u32>(r.below(widths));
+}
+
 bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     p->size = soup_size;
     p->millicores = key_u32(cfg, "world.millicores");
@@ -283,7 +301,18 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
 
     // Warps (Phase 8, design.md 6.14): off = everything exactly as Phase 7.
     p->warps = key_flag(cfg, "gpu.warps");
-    p->warp_lanes = key_u32(cfg, "warp.lanes"); // (at most kMaxLanes)
+    // docs/inject-plan.md W1: each node's width is drawn between these
+    // (World::derive_node); a soup outside a world runs the narrowest.
+    p->warp_lanes_min = key_u32(cfg, "warp.lanes_min");
+    p->warp_lanes_max = key_u32(cfg, "warp.lanes_max");
+    auto pow2 = [](u32 v) { return v != 0 && (v & (v - 1)) == 0; };
+    if (!pow2(p->warp_lanes_min))
+        cfg.fail("warp.lanes_min", "warp widths are powers of two");
+    if (!pow2(p->warp_lanes_max))
+        cfg.fail("warp.lanes_max", "warp widths are powers of two");
+    if (p->warp_lanes_max < p->warp_lanes_min)
+        cfg.fail("warp.lanes_max", "warp.lanes_max is below warp.lanes_min");
+    p->warp_lanes = p->warp_lanes_min; // (at most kMaxLanes)
     p->warp_max = key_u32(cfg, "warp.max");
     p->warp_capacity = key_u32(cfg, "warp.capacity");
     p->warp_step_cost = key_u32(cfg, "warp.step_cost");
@@ -303,8 +332,8 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
         const double tick = p->tick_units;
         auto clamp = [](double v) { return v < 1 ? 1u : (v > 4e9 ? 4000000000u : static_cast<u32>(v)); };
         p->warp_capacity = clamp(tick);
-        p->warp_step_cost = clamp(static_cast<double>(p->warp_lanes) * static_cast<double>(p->cost.gpu_thr));
         p->warp_lane_cost = 0;
+        set_warp_lanes(p, p->warp_lanes); // (its step cost)
         p->gpu_elements = clamp(tick / static_cast<double>(p->cost.gpu_thr));
         p->npu_macs = clamp(tick / (static_cast<double>(p->cost.npu_mac) * 1000.0));
     }

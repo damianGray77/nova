@@ -123,7 +123,7 @@ groupshared uint gs_min;
 groupshared uint gs_count;
 groupshared uint gs_wa[W_LANES];
 groupshared uint gs_wv[W_LANES];
-groupshared uint gs_ctl[12];
+groupshared uint gs_ctl[13];
 
 #include "warp_layout.inc"
 #include "warp_isa.inc"

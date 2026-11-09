@@ -413,7 +413,7 @@ void test_warp_device() {
         TextBuf err;
         WarpKernelOptions kopt;
         kopt.fxc = kind == 1;
-        CHECK(gpu.open(dev, 32, &err, nullptr, &kopt));
+        CHECK(gpu.open(dev, WarpGpu::width_bit(32), &err, nullptr, &kopt));
         if (!gpu.is_open()) {
             printf("  memtiers: GPU open failed: %s\n", err.c_str());
             return;
@@ -442,6 +442,7 @@ void test_warp_device() {
             j.nrec = static_cast<u32>(g.s.warp_records().size());
             j.lanes = g.s.lanes_mut().data();
             j.nlanes = static_cast<u32>(g.s.lanes_mut().size());
+            j.wl = g.s.lanes_per_warp();
             j.send = send.data();
             j.nsend = static_cast<u32>(send.size());
             CHECK(gpu.run(g.s.warp_consts().data(), static_cast<u32>(g.s.warp_consts().size()), &j, 1, &err));

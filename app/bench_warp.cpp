@@ -34,9 +34,9 @@ constexpr u32 kLdsWords = 2048; // accel_dx.cpp's kWarpLdsWords: larger records 
 // The dumped round, flat: per job its node and where its image, records and
 // lanes start in the shared arrays.
 struct Dump {
-    u32 lanes = 0; // a warp's
+    u32 widths = 0; // the jobs' warp widths (WarpGpu::open's bits)
     Array<u32> cst;
-    Array<u32> node, nimg, nrec, nlane;
+    Array<u32> node, nimg, nrec, nlane, wl; // (wl: a job's lanes a warp, its node's width)
     Array<u64> oimg, orec, olane;
     Array<u32> img, recs, words;
     Array<Lane> lane;
@@ -54,25 +54,26 @@ bool load_dump(const char* path, Dump* d, TextBuf* err) {
         return false;
     }
     u32 head[5] = {};
-    // (version 4: salvage stamps as a list per record; earlier dumps' records are laid out otherwise)
-    bool ok = read_words(f, head, 5) && head[0] == 0x4452574Eu && head[1] == 4u && head[2] >= 1 && head[2] <= kMaxLanes;
+    // (version 5: a warp width per job, docs/inject-plan.md W3; earlier dumps' records are laid out otherwise)
+    bool ok = read_words(f, head, 5) && head[0] == 0x4452574Eu && head[1] == 5u;
     if (!ok) {
         fclose(f);
-        err->append("not a warp round dump (version 4: dump the round again)");
+        err->append("not a warp round dump (version 5: dump the round again)");
         return false;
     }
-    d->lanes = head[2];
     d->cst.resize(head[3]);
     ok = read_words(f, d->cst.data(), head[3]);
     for (u32 j = 0; ok && j < head[4]; ++j) {
-        u32 jh[4] = {};
-        ok = read_words(f, jh, 4);
+        u32 jh[5] = {};
+        ok = read_words(f, jh, 5) && jh[4] >= 1 && jh[4] <= kMaxLanes && (jh[4] & (jh[4] - 1)) == 0;
         if (!ok)
             break;
         d->node.push(jh[0]);
         d->nimg.push(jh[1]);
         d->nrec.push(jh[2]);
         d->nlane.push(jh[3]);
+        d->wl.push(jh[4]);
+        d->widths |= WarpGpu::width_bit(jh[4]);
         d->oimg.push(d->img.size());
         d->orec.push(d->recs.size());
         d->olane.push(d->lane.size());
@@ -147,7 +148,7 @@ void build_pick(const Dump& d, const Array<u64>& chain, Pick* p, u32* gpu_img) {
             p->words.push(d.words[k]);
             p->chains.push(chain[k] < 0xFFFFFFFFull ? static_cast<u32>(chain[k]) : 0xFFFFFFFFu);
             for (u32 i = 0; i < I[d.recs[k] + WB_NWARP]; ++i)
-                p->send.push(I[d.recs[k] + WB_WARPS + i * WW_SIZE + WW_LANE0] / d.lanes);
+                p->send.push(I[d.recs[k] + WB_WARPS + i * WW_SIZE + WW_LANE0] / d.wl[j]);
             p->steps += chain[k];
             p->longest = chain[k] > p->longest ? chain[k] : p->longest;
             ++p->nrec;
@@ -172,6 +173,7 @@ void build_pick(const Dump& d, const Array<u64>& chain, Pick* p, u32* gpu_img) {
         w.nrec = static_cast<u32>(r1 - r0);
         w.lanes = d.lane.data() + d.olane[j];
         w.nlanes = d.nlane[j];
+        w.wl = d.wl[j];
         w.send = p->send.data() + s0;
         w.nsend = static_cast<u32>(s1 - s0);
         p->jobs.push(w);
@@ -286,9 +288,14 @@ int cmd_bench_warp(int argc, char** argv) {
     ThreadPool pool;
     pool.start(static_cast<u32>(threads));
     const usize nrec = d.recs.size();
-    printf("nova bench warp: %s: %u jobs, %llu records, %.1f MB of image, %llu lanes (%u a warp)\n", path,
+    u32 wmin = kMaxLanes, wmax = 1;
+    for (usize j = 0; j < d.jobs(); ++j) {
+        wmin = d.wl[j] < wmin ? d.wl[j] : wmin;
+        wmax = d.wl[j] > wmax ? d.wl[j] : wmax;
+    }
+    printf("nova bench warp: %s: %u jobs, %llu records, %.1f MB of image, %llu lanes (%u to %u a warp)\n", path,
            static_cast<u32>(d.jobs()), static_cast<unsigned long long>(nrec), d.img.size() * 4.0 / 1048576.0,
-           static_cast<unsigned long long>(d.lane.size()), d.lanes);
+           static_cast<unsigned long long>(d.lane.size()), d.jobs() ? wmin : 0, d.jobs() ? wmax : 0);
 
     // The reference, on copies.
     Array<u32> ref_img;
@@ -449,7 +456,7 @@ int cmd_bench_warp(int argc, char** argv) {
         }
         for (u32 v = 0; v < nvar; ++v) {
             double cms = 0;
-            if (!gpus[v].open(pick, d.lanes, &err, &cms, &vars[v].opt)) {
+            if (!gpus[v].open(pick, d.widths, &err, &cms, &vars[v].opt)) {
                 fprintf(stderr, "nova bench warp: %s: %s\n", vars[v].name, err.c_str());
                 return 1;
             }
@@ -511,8 +518,8 @@ int cmd_bench_warp(int argc, char** argv) {
                 const u32* I = d.img.data() + d.oimg[j];
                 const u32 rec = d.recs[d.orec[j] + r];
                 for (u32 i = 0; i < I[rec + WB_NWARP]; ++i) {
-                    const u32 slot = I[rec + WB_WARPS + i * WW_SIZE + WW_LANE0] / d.lanes;
-                    fl.push(WarpFetch{d.node[j], slot, gpu_lane.data() + d.olane[j] + static_cast<usize>(slot) * d.lanes});
+                    const u32 slot = I[rec + WB_WARPS + i * WW_SIZE + WW_LANE0] / d.wl[j];
+                    fl.push(WarpFetch{d.node[j], slot, gpu_lane.data() + d.olane[j] + static_cast<usize>(slot) * d.wl[j]});
                 }
             }
         if (!gpu.fetch(fl.data(), static_cast<u32>(fl.size()), &err)) {

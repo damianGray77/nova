@@ -42,7 +42,9 @@ struct WFix {
             cfg.append("warp.step_cost = 1\n");
         if (!strstr(extra, "warp.lane_cost"))
             cfg.append("warp.lane_cost = 0\n");
-        cfg.append("warp.lanes = ");
+        cfg.append("warp.lanes_min = ");
+        cfg.append_u64(lanes);
+        cfg.append("\nwarp.lanes_max = ");
         cfg.append_u64(lanes);
         cfg.append("\nwarp.capacity = ");
         cfg.append_u64(steps);
@@ -202,7 +204,7 @@ void test_block_ops_fail() {
 void test_launch() {
     TextBuf cfg;
     cfg.append(kQuiet);
-    cfg.append("world.millicores = 1000\nworld.gpus = 64\ngpu.warps = true\nwarp.lanes = 4\nwarp.max = 2\n");
+    cfg.append("world.millicores = 1000\nworld.gpus = 64\ngpu.warps = true\nwarp.lanes_min = 4\nwarp.lanes_max = 4\nwarp.max = 2\n");
     SoupParams p;
     CHECK(make_params(&p, cfg.c_str(), 1024));
     Soup s;
@@ -324,7 +326,7 @@ void test_costs() {
 void test_engulf_takes_warps() {
     TextBuf cfg;
     cfg.append(kQuiet);
-    cfg.append("world.millicores = 1000\nworld.gpus = 64\ngpu.warps = true\nwarp.lanes = 2\n");
+    cfg.append("world.millicores = 1000\nworld.gpus = 64\ngpu.warps = true\nwarp.lanes_min = 2\nwarp.lanes_max = 2\n");
     SoupParams p;
     CHECK(make_params(&p, cfg.c_str(), 1024));
     Soup s;
@@ -491,6 +493,96 @@ void test_determinism() {
     CHECK_EQ_U64(b.world().hash(), hashes[0]);
 }
 
+// Warp widths by node (docs/inject-plan.md W1-W3; Damian: up to 1,024): the
+// busy world with every node drawing its width from 16 to 1,024 lanes. The
+// widths are the world seed's, powers of two, several of them; the world is
+// the same at 1 and 20 threads and through a snapshot; and on the real GPU,
+// each width on its own kernel, every round checked against the reference,
+// the same world again (warp.device = mixed too, lanes crossing both ways).
+void test_mixed_widths() {
+    TextBuf base;
+    base.append(busy_warp_world());
+    base.append("warp.lanes_min = 16\nwarp.lanes_max = 1024\n");
+    const u64 ticks = 80;
+    u64 want = 0;
+    u32 seen = 0; // widths seen, a bit each
+    {
+        TextBuf cfg;
+        cfg.append(base.view());
+        cfg.append("warp.device = cpu\n");
+        Run run;
+        CHECK(make_run(run, cfg.c_str(), 4));
+        const World& w = run.world();
+        bool pow2 = true;
+        for (u32 n = 0; n < w.node_count(); ++n) {
+            const u32 l = w.node_soup(n).lanes_per_warp();
+            pow2 = pow2 && l >= 16 && l <= 1024 && (l & (l - 1)) == 0;
+            seen |= l;
+        }
+        u32 kinds = 0;
+        for (u32 b = seen; b; b &= b - 1)
+            ++kinds;
+        CHECK(pow2 && kinds >= 4);
+        run.run_until(ticks);
+        want = run.world().hash();
+        u64 warps = 0;
+        for (u32 n = 0; n < w.node_count(); ++n)
+            warps += w.node_soup(n).warps_alive();
+        CHECK(warps > 0);
+        printf("  mixed widths: 16 nodes, %u widths from 16 to 1,024 lanes; %llu ticks, %llu warps live, hash %016llx\n",
+               kinds, static_cast<unsigned long long>(ticks), static_cast<unsigned long long>(warps),
+               static_cast<unsigned long long>(want));
+    }
+    {
+        TextBuf cfg;
+        cfg.append(base.view());
+        cfg.append("warp.device = cpu\n");
+        Run one, many;
+        CHECK(make_run(one, cfg.c_str(), 1) && make_run(many, cfg.c_str(), 20));
+        one.run_until(ticks / 2);
+        ByteWriter snap;
+        one.snapshot(snap);
+        one.run_until(ticks);
+        many.run_until(ticks);
+        CHECK_EQ_U64(one.world().hash(), want);
+        CHECK_EQ_U64(many.world().hash(), want);
+        Run back;
+        TextBuf err;
+        CHECK(back.init_from_snapshot(snap.data(), snap.size(), 4, &err));
+        back.run_until(ticks);
+        CHECK_EQ_U64(back.world().hash(), want);
+    }
+    AccelDevice devs[16];
+    const u32 nd = accel_list(devs, 16);
+    bool gpu = false;
+    for (u32 i = 0; i < nd; ++i)
+        gpu = gpu || (devs[i].gpu && devs[i].hardware);
+    if (!gpu) {
+        printf("  mixed widths: no hardware GPU, the GPU's runs skipped\n");
+        return;
+    }
+    const char* const devices[2] = {"gpu", "mixed"};
+    for (u32 d = 0; d < 2; ++d) {
+        TextBuf cfg;
+        cfg.append(base.view());
+        cfg.append("warp.device = ");
+        cfg.append(devices[d]);
+        cfg.append("\nwarp.verify = 1\n");
+        Run run;
+        CHECK(make_run(run, cfg.c_str(), d == 0 ? 4 : 20));
+        run.run_until(ticks);
+        const World& w = run.world();
+        printf("  mixed widths, warp.device = %s: %llu rounds on the GPU, %llu verified, %llu differed (%s)\n",
+               devices[d], static_cast<unsigned long long>(w.warp_gpu_rounds()),
+               static_cast<unsigned long long>(w.warp_verified()), static_cast<unsigned long long>(w.warp_mismatches()),
+               w.warp_kernel());
+        if (w.warp_notes().n && w.warp_gpu_rounds() == 0)
+            printf("  warp notes: %.*s", static_cast<int>(w.warp_notes().n), w.warp_notes().p);
+        CHECK(w.warp_gpu_rounds() > 0 && w.warp_verified() == w.warp_gpu_rounds() && w.warp_mismatches() == 0);
+        CHECK_EQ_U64(w.hash(), want);
+    }
+}
+
 // The real GPU (8b): the busy world with warps on the device gives the
 // reference's hash; with warp.verify = 1 every round is also run on the
 // reference and compared, word for word.
@@ -634,7 +726,7 @@ void test_gpu_div_loop() {
         TextBuf err;
         WarpKernelOptions kopt;
         kopt.fxc = kind == 1;
-        CHECK(gpu.open(dev, 32, &err, nullptr, &kopt));
+        CHECK(gpu.open(dev, WarpGpu::width_bit(32), &err, nullptr, &kopt));
         if (!gpu.is_open())
             return;
         const char* prog = "DIV INC ROT NOP1 IFZ NOP0 DIV SWAP";
@@ -667,6 +759,7 @@ void test_gpu_div_loop() {
             j.nrec = static_cast<u32>(g.s.warp_records().size());
             j.lanes = g.s.lanes_mut().data();
             j.nlanes = static_cast<u32>(g.s.lanes_mut().size());
+            j.wl = g.s.lanes_per_warp();
             j.send = send.data();
             j.nsend = 1;
             CHECK(gpu.run(g.s.warp_consts().data(), static_cast<u32>(g.s.warp_consts().size()), &j, 1, &err));
@@ -704,7 +797,7 @@ void test_gpu_results_in_place() {
         return;
     WarpGpu gpu;
     TextBuf err;
-    CHECK(gpu.open(dev, 32, &err));
+    CHECK(gpu.open(dev, WarpGpu::width_bit(32), &err));
     if (!gpu.is_open())
         return;
     WFix f[2]; // the same body twice: one round copied back, one left in place
@@ -728,6 +821,7 @@ void test_gpu_results_in_place() {
         j[k].nrec = static_cast<u32>(f[k].s.warp_records().size());
         j[k].lanes = f[k].s.lanes_mut().data();
         j[k].nlanes = static_cast<u32>(f[k].s.lanes_mut().size());
+        j[k].wl = f[k].s.lanes_per_warp();
         j[k].send = send[k].data();
         j[k].nsend = 1;
     }
@@ -971,7 +1065,9 @@ void test_turing_machine() {
                    "warp.step_cost = 1\nwarp.lane_cost = 0\nwarp.capacity = 10000\nwarp.verify = 1\ncpu.instr_per_core = 10000\n");
         cfg.append("isa.table = ");
         cfg.append(c.table);
-        cfg.append("\nwarp.lanes = ");
+        cfg.append("\nwarp.lanes_min = ");
+        cfg.append_u64(stride);
+        cfg.append("\nwarp.lanes_max = ");
         cfg.append_u64(stride);
         cfg.append("\nwarp.device = ");
         cfg.append(c.device);
@@ -1036,6 +1132,7 @@ void suite_warp() {
     test_view_warps();
     test_determinism();
     test_gpu_device();
+    test_mixed_widths();
     test_gpu_div_loop();
     test_gpu_results_in_place();
     test_off_is_phase7();

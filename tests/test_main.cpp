@@ -130,6 +130,8 @@ const char* const kLegacyDefaults ="accel.mode = instant\n"
                                     "node.endurance = 0\n"
                                     "cost.table = classic\n"
                                     "gpu.warps = false\n"
+                                    "warp.lanes_min = 32\n" // (one width everywhere: docs/inject-plan.md W1)
+                                    "warp.lanes_max = 32\n"
                                     "spark.gpu_grant = 0\n"
                                     "cpu.threads = false\n"
                                     "cpu.e_share = 0\n"

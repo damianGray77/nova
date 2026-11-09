@@ -75,7 +75,7 @@ inline constexpr u32 kLaunchOp = kGpuOps + kNpuOps; // BX 20 launches a warp (Ph
 inline constexpr u32 kThreadOp = kLaunchOp + 1;     // BX 21 starts a thread (Phase 9c)
 inline constexpr u32 kKindOp = kLaunchOp + 2;       // BX 22: this thread prefers P (AX even) or E cores
 inline constexpr u8 kKindP = 0, kKindE = 1;          // a thread's preferred kind of core; a millicore's kind
-inline constexpr u32 kMaxLanes = 64;         // warp.lanes, at most
+inline constexpr u32 kMaxLanes = 1024;       // warp.lanes_max, at most (docs/inject-plan.md W1; Damian: 1,024)
 inline constexpr u32 kFormCpu = 0;           // a body born on a CPU (Body::form)
 inline constexpr u32 kFormGpu = 1;           // ... on a GPU, as a warp (Phase 8)
 inline constexpr u32 kMaxSeedLen = 1024;     // longest seeded genome
@@ -244,7 +244,9 @@ struct SoupParams {
     bool map;             // a procedural or landscape world (where snapshots before v3 kept a starvation meter)
     // warps: programs on the GPU (Phase 8, design.md 6.14); off = exactly Phase 7
     bool warps;           // gpu.warps
-    u32 warp_lanes;       // warp.lanes: lanes per warp (1..64)
+    u32 warp_lanes;       // lanes per warp on this node (1..kMaxLanes; World::derive_node draws it)
+    u32 warp_lanes_min;   // warp.lanes_min: the narrowest a node's warps may be (a power of two)
+    u32 warp_lanes_max;   // warp.lanes_max: the widest
     u32 warp_max;         // warp.max: warps a body may hold
     u32 warp_capacity;    // warp.capacity: warp work per GPU unit per tick at full speed
     u32 warp_step_cost;   // warp.step_cost: work per warp step
@@ -323,6 +325,13 @@ static_assert(__is_trivially_copyable(SoupParams), "SoupParams must stay plain d
 // Reads every soup key from cfg (marking them used). On a bad value returns
 // false with the reason in cfg.value_error().
 bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p);
+// A node's warp width (docs/inject-plan.md W1-W2): its lanes and, with a
+// timed table, its step's cost (lanes x a GPU lane-op: a step fills the
+// warp's whole width whatever lanes run).
+void set_warp_lanes(SoupParams* p, u32 lanes);
+// The warp width World::derive_node draws for node `node` from `seed`: a
+// power of two between warp.lanes_min and warp.lanes_max, each equally likely.
+u32 draw_warp_lanes(const SoupParams& p, u64 seed, u32 node);
 // Memory tiers (docs/world-plan.md W3): the first slow codon of a soup of
 // `size` codons with mem.fast_share `share`: size x share, in whole 64-codon
 // pages (at least one, where the soup has a page and share > 0), all of it

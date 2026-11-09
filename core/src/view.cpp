@@ -104,13 +104,16 @@ const char* const kNodeCols[] = {"tick_first", "tick_last", "node",      "x",   
                                  // the disasters' (docs/disasters-plan.md X7, X10)
                                  "symptom_ticks", "struck", "cores_offline",
                                  // bites as wounds (docs/bites-plan.md section 7)
-                                 "sleeps", "drifts"};
+                                 "sleeps", "drifts",
+                                 // warp widths by node (docs/inject-plan.md W1)
+                                 "warp_lanes"};
 enum NodeCol : u32 {
     kNcFirst, kNcLast, kNcNode, kNcX, kNcY, kNcDegree, kNcSize, kNcMilli, kNcGpus, kNcNpus, kNcCool, kNcSpark,
     kNcRad, kNcBodies, kNcWaste, kNcFree, kNcBirths, kNcDeaths, kNcSent, kNcArrived, kNcLineages, kNcColonists,
     kNcLive, kNcHealth, kNcLife,
     kNcSub, // ... kSubstrateTypes of them
-    kNcOccupancy = kNcSub + kSubstrateTypes, kNcSymptoms, kNcStruck, kNcOffline, kNcSleeps, kNcDrifts, kNcCount
+    kNcOccupancy = kNcSub + kSubstrateTypes, kNcSymptoms, kNcStruck, kNcOffline, kNcSleeps, kNcDrifts,
+    kNcWarpLanes, kNcCount
 };
 static_assert(sizeof kNodeCols / sizeof kNodeCols[0] == kNcCount, "node column table");
 
@@ -981,6 +984,7 @@ void ViewSession::node_view(u32 n, const ViewRequest& q, float inv, ViewFrame* f
     v.radiation = static_cast<float>(mean.copy_rate > 0 ? p.copy_rate / mean.copy_rate : 1.0);
     v.volatility = static_cast<float>(p.volatility);
     v.mass = w.node_mass(n);
+    v.warp_lanes = s.warps_on() ? p.warp_lanes : 0; // docs/inject-plan.md W1
     if (s.warps_on()) { // Phase 8: lanes still running, bodies born on a GPU
         for (usize wi = 0; wi < s.warp_slots(); ++wi)
             if (s.warp(static_cast<u32>(wi)).body != kNone)
@@ -1428,7 +1432,7 @@ bool RunArchive::load(const char* dir, TextBuf* err) {
     event_text_.clear();
     saves_.clear();
     save_text_.clear();
-    has_sub_ = has_occ_ = has_dis_ = false;
+    has_sub_ = has_occ_ = has_dis_ = has_wl_ = false;
     sub_floor_ = 0.1;
     novelty_ = false;
     pick_window_ = 0;
@@ -1868,6 +1872,7 @@ bool RunArchive::load_nodes(Str t, TextBuf* err) {
         has_sub_ = has_sub_ && col[kNcSub + k] != 0xFFFFFFFFu;
     has_occ_ = col[kNcOccupancy] != 0xFFFFFFFFu;
     has_dis_ = col[kNcSymptoms] != 0xFFFFFFFFu && col[kNcStruck] != 0xFFFFFFFFu && col[kNcOffline] != 0xFFFFFFFFu;
+    has_wl_ = col[kNcWarpLanes] != 0xFFFFFFFFu;
     // Rows come window by window, node by node. Each window keeps every node's
     // columns as doubles (windows x nodes x kNcCount); the first window sets
     // the node count.
@@ -2074,6 +2079,7 @@ void RunArchive::build(u32 window, const ViewRequest& q, ViewFrame* f) {
             v.cores_offline = static_cast<u32>(r[kNcOffline]);
             v.known |= (1u << kColorSymptoms) | (1u << kColorOffline);
         }
+        v.warp_lanes = has_wl_ ? static_cast<u32>(r[kNcWarpLanes]) : 0;
     }
     for (u32 n = 0; n < nodes_ && n < node_mass_.size(); ++n)
         f->node[n].mass = node_mass_[n];

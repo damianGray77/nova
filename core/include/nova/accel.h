@@ -117,6 +117,7 @@ struct WarpJob {
     u32 nrec;
     const void* lanes;   // the node's lanes on the host (soup.h Lane), by slot
     u32 nlanes;          // how many (warp slots x lanes)
+    u32 wl;              // lanes a warp on this node (docs/inject-plan.md W1: each node its own width)
     const u32* send;     // warp slots whose host lanes must go to the GPU first
     u32 nsend;
     // Each record's size in words, beside recs; nullptr when recs are all the
@@ -128,10 +129,11 @@ struct WarpJob {
 };
 
 // How the warp kernel is chosen and dispatched (docs/dxc-plan.md; the
-// defaults are the world's). DXC's kernel, compiled at build time, runs when
-// the build has it, the world has 32 lanes and the device takes Shader Model
-// 6.0; else FXC's, compiled at run time (WarpGpu::kernel() says which, and
-// why). Either gives the reference's words exactly.
+// defaults are the world's). There is a kernel for each warp width the world's
+// nodes have (docs/inject-plan.md W3). DXC's, compiled at build time for 16 to
+// 1,024 lanes, runs when the build has it and the device takes
+// Shader Model 6.0; else FXC's, compiled at run time (WarpGpu::kernel() says
+// which, and why). Either gives the reference's words exactly.
 struct WarpKernelOptions;
 // Whether this build carries DXC's warp kernels (its build found dxc.exe).
 bool warp_dxc_built();
@@ -144,7 +146,7 @@ struct WarpKernelOptions {
     // groups on an SM: 75-79% of the steps are in records of 256 words or less.
     // DXC's tiers must be ones the build compiled (256, 512, 1,024, 2,048).
     u32 lds[4] = {256, 512, 1024, 2048};
-    // FXC's (at most 7,680 words: D3D12 gives a group 32 KB). One size, as
+    // FXC's (at most 5,632 words: D3D12 gives a group 32 KB, and 1,024-lane warps need their share). One size, as
     // before DXC: each FXC kernel takes about a minute and a half to compile.
     u32 fxc_lds[4] = {2048, 0, 0, 0};
     // The records with the longest expected chains (over a quarter of the
@@ -196,10 +198,18 @@ class WarpGpu {
     WarpGpu(const WarpGpu&) = delete;
     WarpGpu& operator=(const WarpGpu&) = delete;
 
-    // Opens device `index` (accel_list order) and compiles the kernel for
-    // `lanes` lanes a warp; compile_ms (if given) gets the compile time.
-    bool open(u32 index, u32 lanes, TextBuf* err, double* compile_ms = nullptr,
+    // Opens device `index` (accel_list order) and makes the kernels for the
+    // warp widths in `widths` (bit k: warps of 2^k lanes, at most kMaxLanes;
+    // docs/inject-plan.md W3); compile_ms (if given) gets the compile time.
+    bool open(u32 index, u32 widths, TextBuf* err, double* compile_ms = nullptr,
               const WarpKernelOptions* options = nullptr);
+    // The widths bit for warps of `lanes` lanes (a power of two).
+    static u32 width_bit(u32 lanes) {
+        u32 k = 0;
+        while ((1u << k) < lanes)
+            ++k;
+        return 1u << k;
+    }
     void close();
     bool is_open() const { return impl_ != nullptr; }
     const char* name() const;
