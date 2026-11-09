@@ -51,5 +51,8 @@ double now_ms();
 
 // nova view (view_cmd.cpp).
 int cmd_view(int argc, char** argv);
+// Whether nova view showed its window (and it has closed): the window was
+// the program, so main doesn't hold the console open for Enter afterwards.
+bool view_window_shown();
 
 } // namespace nova

@@ -356,6 +356,7 @@ struct App {
 };
 
 App* g_app = nullptr;
+bool g_window_shown = false; // (view_window_shown)
 
 void set_note(Shared& sh, const char* text) {
     AcquireSRWLockExclusive(&sh.lock);
@@ -1039,6 +1040,7 @@ int open_window(App& app) {
     }
     ShowWindow(hwnd, SW_SHOWMAXIMIZED);
     UpdateWindow(hwnd);
+    g_window_shown = true;
     MSG m;
     while (GetMessageW(&m, nullptr, 0, 0) > 0) {
         TranslateMessage(&m);
@@ -1123,6 +1125,8 @@ bool render_page(SetupPage& page, const char* out, u32 w, u32 h) {
 }
 
 } // namespace
+
+bool view_window_shown() { return g_window_shown; }
 
 int cmd_view(int argc, char** argv) {
     ViewArgs a;

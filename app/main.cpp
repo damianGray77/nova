@@ -1468,11 +1468,14 @@ int nova_main(int argc, char** argv) {
 // Started by a double click in Explorer, nova gets a console window of its
 // own, which closes the moment it exits: what it printed (the usage, an error,
 // a run's result) would vanish unread. So when no other process shares the
-// console, it waits for Enter first. From a terminal it never waits.
+// console, it waits for Enter first. From a terminal it never waits. Nor does
+// nova view once its window has shown and closed: the window was the program,
+// and waiting there (in a console of its own, behind it, as a run started by
+// another program has) looked like a hang after the window closed.
 int main(int argc, char** argv) {
     const int rc = nova_main(argc, argv);
     DWORD ids[2];
-    if (GetConsoleProcessList(ids, 2) == 1) {
+    if (!view_window_shown() && GetConsoleProcessList(ids, 2) == 1) {
         fflush(stdout);
         fprintf(stderr, "\nnova: press Enter to close this window\n");
         getchar();
