@@ -545,12 +545,19 @@ NOVA_WHOLE("contact.cost_base", 8, 0, 1000000, 0, "Contact and eating", "Contact
            "Instructions an ENGULF or INJECT attempt costs, success or not.")
 NOVA_NUMBER("contact.cost_per_codon", 1.0, 0, 1000000, 0, "Contact and eating", "Contact cost per codon", "",
             "... plus this per codon moved.")
-NOVA_FLAG("contact.inject_key", true, 0, "Contact and eating", "INJECT needs a key", "",
-          "INJECT needs a key: a template matching a host surface.")
 NOVA_NUMBER("contact.inject_room", 1.0, 0, 1000000, 0, "Contact and eating", "INJECT room", "",
             "INJECT fails unless the host block is at least this x the payload (0 = off).")
 NOVA_FLAG("engulf.bite", true, 0, "Contact and eating", "ENGULF bites", "",
-          "ENGULF takes a bite of CX codons, of raw material or of a body; else it swallows whole prey (Phase 9).")
+          "ENGULF takes a bite of CX codons, of raw material or of a body; else it swallows whole prey (Phase 9). "
+          "With bites a NOP surface no longer shields a body, and INJECT lands only through an open end (a wound: "
+          "an end of the host's code whose outermost codon isn't a NOP), just inside it, starting a parasite thread "
+          "there (docs/bites-plan.md).")
+NOVA_NUMBER("engulf.bite_share", 1.0 / 3.0, 0.000001, 1, 0, "Contact and eating", "Bite size", "engulf.bite",
+            "A bite takes at most this share of the biter's own size (rounded up): prey no bigger than that is "
+            "swallowed whole, a bigger one loses a piece from its nearest end (1 = up to the biter's whole size).")
+NOVA_FLAG("engulf.tissue", true, 0, "Contact and eating", "NOPs as tissue", "engulf.bite",
+          "A bitten body loses cores in proportion to the code taken, not counting NOPs: padding is tissue that "
+          "protects the code and the cores inside (off: in proportion to every codon taken).")
 NOVA_NUMBER("engulf.corpse_cost", 0.9, 0, 1, 0, "Contact and eating", "Corpse bite cost", "",
             "An ENGULF charges each codon of a dead program's fresh remnant (stamped by the salvage rule, not yet "
             "decayed to INERT), and each codon of a dormant program, this share of a raw codon's cost, in "
@@ -591,6 +598,11 @@ NOVA_WHOLE("life.gestation", 25, 0, 1000000000, 0, "Life and death", "Gestation"
            "docs/lifehistory-plan.md G).")
 NOVA_NUMBER("life.gestation_per_codon", 0, 0, 1000000, 0, "Life and death", "Gestation per codon", "life.gestation",
             "... plus this many ticks per codon of her block.")
+NOVA_WHOLE("life.bleed_every", 100, 0, 1000000000, 0, "Life and death", "Bleeding", "",
+           "Each open end of a body's code (an end whose outermost codon isn't a NOP) loses its outermost codon to "
+           "waste once in this many ticks, until a NOP is outermost: a bite's wound bleeds until the program "
+           "repairs it by writing a NOP there, and an internal NOP stops it (0 = no bleeding; docs/bites-plan.md "
+           "B6).")
 
 // ---------------------------------------------------------------------------
 // Dormancy
@@ -622,33 +634,33 @@ NOVA_FLAG("disaster.enabled", true, 0, "Disasters", "Disasters", "",
 // X2: power surges
 NOVA_FLAG("disaster.surge", true, 0, "Disasters", "Power surges", "disaster.enabled",
           "A region collapses: every live node within a few hops of a random one (needs a map world).")
-NOVA_WHOLE("disaster.surge_every", 50000, 0, kKeyNoMax, 0, "Disasters", "Surge interval", "disaster.surge",
+NOVA_WHOLE("disaster.surge_every", 55, 0, kKeyNoMax, 0, "Disasters", "Surge interval", "disaster.surge",
            "Mean ticks between power surges anywhere in the world (0 = none).")
 NOVA_WHOLE("disaster.surge_hops_min", 1, 0, 64, 0, "Disasters", "Surge reach, least", "disaster.surge",
            "A surge's reach in hops along paths, drawn per surge from here ...")
 NOVA_WHOLE("disaster.surge_hops_max", 2, 0, 64, 0, "Disasters", "Surge reach, most", "disaster.surge",
            "... to here.")
-NOVA_WHOLE("disaster.surge_lead_min", 1000, 1, 1000000000, 0, "Disasters", "Surge warning, least", "disaster.surge",
+NOVA_WHOLE("disaster.surge_lead_min", 300, 1, 1000000000, 0, "Disasters", "Surge warning, least", "disaster.surge",
            "Ticks of brownout before a surge (its symptoms), drawn per surge from here ...")
-NOVA_WHOLE("disaster.surge_lead_max", 5000, 1, 1000000000, 0, "Disasters", "Surge warning, most", "disaster.surge",
+NOVA_WHOLE("disaster.surge_lead_max", 1500, 1, 1000000000, 0, "Disasters", "Surge warning, most", "disaster.surge",
            "... to here.")
 // X3: OS crashes
 NOVA_FLAG("disaster.crash", true, 0, "Disasters", "OS crashes", "disaster.enabled",
           "A node reboots: nothing runs and nothing arrives meanwhile; some of its programs are deleted and the rest "
           "restart.")
-NOVA_WHOLE("disaster.crash_every", 5000, 0, kKeyNoMax, 0, "Disasters", "Crash interval", "disaster.crash",
+NOVA_WHOLE("disaster.crash_every", 3, 0, kKeyNoMax, 0, "Disasters", "Crash interval", "disaster.crash",
            "Mean ticks between OS crashes anywhere in the world (0 = none).")
 NOVA_WHOLE("disaster.reboot_min", 20, 1, 1000000000, 0, "Disasters", "Reboot, shortest", "disaster.crash",
            "Ticks a crashed node takes to reboot, drawn per crash from here ...")
 NOVA_WHOLE("disaster.reboot_max", 100, 1, 1000000000, 0, "Disasters", "Reboot, longest", "disaster.crash",
            "... to here.")
-NOVA_NUMBER("disaster.crash_share_min", 0.1, 0, 1, 0, "Disasters", "Crash deletes, least", "disaster.crash",
+NOVA_NUMBER("disaster.crash_share_min", 0.3, 0, 1, 0, "Disasters", "Crash deletes, least", "disaster.crash",
             "The share of a crashed node's running programs deleted (ordinary deaths), drawn per crash from here ...")
-NOVA_NUMBER("disaster.crash_share_max", 0.6, 0, 1, 0, "Disasters", "Crash deletes, most", "disaster.crash",
+NOVA_NUMBER("disaster.crash_share_max", 0.8, 0, 1, 0, "Disasters", "Crash deletes, most", "disaster.crash",
             "... to here.")
-NOVA_WHOLE("disaster.crash_lead_min", 200, 1, 1000000000, 0, "Disasters", "Crash warning, least", "disaster.crash",
+NOVA_WHOLE("disaster.crash_lead_min", 100, 1, 1000000000, 0, "Disasters", "Crash warning, least", "disaster.crash",
            "Ticks of instability before a crash (its symptoms), drawn per crash from here ...")
-NOVA_WHOLE("disaster.crash_lead_max", 1000, 1, 1000000000, 0, "Disasters", "Crash warning, most", "disaster.crash",
+NOVA_WHOLE("disaster.crash_lead_max", 400, 1, 1000000000, 0, "Disasters", "Crash warning, most", "disaster.crash",
            "... to here.")
 // X4: burnouts
 NOVA_FLAG("disaster.burnout", true, 0, "Disasters", "Burnouts", "disaster.enabled",
@@ -684,7 +696,7 @@ NOVA_WHOLE("disaster.diskfail_lead_max", 2000, 1, 1000000000, 0, "Disasters", "D
 // X6: lightning storms
 NOVA_FLAG("disaster.storm", true, 0, "Disasters", "Lightning storms", "disaster.enabled",
           "Storms travel over the map with a heading, striking the node they're over: runs of random codons.")
-NOVA_WHOLE("disaster.storm_every", 5000, 0, kKeyNoMax, 0, "Disasters", "Storm interval", "disaster.storm",
+NOVA_WHOLE("disaster.storm_every", 300, 0, kKeyNoMax, 0, "Disasters", "Storm interval", "disaster.storm",
            "Mean ticks between storms forming anywhere in the world (0 = none).")
 NOVA_WHOLE("disaster.storm_life_min", 2000, 1, 1000000000, 0, "Disasters", "Storm life, shortest", "disaster.storm",
            "A storm's lifetime in ticks, drawn per storm from here ...")
@@ -696,13 +708,13 @@ NOVA_WHOLE("disaster.storm_move_max", 800, 1, 1000000000, 0, "Disasters", "Storm
            "... to here.")
 NOVA_NUMBER("disaster.storm_turn", 30, 0, 180, 0, "Disasters", "Storm turn", "disaster.storm",
             "The most a storm's heading turns at a move, in degrees, either way.")
-NOVA_WHOLE("disaster.strike_every_min", 100, 1, 1000000000, 0, "Disasters", "Strikes, most often", "disaster.storm",
+NOVA_WHOLE("disaster.strike_every_min", 30, 1, 1000000000, 0, "Disasters", "Strikes, most often", "disaster.storm",
            "A storm's mean ticks between strikes, drawn per storm from here ...")
-NOVA_WHOLE("disaster.strike_every_max", 400, 1, 1000000000, 0, "Disasters", "Strikes, least often",
+NOVA_WHOLE("disaster.strike_every_max", 120, 1, 1000000000, 0, "Disasters", "Strikes, least often",
            "disaster.storm", "... to here.")
-NOVA_WHOLE("disaster.strike_min", 64, 1, 1u << 24, 0, "Disasters", "Strike size, least", "disaster.storm",
+NOVA_WHOLE("disaster.strike_min", 512, 1, 1u << 24, 0, "Disasters", "Strike size, least", "disaster.storm",
            "Codons a strike randomises at a random place in memory, drawn per strike from here ...")
-NOVA_WHOLE("disaster.strike_max", 512, 1, 1u << 24, 0, "Disasters", "Strike size, most", "disaster.storm",
+NOVA_WHOLE("disaster.strike_max", 2048, 1, 1u << 24, 0, "Disasters", "Strike size, most", "disaster.storm",
            "... to here.")
 // X10: symptoms
 NOVA_FLAG("disaster.symptoms", true, 0, "Disasters", "Symptoms", "disaster.enabled",
@@ -780,6 +792,12 @@ NOVA_WHOLE("detect.gate_alive", 2, 1, 1000000, 0, "Detection and lineages", "Gat
            "... and this many members alive at once.")
 NOVA_WHOLE("detect.defended", 3, 1, 1000000000, 0, "Detection and lineages", "Defended", "detect.enabled",
            "The defended milestone: a gated lineage whose members made this many attacks fail by changing in time.")
+NOVA_WHOLE("detect.parasite", 3, 1, 1000000000, 0, "Detection and lineages", "Parasite", "detect.enabled",
+           "The parasite milestone: a gated lineage whose parasite threads made this many inheriting daughters from "
+           "inside hosts (docs/bites-plan.md).")
+NOVA_WHOLE("detect.repairs", 3, 1, 1000000000, 0, "Detection and lineages", "Healer", "detect.enabled",
+           "The healer milestone: a gated lineage whose members closed this many open ends of their own code by "
+           "writing a NOP there.")
 // Behaviour profiles (docs/analysis-plan.md A3; profile.h): an observer like the
 // detector, so it never changes a world (World::init reads these).
 NOVA_FLAG("profile.enabled", true, 0, "Detection and lineages", "Behaviour profiles", "",

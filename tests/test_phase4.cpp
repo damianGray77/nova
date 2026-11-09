@@ -855,8 +855,8 @@ void suite_lifecycle() {
         const World& w = run.world();
         CHECK(w.live_nodes() == 18 && lifecycle_ok(w));
         bool ok = true;
-        for (u32 t = 0; t < 200; ++t) {
-            run.step();
+        for (u32 t = 0; t < 300; ++t) { // (300, was 200: under docs/bites-plan.md's rules the first
+            run.step();                  // node wears out and comes back a little later)
             ok = ok && w.live_nodes() <= 18 && lifecycle_ok(w);
         }
         CHECK(ok && w.recoveries_total() > 0);

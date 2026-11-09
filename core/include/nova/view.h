@@ -215,6 +215,8 @@ enum EventKind : u32 {
     kEvGpuNative, // Phase 8
     kEvDefended,  // Phase 9
     kEvSleeper,   // docs/lifehistory-plan.md V7
+    kEvParasite,  // docs/bites-plan.md
+    kEvHealer,
     kEvCollapse,
     kEvRecovered,
     // The disasters' strikes (docs/disasters-plan.md X7: their events' first

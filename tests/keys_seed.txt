@@ -28,7 +28,6 @@ budget.npu	str	off	-	-
 budget.npu_was	str		-	-
 contact.cost_base	u64	8	0	1000000
 contact.cost_per_codon	f64	1	0	1000000
-contact.inject_key	bool	true	-	-
 contact.inject_room	f64	1	0	1000000
 contact.range	u64	256	0	1000
 contact.range	u64	256	0	1024

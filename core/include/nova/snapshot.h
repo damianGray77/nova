@@ -2,7 +2,7 @@
 
 // Versioned binary snapshots (design.md 7.1 H).
 //
-// Format v7 (v6 back to v1 are read too, see kSnapshotVersion), all integers little-endian:
+// Format v8 (only v8 is read: see kSnapshotVersion), all integers little-endian:
 //   "NOVASNAP"   8-byte magic
 //   u32          format version (kSnapshotVersion)
 //   u32          flags (0)
@@ -51,8 +51,13 @@ namespace nova {
 // it (legacy.h).
 // v7 (2026-11-08) changes no section either: cheaper corpses came on by default,
 // so a v6 snapshot or older resumes with engulf.corpse_cost = 1 (legacy.h).
-inline constexpr u32 kSnapshotVersion = 7;
-inline constexpr u32 kSnapshotOldest = 1;
+// v8 (2026-11-08, docs/bites-plan.md): a CPU records whether it is a parasite
+// thread (Cpu grew 8 bytes); bites, bleeding, INJECT and the disasters' rates
+// changed. Older snapshots are refused (Damian: "old run data is incompatible"),
+// and with them the legacy defaults above (legacy.h is gone); the loader's
+// branches for older sections are never taken now.
+inline constexpr u32 kSnapshotVersion = 8;
+inline constexpr u32 kSnapshotOldest = 8;
 
 void snapshot_write(const World& world, const Config& cfg, ByteWriter& out);
 

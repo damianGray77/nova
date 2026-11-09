@@ -354,6 +354,9 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     p->vent_rate = key_u32(cfg, "vent.rate");
     p->vent_radius = key_u32(cfg, "vent.radius");
     p->bites = key_flag(cfg, "engulf.bite");
+    p->bite_share = key_f64(cfg, "engulf.bite_share"); // docs/bites-plan.md B2, B4 (with bites)
+    p->tissue = key_flag(cfg, "engulf.tissue");
+    p->bleed_every = key_u32(cfg, "life.bleed_every"); // B6
     p->threads_end = key_flag(cfg, "life.threads_end");
     p->frozen_ticks = key_u32(cfg, "life.frozen_ticks");
     p->gestation = key_u32(cfg, "life.gestation"); // docs/lifehistory-plan.md G
@@ -464,9 +467,8 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     p->contact_range = key_u32(cfg, "contact.range", key_max(soup_size));
     p->contact_base = key_u32(cfg, "contact.cost_base");
     p->contact_per_codon = key_f64(cfg, "contact.cost_per_codon");
-    // INJECT needs a weakness to exploit and a host it fits in (Phase 1b,
-    // design.md 6.6). false / 0 restore the Phase 1a contest for INJECT.
-    p->inject_key = key_flag(cfg, "contact.inject_key");
+    // INJECT needs a host it fits in (Phase 1b, design.md 6.6), and lands only
+    // through an open end (docs/bites-plan.md I1; the key it needed is gone).
     p->inject_room = key_f64(cfg, "contact.inject_room");
 
     Str genome = key_str(cfg, "seed.genome");
@@ -1486,6 +1488,97 @@ u32 Soup::resting_count() const {
     for (usize k = 0; k < order_.size(); ++k)
         n += dorm_[order_[k]].on != 0;
     return n;
+}
+
+// --- bites as wounds, bleeding (docs/bites-plan.md B5, B6) --------------------
+
+u32 Soup::outer_codon(u32 b, bool high) const {
+    const u32 k = bodies_[b].blocks;
+    if (k == kNone)
+        return kNone;
+    const Block& bl = blocks_[k];
+    if (bl.owned < 2)
+        return kNone; // down to one codon: nothing left to bleed or to enter by
+    if (high) {
+        for (u32 a = bl.start + bl.len; a > bl.start; --a)
+            if (owner_[a - 1] == k)
+                return a - 1;
+    } else {
+        for (u32 a = bl.start; a < bl.start + bl.len; ++a)
+            if (owner_[a] == k)
+                return a;
+    }
+    return kNone;
+}
+
+bool Soup::open_end(u32 b, bool high) const {
+    const u32 a = outer_codon(b, high);
+    return a != kNone && !is_nop(p_->table.op[mem_[a]]);
+}
+
+u64 Soup::open_ends() const {
+    u64 n = 0;
+    for (usize i = 0; i < order_.size(); ++i) {
+        const u32 b = order_[i];
+        if (bodies_[b].alive && bodies_[b].blocks != kNone)
+            n += static_cast<u64>(open_end(b, false)) + static_cast<u64>(open_end(b, true));
+    }
+    return n;
+}
+
+u64 Soup::infected() const {
+    u64 n = 0;
+    for (usize i = 0; i < order_.size(); ++i) {
+        const Body& B = bodies_[order_[i]];
+        if (!B.alive)
+            continue;
+        for (u32 c = B.cpus; c != kNone; c = cpus_[c].next)
+            if (cpus_[c].parasite) {
+                ++n;
+                break;
+            }
+    }
+    return n;
+}
+
+// Bleeding (B6, Damian): an end of a body's code whose outermost codon isn't a
+// NOP loses that codon to waste, stamped as the body's remnant (food), until a
+// NOP is outermost: written there by the program (a repair), or reached inside
+// (an internal NOP is the new skin). A body bleeds on the ticks where tick +
+// 1 + serial is a multiple of life.bleed_every, so no draws are made, bodies'
+// turns are spread over the interval, and the first body's first turn is the
+// interval's last tick. Resting dormant programs bleed too (they lie in
+// memory); drifting ones are in transit.
+void Soup::bleed() {
+    const u64 every = p_->bleed_every;
+    for (usize i = 0; i < order_.size(); ++i) {
+        const u32 b = order_[i];
+        Body& B = bodies_[b];
+        if (!B.alive || B.blocks == kNone || (tick_ + 1 + B.serial) % every != 0)
+            continue;
+        const u32 k = B.blocks;
+        for (u32 side = 0; side < 2; ++side) {
+            const u32 a = outer_codon(b, side == 1);
+            if (a == kNone || is_nop(p_->table.op[mem_[a]]))
+                continue;
+            Block& bl = blocks_[k];
+            if (!stamp_.empty() && stamp_[a] == 0)
+                stamp_[a] = genome_len(b);
+            owner_[a] = kNone;
+            used_[a >> 6] &= ~(1ull << (a & 63));
+            ++waste_;
+            ++free_epoch_;
+            --bl.owned;
+            --B.mem;
+            while (bl.len > 0 && owner_[bl.start] != k) { // the range stays tight around what it owns
+                ++bl.start;
+                --bl.len;
+            }
+            while (bl.len > 0 && owner_[bl.start + bl.len - 1] != k)
+                --bl.len;
+            ++tally_.bled;
+        }
+    }
 }
 
 // A varied world (docs/world-plan.md W5): sparks follow node activity.
@@ -2637,6 +2730,8 @@ void Soup::tick_second_parts() {
     }
     if (weather_.disk_rot > 0 || weather_.static_rot > 0) // disasters X10, after every earlier draw
         weather_hazards();
+    if (p_->bleed_every > 0) // docs/bites-plan.md B6 (no draws)
+        bleed();
     death_sweep();
     if (!actions_.empty()) // Phase 9
         sweep_actions();

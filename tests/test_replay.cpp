@@ -4,7 +4,6 @@
 #include "check.h"
 #include "helpers.h"
 #include "nova/keys.h"
-#include "nova/legacy.h"
 #include "nova/replay.h"
 
 using namespace nova;
@@ -44,7 +43,7 @@ void test_log_and_verify() {
     ReplayLog log;
     TextBuf err;
     CHECK(log.load_file(kLogPath, &err));
-    CHECK(log.version() == kReplayVersion && kReplayVersion == 5); // new logs are v5 (legacy.h)
+    CHECK(log.version() == kReplayVersion && kReplayVersion == 6); // new logs are v6 (docs/bites-plan.md)
     CHECK(log.knob_count() == 2);
     CHECK(log.knob_tick(0) == 100 && log.knob_key(0).eq("demo.send_rate") &&
           log.knob_value(0).eq("0.9"));
@@ -113,32 +112,33 @@ void test_parse_errors() {
     err.clear();
     CHECK(!log.parse("not a log\n", &err));
     err.clear();
-    CHECK(!log.parse("nova-replay 6\n", &err));
-    CHECK(strstr(err.c_str(), "unsupported replay version 6") != nullptr);
+    CHECK(!log.parse("nova-replay 7\n", &err));
+    CHECK(strstr(err.c_str(), "unsupported replay version 7") != nullptr);
     err.clear();
-    CHECK(log.parse("nova-replay 3\nevent 5 replicator node=0\n", &err) && log.version() == 3);
+    CHECK(log.parse("nova-replay 6\nevent 5 replicator node=0\n", &err) && log.version() == 6);
     err.clear();
-    // Events exist from version 2; v1 logs still load without them.
-    CHECK(!log.parse("nova-replay 1\nevent 5 replicator node=0\n", &err));
+    // Logs before v6 come from an incompatible engine (docs/bites-plan.md).
+    CHECK(!log.parse("nova-replay 5\nevent 5 replicator node=0\n", &err));
+    CHECK(strstr(err.c_str(), "unsupported replay version 5") != nullptr);
     err.clear();
-    CHECK(log.parse("nova-replay 2\nevent 5 replicator node=0 x=1\nevent 5 b\nevent 7 c\n", &err));
-    CHECK(log.version() == 2 && log.event_count() == 3 && log.event_tick(2) == 7);
+    CHECK(log.parse("nova-replay 6\nevent 5 replicator node=0 x=1\nevent 5 b\nevent 7 c\n", &err));
+    CHECK(log.version() == 6 && log.event_count() == 3 && log.event_tick(2) == 7);
     CHECK(log.event_text(0).eq("replicator node=0 x=1"));
     err.clear();
-    CHECK(!log.parse("nova-replay 2\nevent 7 a\nevent 5 b\n", &err)); // out of order
+    CHECK(!log.parse("nova-replay 6\nevent 7 a\nevent 5 b\n", &err)); // out of order
     err.clear();
-    CHECK(!log.parse("nova-replay 2\nevent 7\n", &err)); // no text
+    CHECK(!log.parse("nova-replay 6\nevent 7\n", &err)); // no text
     err.clear();
-    CHECK(!log.parse("nova-replay 1\nbogus 1 2\n", &err));
+    CHECK(!log.parse("nova-replay 6\nbogus 1 2\n", &err));
     CHECK(strstr(err.c_str(), "line 2") != nullptr);
     err.clear();
-    CHECK(!log.parse("nova-replay 1\nhash 5 0123\n", &err)); // short hex
+    CHECK(!log.parse("nova-replay 6\nhash 5 0123\n", &err)); // short hex
     err.clear();
-    CHECK(!log.parse("nova-replay 1\nend 5 0000000000000000\nhash 6 0000000000000000\n", &err));
+    CHECK(!log.parse("nova-replay 6\nend 5 0000000000000000\nhash 6 0000000000000000\n", &err));
     err.clear();
-    CHECK(!log.parse("nova-replay 1\nhash 6 0000000000000000\nhash 5 0000000000000000\n", &err));
+    CHECK(!log.parse("nova-replay 6\nhash 6 0000000000000000\nhash 5 0000000000000000\n", &err));
     err.clear();
-    CHECK(log.parse("# comment\nnova-replay 1\nconfig seed = 1\n\n", &err));
+    CHECK(log.parse("# comment\nnova-replay 6\nconfig seed = 1\n\n", &err));
     CHECK(log.config_text().eq("seed = 1\n"));
 }
 
@@ -163,230 +163,43 @@ void test_knob_scheduling_rules() {
     CHECK(!run.open_replay("nova_test_late.replay", 10, &err)); // not at tick 0
 }
 
-// --- logs from before v3 (legacy.h; docs/results/integration.md) ------------------
-
-// A log written by the build before the varied world (4daa357, Debug): `nova
-// run` on this config, on that build's own defaults -- a procedural world of
-// 12 nodes with a disk of 512 codons -- for 80 ticks. Its hashes are the
-// world as that build ran it. On this build's defaults the same config has
-// substrates, sparks by activity and an archive of 128 codons.
-const char* const kOldDiskLog = "nova-replay 2\n"
-                                "config seed = 11\n"
-                                "config world.model = soup\n"
-                                "config world.graph = procedural\n"
-                                "config world.nodes = 12\n"
-                                "config world.soup_size = 2048\n"
-                                "config world.millicores = 600\n"
-                                "config world.disk = 512\n"
-                                "config spark.initial = 20\n"
-                                "config spark.rate = 0.5\n"
-                                "config accel.gpu = cpu\n"
-                                "config accel.npu = cpu\n"
-                                "config warp.device = cpu\n"
-                                "config run.threads = 4\n"
-                                "config run.ticks = 80\n"
-                                "config replay.checkpoint_every = 20\n"
-                                "config output.replay = replay_old.log\n"
-                                "hash 0 7fdb46c43695b0e1\n"
-                                "hash 20 62870c0ece2912fd\n"
-                                "hash 40 63abeb0bd83c5932\n"
-                                "hash 60 945400453d588e28\n"
-                                "hash 80 57978c34d6bf41e8\n"
-                                "end 80 57978c34d6bf41e8\n";
-
-// The same world as a config for this build.
-const char* const kDiskWorld = "seed = 11\nworld.model = soup\nworld.graph = procedural\nworld.nodes = 12\n"
-                               "world.soup_size = 2048\nworld.millicores = 600\nworld.disk = 512\nspark.initial = 20\n"
-                               "spark.rate = 0.5\naccel.gpu = cpu\naccel.npu = cpu\nwarp.device = cpu\n";
-const char* const kNewFeaturesOff = "spark.activity = 0\nsubstrate.enabled = false\nworld.archive = 0\n"
-                                    "disaster.enabled = false\nmem.fast_share = 0\n" // (memory tiers: W3)
-                                    // (life history: on by default since 2026-11-08)
-                                    "hazard.rays = false\nlife.gestation = 0\nmem.wipe_warning = 0\nlife.sleep = false\n"
-                                    "engulf.corpse_cost = 1\n"; // (cheaper corpses, the same day)
-
-// The logged config a parsed log gives to replay, as a Config.
-bool replayed_config(Str text, Config* out) {
-    ReplayLog log;
+// A log with knob records (as the viewer's toolbar wrote them before a run's
+// settings were fixed, docs/config-plan.md C3) replays to every logged hash,
+// at any thread count; without its knobs it diverges; and a locked run (as
+// nova run and nova view lock theirs) takes no new change. (The log recorded
+// 2026-11-07 is a v2 file, refused since v6: this one is written afresh.)
+void test_knob_log() {
+    const char* path = "nova_test_knobs.replay";
+    const char* cfg = "seed = 11\nworld.model = soup\nworld.nodes = 4\nworld.soup_size = 1024\n"
+                      "world.millicores = 400\nspark.initial = 20\nspark.rate = 0.2\nspark.grant = 10\n"
+                      "cpu.instr_per_core = 500\n";
     TextBuf err;
-    Config::ParseError pe;
-    return log.parse(text, &err) && log.replay_config(out, &pe);
-}
-
-// What a log replays with: a log before v3 takes the legacy defaults for the
-// settings it doesn't name, only where the world reads them; a v3 log doesn't.
-void test_legacy_config() {
-    // The text parses, and every line is a registry setting.
-    Config legacy;
-    Config::ParseError pe;
-    CHECK(legacy.parse(kLegacyFormatDefaults, &pe) && legacy.count() >= 4);
-    bool settings = true;
-    for (usize i = 0; i < legacy.count(); ++i)
-        settings = settings && key_find(legacy.key(i)) != nullptr;
-    CHECK(settings);
-    const usize L = legacy.count();
-    // The second text (life history on by default, 2026-11-08): logs before v4 take it too.
-    Config rays;
-    CHECK(rays.parse(kLegacyLifeDefaults, &pe) && rays.count() == 4);
-    for (usize i = 0; i < rays.count(); ++i)
-        CHECK(key_find(rays.key(i)) != nullptr);
-    const usize R = rays.count();
-    // The third (cheaper corpses, the same day): logs before v5.
-    Config corpse;
-    CHECK(corpse.parse(kLegacyCorpseDefaults, &pe) && corpse.count() == 1 && key_find(corpse.key(0)) != nullptr);
-    const usize C = corpse.count();
-    Config c;
-    CHECK(replayed_config("nova-replay 2\nconfig world.model = soup\nconfig world.graph = procedural\n", &c));
-    CHECK(c.count() == 2 + L + R + C && c.get_str("spark.activity", "").eq("0") &&
-          c.get_str("substrate.enabled", "").eq("false") && c.get_str("world.archive", "").eq("0") &&
-          c.get_str("disaster.enabled", "").eq("false") && c.get_str("hazard.rays", "").eq("false") &&
-          c.get_str("engulf.corpse_cost", "").eq("1"));
-    CHECK(replayed_config("nova-replay 1\nconfig world.model = soup\nconfig world.graph = landscape\n", &c));
-    CHECK(c.count() == 2 + L + R + C); // v1 too
-    CHECK(replayed_config("nova-replay 3\nconfig world.model = soup\nconfig world.graph = procedural\n", &c));
-    CHECK(c.count() == 2 + R + C && !c.has("spark.activity") && !c.has("world.archive") &&
-          !c.has("disaster.enabled") && c.get_str("hazard.rays", "").eq("false")); // v3: the second and third
-    CHECK(replayed_config("nova-replay 4\nconfig world.model = soup\nconfig world.graph = procedural\n", &c));
-    CHECK(c.count() == 2 + C && !c.has("hazard.rays") && c.get_str("engulf.corpse_cost", "").eq("1")); // v4: the third
-    CHECK(replayed_config("nova-replay 5\nconfig world.model = soup\nconfig world.graph = procedural\n", &c));
-    CHECK(c.count() == 2 && !c.has("engulf.corpse_cost")); // v5: none
-    CHECK(replayed_config("nova-replay 3\nconfig world.model = soup\nconfig hazard.rays = true\n", &c));
-    CHECK(c.get_str("hazard.rays", "").eq("true")); // a log that names it keeps it
-    // A setting the log names keeps its value.
-    CHECK(replayed_config("nova-replay 2\nconfig world.model = soup\nconfig world.archive = 256\n", &c));
-    CHECK(c.get_str("world.archive", "").eq("256") && c.get_str("spark.activity", "").eq("0"));
-    // A ring reads no substrate settings, and a demo world none of these.
-    CHECK(replayed_config("nova-replay 2\nconfig world.model = soup\n", &c));
-    CHECK(c.count() == L + R + C && !c.has("substrate.enabled"));
-    CHECK(replayed_config("nova-replay 2\nconfig seed = 1\n", &c));
-    CHECK(c.count() == 1);
-}
-
-// Rewrites a log as the build before v3 would have written it: header 2, and
-// none of the given config lines (settings that build didn't have).
-void as_v2(Str text, const char* drop, TextBuf* out) {
-    usize i = 0;
-    while (i < text.n) {
-        usize e = i;
-        while (e < text.n && text.p[e] != '\n')
-            ++e;
-        const Str line = text.sub(i, e - i);
-        i = e + 1;
-        if (line.starts_with("nova-replay ")) {
-            out->append("nova-replay 2\n");
-            continue;
-        }
-        bool skip = false;
-        for (const char* d = drop; *d && !skip;) {
-            const char* n = strchr(d, '\n');
-            const Str setting(d, static_cast<usize>(n - d));
-            TextBuf want;
-            want.append("config ");
-            want.append(setting);
-            skip = line.eq(want.view());
-            d = n + 1;
-        }
-        if (!skip) {
-            out->append(line);
-            out->append_char('\n');
-        }
-    }
-}
-
-// A log from before this build, of a world with a disk, replays to the hashes
-// it recorded: the settings it doesn't name take the legacy defaults, not
-// this build's (on which the same log diverges). On the engine's own defaults
-// (no test fallback), where the new features are on.
-void test_legacy_logs() {
-    CHECK(Config::set_fallback(nullptr, nullptr));
-    // 1. The old build's own log.
+    u64 end = 0;
     {
-        ReplayLog log;
-        TextBuf err;
-        CHECK(log.parse(kOldDiskLog, &err) && log.version() == 2);
-        ReplayResult r;
-        CHECK(replay_verify(log, 4, &r));
-        if (!r.ok)
-            fprintf(stderr, "  old log: %s\n", r.msg);
-        CHECK(r.ok && r.checkpoints_checked == 6);
-        // Read as a v3 log, the same records replay on this build's defaults: another world.
-        TextBuf v3;
-        v3.append("nova-replay 3");
-        v3.append(Str(kOldDiskLog + strlen("nova-replay 2")));
-        ReplayLog now;
-        CHECK(now.parse(v3.view(), &err) && now.version() == 3);
-        ReplayResult r3;
-        CHECK(!replay_verify(now, 4, &r3) && !r3.ok);
-    }
-    // 2. A v2 log made from this build: the world with the new features
-    //    explicitly off (as the build before them ran it, and ends on the old
-    //    build's hash), written by the replay writer, then rewritten as the
-    //    old build wrote it (header 2, the three settings unnamed).
-    {
-        const char* path = "nova_test_legacy.replay";
-        TextBuf cfg;
-        cfg.append(kDiskWorld);
-        cfg.append(kNewFeaturesOff);
         Run run;
-        TextBuf err;
-        CHECK(make_run(run, cfg.c_str(), 20));
-        CHECK(run.open_replay(path, 20, &err));
-        run.run_until(80);
+        CHECK(make_run(run, cfg, 2));
+        CHECK(run.open_replay(path, 30, &err));
+        CHECK(run.schedule_knob(30, "spark.rate", "0.6", &err));
+        CHECK(run.schedule_knob(60, "cpu.wear", "0.01", &err));
+        CHECK(run.schedule_knob(90, "spark.grant", "25", &err));
+        run.run_until(120);
         run.finish();
-        CHECK_EQ_U64(run.world().hash(), 0x57978c34d6bf41e8ull); // the old build's world, exactly
-        Array<u8> bytes;
-        CHECK(read_file(path, &bytes));
-        remove(path);
-        TextBuf v2;
-        as_v2(file_text(bytes), kNewFeaturesOff, &v2);
-        CHECK(strstr(v2.c_str(), "spark.activity") == nullptr && strstr(v2.c_str(), "world.archive") == nullptr);
-        ReplayLog log;
-        CHECK(log.parse(v2.view(), &err) && log.version() == 2);
-        ReplayResult r;
-        CHECK(replay_verify(log, 1, &r));
-        CHECK(r.ok && r.checkpoints_checked == 6 && log.end().hash == 0x57978c34d6bf41e8ull);
+        end = run.world().hash();
     }
-    CHECK(Config::set_fallback(kLegacyDefaults, nullptr));
-}
-
-// A replay log written before a run's settings were fixed (docs/config-plan.md
-// C3): the viewer's toolbar changed three knobs mid-run, at the tick it was
-// on. Recorded once (2026-11-07) and kept as it was written.
-const char* const kOldKnobLog = "nova-replay 2\n"
-                                "config seed = 11\n"
-                                "config world.model = soup\n"
-                                "config world.nodes = 4\n"
-                                "config world.soup_size = 1024\n"
-                                "config world.millicores = 400\n"
-                                "config spark.initial = 20\n"
-                                "config spark.rate = 0.2\n"
-                                "config spark.grant = 10\n"
-                                "config cpu.instr_per_core = 500\n"
-                                "hash 0 59248df7f4738bbf\n"
-                                "hash 30 4525ef163a838553\n"
-                                "knob 30 spark.rate = 0.6\n"
-                                "hash 60 8b2a4c357a05d9ec\n"
-                                "knob 60 cpu.wear = 0.01\n"
-                                "hash 90 37a5b939a0fe3a2f\n"
-                                "knob 90 spark.grant = 25\n"
-                                "hash 120 bee92e82e15ae314\n"
-                                "end 120 bee92e82e15ae314\n";
-
-// The knob lock: no front end changes a setting mid-run any more, and a
-// locked run refuses new changes -- but an old log's knob records still
-// replay to every logged hash, at any thread count.
-void test_old_knob_log() {
+    Array<u8> bytes;
+    CHECK(read_file(path, &bytes));
+    remove(path);
     ReplayLog log;
-    TextBuf err;
-    CHECK(log.parse(kOldKnobLog, &err));
-    CHECK(log.knob_count() == 3 && log.checkpoints().size() == 5);
+    CHECK(log.parse(file_text(bytes), &err));
+    CHECK(log.version() == kReplayVersion && log.knob_count() == 3 && log.checkpoints().size() == 5);
     ReplayResult r;
     CHECK(replay_verify(log, 1, &r));
     CHECK(r.ok && r.checkpoints_checked == 6);
     CHECK(replay_verify(log, 4, &r) && r.ok);
-    CHECK_EQ_U64(log.end().hash, 0xbee92e82e15ae314ull);
+    CHECK_EQ_U64(log.end().hash, end);
     // The knobs mattered: without them the run diverges after the first.
     TextBuf bare;
-    const Str all(kOldKnobLog);
+    const Str all = file_text(bytes);
     usize at = 0;
     for (usize i = 0; i < all.n; ++i) {
         if (all.p[i] != '\n')
@@ -399,7 +212,7 @@ void test_old_knob_log() {
     ReplayLog nolog;
     CHECK(nolog.parse(bare.view(), &err));
     CHECK(!replay_verify(nolog, 2, &r) && r.diverged_at == 60);
-    // A locked run (as nova run and nova view lock theirs) takes no new change.
+    // A locked run takes no new change.
     Run run;
     Config::ParseError pe;
     CHECK(run.config().parse(log.config_text(), &pe));
@@ -410,6 +223,14 @@ void test_old_knob_log() {
     CHECK(strstr(err.c_str(), "fixed from its start") != nullptr);
 }
 
+// Logs before v6 come from an incompatible engine (docs/bites-plan.md): refused.
+void test_old_logs_refused() {
+    ReplayLog log;
+    TextBuf err;
+    CHECK(!log.parse("nova-replay 5\nconfig seed = 1\nhash 0 0000000000000001\n", &err));
+    CHECK(strstr(err.c_str(), "incompatible") != nullptr);
+}
+
 } // namespace
 
 void suite_replay() {
@@ -417,7 +238,6 @@ void suite_replay() {
     test_detects_tampering();
     test_parse_errors();
     test_knob_scheduling_rules();
-    test_legacy_config();
-    test_legacy_logs();
-    test_old_knob_log();
+    test_knob_log();
+    test_old_logs_refused();
 }

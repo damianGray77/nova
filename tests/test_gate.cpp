@@ -172,13 +172,14 @@ void soup_gate(const char* name, const char* cfg, u32 nodes, Rules rules) {
 
     printf("  gate: %s, %u nodes, %llu ticks: hash %016llx at 1/4/20 threads "
            "(%llu instructions, %llu births, %llu deaths, %llu engulfs, %llu injects, %llu gate "
-           "events)\n",
+           "events; %llu millicores and %llu codons released by heat)\n",
            name, nodes, static_cast<unsigned long long>(kTicks),
            static_cast<unsigned long long>(t1.hash[kPoints - 1]),
            static_cast<unsigned long long>(s.instructions),
            static_cast<unsigned long long>(s.births), static_cast<unsigned long long>(s.deaths),
            static_cast<unsigned long long>(s.engulfs), static_cast<unsigned long long>(s.injects),
-           static_cast<unsigned long long>(t1.events));
+           static_cast<unsigned long long>(t1.events), static_cast<unsigned long long>(s.cpu_released),
+           static_cast<unsigned long long>(s.mem_released));
 }
 
 } // namespace

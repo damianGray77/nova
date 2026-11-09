@@ -210,12 +210,13 @@ bool role_soup(RoleSoup& f, Array<ProfileSample>* out) {
     f.s.begin_tick(0);
     for (u32 g = 0; g < 3; ++g) {
         const u32 at = 100 + 1000 * g;
-        const u32 b = plant(f.s, at, "ENGULF INC INC INC", 40);
+        // (12 codons: a third of it, 4, swallows a 4-codon prey whole; docs/bites-plan.md B2)
+        const u32 b = plant(f.s, at, "ENGULF INC INC INC INC INC INC INC INC INC INC INC", 40);
         if (b == kNone)
             return false;
         f.pred[g] = f.s.body(b).serial;
         for (u32 k = 0; k < 40; ++k)
-            if (plant(f.s, at + 10 + 6 * k, "INC INC INC INC", 5) == kNone)
+            if (plant(f.s, at + 14 + 6 * k, "INC INC INC INC", 5) == kNone)
                 return false;
     }
     for (u32 g = 0; g < 3; ++g) {

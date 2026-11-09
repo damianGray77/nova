@@ -135,6 +135,18 @@
 //                                     codons copied in place; deleted
 //   corpse_codons                     codons of fresh corpses bitten, at the
 //                                     discount (engulf.corpse_cost)
+// then bites as wounds and parasites (docs/bites-plan.md; six sums, then two
+// gauges), the last integer columns:
+//   wounds                            bites of a body that left an end of its code
+//                                     open (B5)
+//   bled                              codons lost from open ends (B6)
+//   repairs                           open ends closed by writing a NOP there
+//   parasite_threads                  threads an INJECT started in its host (I3)
+//   parasite_divides                  daughters divided off by them (I4)
+//   struck_bodies                     living bodies whose code a lightning
+//                                     strike changed (section 7)
+//   open_ends, infected               ends of bodies' code open now; bodies with a
+//                                     parasite thread now
 // and last, as always, the two floating-point columns:
 //   compress                          soup compressibility (compress.h), mean
 //                                     over nodes: ~1 random, lower = repetitive
@@ -163,7 +175,10 @@ inline constexpr u32 kStatsNoveltyFirst = kStatsProfileFirst + kStatsProfileColu
 // Life history (docs/lifehistory-plan.md W, V7, R7) and cheaper corpses: nine sums.
 inline constexpr u32 kStatsLifeColumns = 9;
 inline constexpr u32 kStatsLifeFirst = kStatsNoveltyFirst + kStatsNoveltyColumns;
-inline constexpr u32 kStatsIntColumns = kStatsLifeFirst + kStatsLifeColumns;
+// Bites as wounds and parasites (docs/bites-plan.md): six sums, then two gauges.
+inline constexpr u32 kStatsBiteSums = 6, kStatsBiteColumns = kStatsBiteSums + 2;
+inline constexpr u32 kStatsBiteFirst = kStatsLifeFirst + kStatsLifeColumns;
+inline constexpr u32 kStatsIntColumns = kStatsBiteFirst + kStatsBiteColumns;
 inline constexpr u32 kStatsColumns = kStatsIntColumns + 2; // compress, ambient
 const char* stats_column(u32 i);
 // Index of a column by name, or kStatsColumns if there is none.
@@ -216,6 +231,9 @@ void stats_novelty_row(LiveNovelty* meter, u32 tap, StatsRow* out);
 //   symptom_ticks, struck,            disasters (X7, X10): ticks of the window it
 //   cores_offline                     had symptoms; disasters that hit it; its
 //                                     cores offline at the window's end
+//   sleeps, drifts                    docs/bites-plan.md section 7: voluntary
+//                                     sleeps begun here; dormant programs that
+//                                     left here (automatic or chosen)
 class StatsCsv {
   public:
     bool open(const char* path, u32 window, Model model = Model::demo); // writes the header

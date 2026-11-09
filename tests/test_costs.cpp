@@ -219,7 +219,8 @@ void test_actor_lost() {
     CHECK(g.s.actions().empty() && g.s.tally().actions_failed == 1 && g.cpu(e1).err == 1);
 }
 
-// INJECT as an action: its time is the codons it writes, and they land at the end.
+// INJECT as an action: its time is the codons it writes, and they land at the
+// end, just inside the host's open end (its tail: 206, 207; docs/bites-plan.md I2).
 void test_inject_action() {
     Fix f;
     CHECK(f.init());
@@ -232,11 +233,25 @@ void test_inject_action() {
     c.rh = 100;
     f.s.run_cpu(f.cpu_of(inj), 1000);
     CHECK(f.s.actions().size() == 1 && f.s.actions()[0].end == 1);
-    const u8 before = f.s.mem()[203];
+    const u8 before = f.s.mem()[206];
     f.s.begin_tick(1);
     f.s.run_cpu(f.cpu_of(inj), 0);
     CHECK(f.s.tally().injects == 1 && f.s.tally().actions_landed == 1);
-    CHECK(f.s.mem()[203] == f.s.mem()[100] && f.s.mem()[203] != before);
+    CHECK(f.s.mem()[206] == f.s.mem()[100] && f.s.mem()[207] == f.s.mem()[101] && f.s.mem()[206] != before);
+    // A host that seals its wound meanwhile defends itself.
+    Fix g;
+    CHECK(g.init());
+    const u32 i2 = plant(g.s, 100, "INJECT NOP0 NOP0 NOP1 INC", 500);
+    const u32 h2 = plant(g.s, 200, "NOP1 NOP1 NOP0 INC INC INC INC INC", 300);
+    CHECK(i2 != kNone && h2 != kNone);
+    g.cpu(i2).cx = 2;
+    g.cpu(i2).rh = 100;
+    g.s.run_cpu(g.cpu_of(i2), 1000);
+    CHECK(g.s.actions().size() == 1);
+    g.s.mem_mut()[207] = static_cast<u8>(codon_of(g.p.table, Op::nop0)); // the host writes a NOP over its tail
+    g.s.begin_tick(1);
+    g.s.run_cpu(g.cpu_of(i2), 0);
+    CHECK(g.s.tally().injects == 0 && g.s.tally().actions_defended == 1);
 }
 
 // A DISK store longer than a tick (a 12 us write against a 4.75 us tick):

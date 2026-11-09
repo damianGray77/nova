@@ -50,6 +50,8 @@ add_executable(nova_tests
     test_viewer_more.cpp
     # Gestation, ray hazards, wipe warnings and voluntary dormancy (docs/lifehistory-plan.md).
     test_lifehistory.cpp
+    # Bites as wounds, bleeding and parasites (docs/bites-plan.md).
+    test_parasites.cpp
 )
 target_link_libraries(nova_tests PRIVATE nova::core nova_viewer)
 target_compile_features(nova_tests PRIVATE cxx_std_20)
@@ -70,7 +72,8 @@ set(NOVA_SUITES containers str rng config pool world gate snapshot stats replay 
     memtiers # memory tiers (W3)
     analysis
     profiles # behaviour profiles (A3)
-    lifehistory) # docs/lifehistory-plan.md
+    lifehistory # docs/lifehistory-plan.md
+    parasites) # docs/bites-plan.md
 foreach(suite IN LISTS NOVA_SUITES)
     add_test(NAME ${suite} COMMAND nova_tests ${suite})
     set_tests_properties(${suite} PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})

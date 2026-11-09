@@ -2,9 +2,9 @@
 // level shares, smooth across neighbours, the same map for the same seed, a
 // recovered site taking its site's substrate), what each multiplier does (P
 // and E cores, GPU throughput and the warps' clock, NPU multiply-adds, heat
-// unchanged), sparks following node activity, the per-node file, snapshots
-// from before v4, and a busy landscape with everything on, the same at 1, 4
-// and 20 threads, under shuffled dispatch, through a snapshot and on the GPU.
+// unchanged), sparks following node activity, the per-node file, and a busy
+// landscape with everything on, the same at 1, 4 and 20 threads, under
+// shuffled dispatch, through a snapshot and on the GPU.
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -657,7 +657,8 @@ void test_nodes_file() {
     const char* text = reinterpret_cast<const char*>(bytes.data());
     const char* tail = ",life,born,sub_p_cores,sub_e_cores,sub_gpu,sub_npu,sub_mem_fast,sub_mem_slow,sub_disk_fast,"
                        "sub_disk_slow,occupancy,"
-                       "symptom_ticks,struck,cores_offline\n"; // (then the disasters', docs/disasters-plan.md X7)
+                       "symptom_ticks,struck,cores_offline," // (then the disasters', docs/disasters-plan.md X7)
+                       "sleeps,drifts\n";                     // (and docs/bites-plan.md section 7's)
     const char* nl = strchr(text, '\n');
     CHECK(nl != nullptr && strstr(text, tail) == nl + 1 - strlen(tail));
     // The last window's row for node 5 (the rows go window by window, node by
@@ -669,83 +670,22 @@ void test_nodes_file() {
             lines.push(p);
     CHECK(lines.size() == 1 + 2 * w.node_count());
     const char* row = lines[lines.size() - w.node_count() + 5];
-    double v[42] = {};
+    double v[44] = {};
     u32 col = 0;
-    for (const char* p = row; *p && *p != '\n' && col < 42; ++col) {
+    for (const char* p = row; *p && *p != '\n' && col < 44; ++col) {
         const char* e = p;
         while (*e && *e != ',' && *e != '\n')
             ++e;
         parse_f64(Str(p, static_cast<usize>(e - p)), &v[col]);
         p = *e == ',' ? e + 1 : e;
     }
-    bool ok = col == 41 && v[2] == 5;
+    bool ok = col == 43 && v[2] == 5;
     for (u32 t = 0; t < kSubstrateTypes; ++t)
         ok = ok && fabs(v[29 + t] - w.substrate_mult(5, t)) < 1e-9;
     ok = ok && fabs(v[37] - w.node_soup(5).occupancy()) < 1e-6;
     CHECK(ok);
     remove(stats);
     remove(nodes);
-}
-
-// The legacy defaults without the switches of the features snapshot v4 brought
-// (this plan's two, the disk tiers' archive and the disasters): the registry's
-// then apply.
-void fallback_without_switches(TextBuf* out) {
-    const char* p = kLegacyDefaults;
-    while (*p) {
-        const char* e = strchr(p, '\n');
-        const usize n = e ? static_cast<usize>(e - p + 1) : strlen(p);
-        if (strncmp(p, "substrate.enabled", 17) != 0 && strncmp(p, "spark.activity", 14) != 0 &&
-            strncmp(p, "world.archive", 13) != 0 && strncmp(p, "disaster.enabled", 16) != 0 &&
-            strncmp(p, "mem.fast_share", 14) != 0) // (and memory tiers: W3)
-            out->append(Str(p, n));
-        p += n;
-    }
-}
-
-// A snapshot from before v4 comes from a world without substrates, sparks by
-// activity, the archive (disk tiers) or the disasters: it resumes with all
-// four off, though the registry's defaults turn them on. The world has a
-// disk, so the archive's default (a quarter of it) would change its disk
-// section's shape.
-void test_old_snapshot() {
-    TextBuf land;
-    land.append(kLandBase);
-    land.append("world.disk = 256\n");
-    Run a; // the legacy fallback turns all three off: its config names none
-    CHECK(make_run(a, land.c_str(), 2));
-    a.run_until(40);
-    ByteWriter snap;
-    a.snapshot(snap);
-    a.run_until(80);
-    const u64 want = a.world().hash();
-    // The same file, as v3 wrote it (the version and the checksum).
-    Array<u8> old;
-    old.assign(snap.data(), snap.size());
-    old[8] = 3;
-    const u64 sum = hash_bytes(old.data(), old.size() - 8, 0x6E6F76612D736E70ull); // "nova-snp"
-    memcpy(old.data() + old.size() - 8, &sum, 8);
-    TextBuf fb;
-    fallback_without_switches(&fb);
-    CHECK(Config::set_fallback(fb.c_str(), nullptr));
-    Run b;
-    TextBuf err;
-    const bool loaded = b.init_from_snapshot(old.data(), old.size(), 4, &err);
-    CHECK(loaded);
-    if (loaded) {
-        CHECK(!b.world().substrates() && b.world().node_params(0).spark_activity == 0.0);
-        CHECK(b.world().node_params(0).disk > 0 && b.world().node_params(0).archive == 0 &&
-              b.config().get_str("world.archive", "").eq("0"));
-        CHECK(!b.world().disasters() && b.config().get_str("disaster.enabled", "").eq("false"));
-        CHECK(b.world().node_params(0).fast_end == 0 && b.config().get_str("mem.fast_share", "").eq("0")); // W3
-        b.run_until(80);
-        CHECK_EQ_U64(b.world().hash(), want);
-    }
-    Run c; // the v4 file: the registry's defaults apply, so this world differs
-    TextBuf err2;
-    const bool v4 = c.init_from_snapshot(snap.data(), snap.size(), 4, &err2);
-    CHECK(!v4 || c.world().substrates());
-    CHECK(Config::set_fallback(kLegacyDefaults, nullptr));
 }
 
 // --- everything on ----------------------------------------------------------------------
@@ -864,6 +804,5 @@ void suite_substrates() {
     test_device_time();
     test_sparks();
     test_nodes_file();
-    test_old_snapshot();
     test_everything();
 }

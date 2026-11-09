@@ -16,6 +16,8 @@ bool detect_params_from_config(Config& cfg, DetectParams* p) {
     p->gate_alive = key_u32(cfg, "detect.gate_alive");
     p->signal_sustained = key_u32(cfg, "signal.sustained");
     p->defended = key_u32(cfg, "detect.defended");
+    p->parasite = key_u32(cfg, "detect.parasite"); // docs/bites-plan.md
+    p->repairs = key_u32(cfg, "detect.repairs");
     return cfg.ok();
 }
 
@@ -25,7 +27,7 @@ void Lineages::init(const DetectParams* p, u32 node) {
     next_id_ = 1;
     links_ = inject_links_ = gpu_links_ = founded_ = detections_ = gpu_detections_ = 0;
     npu_detections_ = colonisations_ = disk_detections_ = signal_detections_ = defended_detections_ = 0;
-    sleep_detections_ = 0;
+    sleep_detections_ = parasite_detections_ = healer_detections_ = 0;
     for (u32 i = 0; i < kOriginCount; ++i)
         founded_by_[i] = 0;
     max_depth_ever_ = 0;
@@ -178,42 +180,46 @@ u32 Lineages::aligned(const u8* par, u32 plen, const u8* m, u32 dstart, u32 dlen
 // most, outside world time.
 bool Lineages::descends(const Soup& s, u32 p, u32 k, u32* match, u32* by_gpu) const {
     const Block& P = s.block(p);
+    return descends_from(s, P.start, P.len, k, match, by_gpu);
+}
+
+bool Lineages::descends_from(const Soup& s, u32 pstart, u32 plen, u32 k, u32* match, u32* by_gpu) const {
     const Block& D = s.block(k);
-    if (P.len == 0 || D.len == 0)
+    if (plen == 0 || D.len == 0)
         return false;
     const u8* m = s.mem();
-    const u8* par = m + P.start;
+    const u8* par = m + pstart;
     // The fewest matches that pass: similarity x her length, rounded up, and
     // never fewer than kDescentFloor codons (or similarity x the parent's
     // length, if that is fewer): one written codon matching somewhere in a
     // long parent is chance, not descent. Every link the same-offset rule
     // made before X12 passes this too (its matches are a subset of the
     // straight comparison's, and it needed similarity x the longer length).
-    const u32 need = max_of(share_of(p_->similarity, D.len), min_of(kDescentFloor, share_of(p_->similarity, P.len)));
+    const u32 need = max_of(share_of(p_->similarity, D.len), min_of(kDescentFloor, share_of(p_->similarity, plen)));
     if (need > D.len)
         return false; // too short to show descent
     const u32 misses = D.len - need; // the most misses an alignment may have
     u32 n = 0, g = 0;
     auto passes = [&](u32 r) {
-        n = aligned(par, P.len, m, D.start, D.len, r, misses, &g);
+        n = aligned(par, plen, m, D.start, D.len, r, misses, &g);
         return n >= need;
     };
     bool ok = passes(0); // the straight comparison
     // Shifts of 1 .. detect.shift codons, forward then back (a head off by a
     // codon or two); past half the parent they would repeat one another.
-    const u32 smax = min_of(p_->shift, P.len / 2);
+    const u32 smax = min_of(p_->shift, plen / 2);
     for (u32 d = 1; d <= smax && !ok; ++d)
-        ok = passes(d) || (P.len - d != d && passes(P.len - d));
+        ok = passes(d) || (plen - d != d && passes(plen - d));
     // Rotations (a copy that starts part-way through the parent): only where
     // her first 4 codons (all of hers, if fewer) appear in the parent, read
     // cyclically, and not already tried as a shift; at most 8.
     const u32 key = min_of(kDescentFloor, D.len);
     u32 tried = 0;
-    for (u32 r = smax + 1; r + smax < P.len && tried < 8 && !ok; ++r) {
+    for (u32 r = smax + 1; r + smax < plen && tried < 8 && !ok; ++r) {
         u32 j = 0, q = r;
         while (j < key && par[q] == m[D.start + j]) {
             ++j;
-            if (++q == P.len)
+            if (++q == plen)
                 q = 0;
         }
         if (j < key)
@@ -358,12 +364,21 @@ void Lineages::link(const Soup& s, u32 p, u32 k, u64 tick, u32 via, bool gpu) {
         ++founded_by_[L.founder_origin < kOriginCount ? L.founder_origin : kOriginUnknown];
         join(p, m + P.start, P.len, tick, id, 0, 0);
     }
-    const BlockTag parent = tags_[p];
+    adopt(s, tags_[p], P.body, k, tick, via, gpu);
+}
+
+void Lineages::adopt(const Soup& s, BlockTag parent, u32 parent_body, u32 k, u64 tick, u32 via, bool gpu) {
+    const Block& D = s.block(k);
+    const u8* m = s.mem();
+    if (tags_.size() <= k)
+        tags_.resize(static_cast<usize>(k) + 1);
     LineageInfo* L = table_.find(parent.lineage);
+    if (!L)
+        return;
     if (via == kViaInject)
         ++L->inject_links;
     else
-        ++L->divide_links;
+        ++L->divide_links; // (a parasite's DIVIDE too)
     if (gpu) {
         ++gpu_links_;
         ++L->gpu_links;
@@ -390,11 +405,68 @@ void Lineages::link(const Soup& s, u32 p, u32 k, u64 tick, u32 via, bool gpu) {
     }
     // The first DIVIDE link by a GPU-born parent, in a lineage that has met
     // the gate (Phase 8): life that replicates on the GPU alone.
-    if (via == kViaDivide && L->detected && !L->native_detected && P.body != kNone &&
-        s.body(P.body).form == kFormGpu) {
+    if (via == kViaDivide && L->detected && !L->native_detected && parent_body != kNone &&
+        s.body(parent_body).form == kFormGpu) {
         L->native_detected = 1;
         push_event(kEventGpuNative, tick, parent.lineage, *L, tags_[k], m + D.start, D.len, via);
     }
+    // docs/bites-plan.md I5: the detect.parasite-th daughter its parasite
+    // threads made from inside hosts, once gated, is the parasite event.
+    if (via == kViaParasite && L->detected && L->parasite_divides < p_->parasite &&
+        ++L->parasite_divides == p_->parasite) {
+        ++parasite_detections_;
+        push_event(kEventParasite, tick, parent.lineage, *L, tags_[k], m + D.start, D.len, via);
+    }
+}
+
+// docs/bites-plan.md I3, I5: the parasite thread carries the injector's tag
+// (none if the injector isn't a lineage member) and its payload's place.
+void Lineages::on_parasite(const Soup& s, u32 cpu, u32 injector_block, u32 host_block, u32 off, u32 len) {
+    (void)s;
+    (void)host_block;
+    if (cpu_tags_.size() <= cpu)
+        cpu_tags_.resize(static_cast<usize>(cpu) + 1);
+    ParasiteTag& t = cpu_tags_[cpu];
+    t.tag = injector_block < tags_.size() ? tags_[injector_block] : BlockTag{};
+    t.off = off;
+    t.len = len;
+}
+
+// A DIVIDE by a parasite thread: the daughter joins the injector's lineage
+// if she descends from the payload (as a DIVIDE daughter from her parent).
+void Lineages::on_divide_parasite(const Soup& s, u32 cpu, u32 k, u64 tick) {
+    if (cpu >= cpu_tags_.size() || !s.cpu(cpu).parasite)
+        return;
+    const ParasiteTag& t = cpu_tags_[cpu];
+    if (t.tag.lineage == 0 || !table_.find(t.tag.lineage))
+        return; // an injector outside any lineage, or one ended here meanwhile
+    const u32 body = s.cpu(cpu).body;
+    if (body == kNone || s.body(body).blocks == kNone || s.body(body).blocks == k)
+        return;
+    const Block& H = s.block(s.body(body).blocks);
+    if (t.off >= H.len)
+        return; // the host shrank past the payload
+    const u32 len = t.off + t.len <= H.len ? t.len : H.len - t.off;
+    u32 match = 0, by_gpu = 0;
+    if (!descends_from(s, H.start + t.off, len, k, &match, &by_gpu))
+        return;
+    ++links_;
+    adopt(s, t.tag, kNone, k, tick, kViaParasite, false);
+}
+
+// B5: the detect.repairs-th open end a gated lineage's members closed with a
+// NOP is the healer event.
+void Lineages::on_repair(const Soup& s, u32 k, u64 tick) {
+    if (k == kNone || k >= tags_.size() || tags_[k].lineage == 0)
+        return;
+    LineageInfo* L = table_.find(tags_[k].lineage);
+    if (!L || !L->detected || L->repairs >= p_->repairs)
+        return;
+    if (++L->repairs < p_->repairs)
+        return;
+    ++healer_detections_;
+    const Block& B = s.block(k);
+    push_event(kEventHealer, tick, tags_[k].lineage, *L, tags_[k], s.mem() + B.start, B.len, kViaDivide);
 }
 
 void Lineages::survey(LineageSurvey* out) const {

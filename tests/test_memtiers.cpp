@@ -15,7 +15,6 @@
 #include "nova/accel.h"
 #include "nova/hash.h"
 #include "nova/io.h"
-#include "nova/legacy.h"
 #include "nova/replay.h"
 #include "nova/snapshot.h"
 #include "soup_helpers.h"
@@ -644,128 +643,6 @@ void test_off_is_legacy() {
     CHECK_EQ_U64(b.world().hash(), a.world().hash());
 }
 
-// A replay log before v3 and a snapshot before v4 come from builds without
-// memory tiers: they replay and resume with none, though the engine's
-// defaults have them (on which their worlds would differ).
-Str text_of(const Array<u8>& bytes) { return Str(reinterpret_cast<const char*>(bytes.data()), bytes.size()); }
-
-// The log as a build before v3 wrote it: header 2, without the tiers' line.
-void as_v2_without_tiers(Str text, u32 version, TextBuf* out) {
-    usize i = 0;
-    while (i < text.n) {
-        usize e = i;
-        while (e < text.n && text.p[e] != '\n')
-            ++e;
-        const Str line = text.sub(i, e - i);
-        i = e + 1;
-        if (line.starts_with("nova-replay ")) {
-            out->append(version == 2 ? "nova-replay 2\n" : "nova-replay 3\n");
-            continue;
-        }
-        if (line.eq("config mem.fast_share = 0"))
-            continue;
-        out->append(line);
-        out->append_char('\n');
-    }
-}
-
-void test_old_files() {
-    CHECK(Config::set_fallback(nullptr, nullptr));
-    // The text: a v2 log takes mem.fast_share = 0 for what it doesn't name, a v3 log doesn't.
-    {
-        ReplayLog log;
-        TextBuf err;
-        Config c;
-        Config::ParseError pe;
-        CHECK(log.parse("nova-replay 2\nconfig world.model = soup\n", &err) && log.replay_config(&c, &pe));
-        CHECK(c.get_str("mem.fast_share", "").eq("0"));
-        ReplayLog v3;
-        Config c3;
-        CHECK(v3.parse("nova-replay 3\nconfig world.model = soup\n", &err) && v3.replay_config(&c3, &pe));
-        CHECK(!c3.has("mem.fast_share"));
-    }
-    // A log of a world run without tiers (every other v4/v3 feature named
-    // off), rewritten as a build before v3 wrote it, replays to its hashes;
-    // the same records read as v3 take the tiers and diverge.
-    const char* world = "seed = 3\nworld.model = soup\nworld.graph = procedural\nworld.nodes = 8\n"
-                        "world.soup_size = 2048\nspark.initial = 20\nspark.rate = 0.5\naccel.gpu = cpu\n"
-                        "accel.npu = cpu\nwarp.device = cpu\nspark.activity = 0\nsubstrate.enabled = false\n"
-                        "world.archive = 0\ndisaster.enabled = false\n"
-                        // (life history: on by default since 2026-11-08)
-                        "hazard.rays = false\nlife.gestation = 0\nmem.wipe_warning = 0\nlife.sleep = false\n"
-                        "engulf.corpse_cost = 1\n";
-    {
-        const char* path = "nova_test_memtiers.replay";
-        TextBuf cfg;
-        cfg.append(world);
-        cfg.append("mem.fast_share = 0\n");
-        Run run;
-        TextBuf err;
-        CHECK(make_run(run, cfg.c_str(), 4));
-        CHECK(run.open_replay(path, 20, &err));
-        run.run_until(60);
-        run.finish();
-        Array<u8> bytes;
-        CHECK(read_file(path, &bytes));
-        remove(path);
-        TextBuf v2, v3;
-        as_v2_without_tiers(text_of(bytes), 2, &v2);
-        as_v2_without_tiers(text_of(bytes), 3, &v3);
-        CHECK(strstr(v2.c_str(), "mem.fast_share") == nullptr);
-        ReplayLog log;
-        CHECK(log.parse(v2.view(), &err) && log.version() == 2);
-        ReplayResult r;
-        CHECK(replay_verify(log, 2, &r));
-        CHECK(r.ok && r.checkpoints_checked == 5); // ticks 0, 20, 40, 60 and the end
-        ReplayLog now;
-        CHECK(now.parse(v3.view(), &err) && now.version() == 3);
-        ReplayResult r3;
-        CHECK(!replay_verify(now, 2, &r3) && !r3.ok);
-    }
-    // A v3 snapshot (its config without mem.fast_share) resumes with no tiers
-    // and exactly; the same file as v4 takes the registry's tiers.
-    {
-        TextBuf with;
-        with.append(world);
-        with.append("mem.fast_share = 0\n");
-        Run a;
-        CHECK(make_run(a, with.c_str(), 2));
-        a.run_until(30);
-        Config old;
-        Config::ParseError pe;
-        CHECK(old.parse(world, &pe));
-        ByteWriter snap;
-        snapshot_write(a.world(), old, snap);
-        a.run_until(60);
-        Array<u8> bytes;
-        bytes.assign(snap.data(), snap.size());
-        Array<u8> v4;
-        v4.assign(snap.data(), snap.size());
-        bytes[8] = 3; // format v3
-        const u64 sum = hash_bytes(bytes.data(), bytes.size() - 8, 0x6E6F76612D736E70ull); // "nova-snp"
-        for (u32 i = 0; i < 8; ++i)
-            bytes[bytes.size() - 8 + i] = static_cast<u8>(sum >> (8 * i));
-        Run b;
-        TextBuf err;
-        const bool loaded = b.init_from_snapshot(bytes.data(), bytes.size(), 4, &err);
-        CHECK(loaded);
-        if (!loaded)
-            fprintf(stderr, "  %s\n", err.c_str());
-        if (loaded) {
-            bool none = true;
-            for (u32 n = 0; n < b.world().node_count(); ++n)
-                none = none && b.world().node_params(n).fast_end == 0;
-            CHECK(none && b.config().get_str("mem.fast_share", "").eq("0"));
-            b.run_until(60);
-            CHECK_EQ_U64(b.world().hash(), a.world().hash());
-        }
-        Run c;
-        TextBuf err4;
-        const bool l4 = c.init_from_snapshot(v4.data(), v4.size(), 4, &err4);
-        CHECK(l4 && c.world().node_params(0).fast_end > 0);
-    }
-    CHECK(Config::set_fallback(kLegacyDefaults, nullptr));
-}
 
 // --- everything on ----------------------------------------------------------------------
 
@@ -852,7 +729,9 @@ void test_everything() {
     CHECK_EQ_U64(hashes[2], hashes[0]);
     CHECK_EQ_U64(hashes[3], hashes[0]);
     CHECK(held_max > 0 && sum.wipes > 0 && sum.warp_steps > 0 && (sum.crashes + sum.burnouts + sum.disk_failures) > 0);
-    CHECK(sum.fast_allocs + sum.fast_alloc_fails > 0); // the fast-only ALLOC ran, through threads, shuffle and snapshot
+    // (The fast-only ALLOC is tested directly above. Random code here finds it
+    // about once in 400 ticks since docs/bites-plan.md -- bleeding shortens
+    // sparks -- so this short run no longer counts on seeing it.)
     {
         Run a;
         CHECK(make_run(a, everything("cpu"), 4));
@@ -909,6 +788,5 @@ void suite_memtiers() {
     test_fast_alloc();
     test_volatility();
     test_off_is_legacy();
-    test_old_files();
     test_everything();
 }

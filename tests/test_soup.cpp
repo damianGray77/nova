@@ -143,7 +143,8 @@ void sketch_world() {
                         "world.millicores = 8192\ncpu.instr_per_core = 100\nmem.upkeep = 0\n"
                         "heat.enabled = false\nhazard.copy = 0\nhazard.flaw = 0\nhazard.rot = 0\n"
                         "seed.genome = SENSE ALLOC NOP1 COPY DJNZ NOP0 INC DIVIDE\n"
-                        "seed.at = 2000\nseed.millicores = 8192\n",
+                        "seed.at = 2000\nseed.millicores = 8192\n"
+                        "life.bleed_every = 0\n", // (copying alone: the sketch's open ends would bleed)
                    1));
     u64 births = 0, deaths = 0;
     for (u32 t = 0; t < 40; ++t) {
@@ -178,7 +179,8 @@ void sketch_with_hazards() {
     CHECK(make_run(run, "seed = 11\nworld.model = soup\nworld.nodes = 1\nworld.soup_size = 8192\n"
                         "world.millicores = 8192\ncpu.instr_per_core = 100\nmem.upkeep = 0\n"
                         "seed.genome = SENSE ALLOC NOP1 COPY DJNZ NOP0 INC DIVIDE\n"
-                        "seed.at = 4000\nseed.millicores = 8192\n",
+                        "seed.at = 4000\nseed.millicores = 8192\n"
+                        "life.bleed_every = 0\n", // (copying alone, as above)
                    1));
     u64 births = 0, copy_errors = 0;
     for (u32 t = 0; t < 40; ++t) {

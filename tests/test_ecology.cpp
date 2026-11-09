@@ -70,7 +70,9 @@ void test_inert() {
 // decay; free disk (fossils) does.
 void test_decay() {
     EcoFix f;
-    CHECK(f.init("isa.table = nova_v2\nmem.decay = 0.05\nworld.disk = 1024\ndisk.decay = 0.05\ndisk.rot = 0\n"));
+    // (bleeding off: this is decay alone, and the planted body's ends are open)
+    CHECK(f.init("isa.table = nova_v2\nmem.decay = 0.05\nworld.disk = 1024\ndisk.decay = 0.05\ndisk.rot = 0\n"
+                 "life.bleed_every = 0\n"));
     const u32 b = plant(f.s, 100, "ALLOC INC INC INC INC INC INC INC", 100);
     CHECK(b != kNone);
     Cpu& c = f.s.cpu_mut(f.s.body(b).cpus);
@@ -239,8 +241,9 @@ void test_frozen() {
     CHECK(soup_ok(h.s));
 }
 
-// A bite of raw material: the nearest waste, up to CX codons and at most the
-// eater's own size, claimed as its latest block with its contents.
+// A bite of raw material: the nearest waste, up to CX codons and at most a
+// third of the eater's own size, rounded up (docs/bites-plan.md B2), claimed
+// as its latest block with its contents.
 void test_bite_waste() {
     EcoFix f;
     CHECK(f.init("engulf.bite = true\n"));
@@ -250,23 +253,32 @@ void test_bite_waste() {
     Cpu& c = f.s.cpu_mut(f.s.body(b).cpus);
     c.cx = 3;
     f.s.run_cpu(f.s.body(b).cpus, 1);
-    // ip 100: the nearest waste is 99; the run through it, backwards, is 97-99.
-    CHECK(c.err == 0 && f.s.body(b).mem == 6 && f.s.owner_body(97) == b && f.s.owner_body(99) == b);
-    CHECK(memcmp(before, f.s.mem() + 97, 3) == 0 && f.s.block(f.s.body(b).latest).start == 97);
-    CHECK(f.s.tally().bites_waste == 1 && f.s.tally().codons_bitten == 3 && f.s.tally().engulfs == 0);
+    // ip 100: the nearest waste is 99; a third of 3 codons is 1.
+    CHECK(c.err == 0 && f.s.body(b).mem == 4 && f.s.owner_body(99) == b && f.s.owner_body(98) != b);
+    CHECK(f.s.mem()[99] == before[2] && f.s.block(f.s.body(b).latest).start == 99);
+    CHECK(f.s.tally().bites_waste == 1 && f.s.tally().codons_bitten == 1 && f.s.tally().engulfs == 0);
     c.ip = 100;
-    c.cx = 1000; // capped at its own size, 6
+    c.cx = 1000; // a third of 4, rounded up: 2 (97-98)
     f.s.run_cpu(f.s.body(b).cpus, 1);
-    CHECK(f.s.body(b).mem == 12 && f.s.tally().codons_bitten == 9);
+    CHECK(f.s.body(b).mem == 6 && f.s.tally().codons_bitten == 3);
+    CHECK(memcmp(before, f.s.mem() + 97, 3) == 0);
     c.ip = 100;
     c.cx = 0; // bites nothing
     f.s.run_cpu(f.s.body(b).cpus, 1);
-    CHECK(c.err == 1 && f.s.body(b).mem == 12);
+    CHECK(c.err == 1 && f.s.body(b).mem == 6);
     CHECK(soup_ok(f.s));
+    // engulf.bite_share = 1: up to its whole size, as bites were before.
+    EcoFix g;
+    CHECK(g.init("engulf.bite = true\nengulf.bite_share = 1\n"));
+    const u32 b2 = plant(g.s, 100, "ENGULF INC INC", 100);
+    g.s.cpu_mut(g.s.body(b2).cpus).cx = 3;
+    g.s.run_cpu(g.s.body(b2).cpus, 1);
+    CHECK(g.s.body(b2).mem == 6 && g.s.tally().codons_bitten == 3);
 }
 
 // Aimed bites: a body no bigger than the bite is swallowed whole; a bigger
-// one loses its end nearest the eater and the same share of its millicores.
+// one loses its end nearest the eater, and its cores in proportion to the
+// code taken, its NOPs not counted (docs/bites-plan.md B4: NOPs are tissue).
 void test_bite_body() {
     EcoFix f;
     CHECK(f.init("engulf.bite = true\nworld.millicores = 4000\n"));
@@ -274,12 +286,13 @@ void test_bite_body() {
     const u32 small = plant(f.s, 150, "NOP1 INC INC INC", 300);
     CHECK(e != kNone && small != kNone);
     Cpu& c = f.s.cpu_mut(f.s.body(e).cpus);
-    c.cx = 10;
+    c.cx = 10; // a third of 10, rounded up: 4, the whole small prey
     f.s.run_cpu(f.s.body(e).cpus, 1);
     CHECK(c.err == 0 && !f.s.body(small).alive && f.s.body(e).units == 800 && f.s.tally().engulfs == 1);
     f.s.death_sweep();
-    // A bigger prey: 40 codons, 400 millicores. The eater (now 14 codons)
-    // bites 10 from its low end, nearest the eater, and a quarter of its units.
+    // A bigger prey: 40 codons (a NOP and 39 INC), 400 millicores. The eater
+    // (now 14 codons) bites 5 from its low end, nearest the eater: a NOP and 4
+    // of its 39 codons of code, so 41 of its 400 millicores.
     TextBuf big;
     big.append("NOP1");
     for (int i = 0; i < 39; ++i)
@@ -289,10 +302,11 @@ void test_bite_body() {
     c.ip = 100;
     c.cx = 10;
     f.s.run_cpu(f.s.body(e).cpus, 1);
-    CHECK(c.err == 0 && f.s.body(prey).alive && f.s.body(prey).mem == 30 && f.s.body(e).mem == 24);
-    CHECK(f.s.owner_body(200) == e && f.s.owner_body(209) == e && f.s.owner_body(210) == prey);
-    CHECK(f.s.block(f.s.body(prey).blocks).start == 210); // its genome now starts past the bite
-    CHECK(f.s.body(prey).units == 300 && f.s.body(e).units == 900 && f.s.tally().bites_body == 1);
+    CHECK(c.err == 0 && f.s.body(prey).alive && f.s.body(prey).mem == 35 && f.s.body(e).mem == 19);
+    CHECK(f.s.owner_body(200) == e && f.s.owner_body(204) == e && f.s.owner_body(205) == prey);
+    CHECK(f.s.block(f.s.body(prey).blocks).start == 205); // its genome now starts past the bite
+    CHECK(f.s.body(prey).units == 359 && f.s.body(e).units == 841 && f.s.tally().bites_body == 1);
+    CHECK(f.s.tally().wounds == 1 && f.s.open_end(prey, false)); // its low end is code now: a wound
     CHECK(soup_ok(f.s));
     // The prey's thread was running in the bitten code: it fails and halts.
     const u32 pc = f.s.body(prey).cpus;
@@ -308,13 +322,25 @@ void test_bite_body() {
     Cpu& c2 = g.s.cpu_mut(g.s.body(e2).cpus);
     c2.cx = 10;
     g.s.run_cpu(g.s.body(e2).cpus, 1);
-    CHECK(c2.err == 0 && g.s.owner_body(239) == e2 && g.s.owner_body(230) == e2 && g.s.owner_body(229) == prey2);
-    CHECK(g.s.block(g.s.body(prey2).blocks).start == 200 && g.s.body(prey2).mem == 30);
+    CHECK(c2.err == 0 && g.s.owner_body(239) == e2 && g.s.owner_body(236) == e2 && g.s.owner_body(235) == prey2);
+    CHECK(g.s.block(g.s.body(prey2).blocks).start == 200 && g.s.body(prey2).mem == 36);
     CHECK(soup_ok(g.s));
+    // Tissue: a bite of padding alone takes no cores and leaves no wound.
+    EcoFix h;
+    CHECK(h.init("engulf.bite = true\nworld.millicores = 4000\n"));
+    const u32 padded = plant(h.s, 200, "NOP0 NOP0 NOP0 NOP0 NOP0 NOP0 INC INC INC INC INC INC INC INC INC INC INC NOP0", 400);
+    const u32 e3 = plant(h.s, 100, "ENGULF NOP1 INC INC INC INC INC INC INC INC", 500);
+    Cpu& c3 = h.s.cpu_mut(h.s.body(e3).cpus);
+    c3.cx = 10; // 4 codons: four of the six NOPs
+    h.s.run_cpu(h.s.body(e3).cpus, 1);
+    CHECK(c3.err == 0 && h.s.body(padded).mem == 14 && h.s.body(padded).units == 400 && h.s.body(e3).units == 500);
+    CHECK(h.s.tally().wounds == 0 && !h.s.open_end(padded, false));
+    CHECK(soup_ok(h.s));
 }
 
-// A surface shields a body from blind bites: the blind eater takes the
-// nearest waste instead, past the shielded body.
+// docs/bites-plan.md B1: a surface no longer shields a body from blind
+// bites. The blind eater takes the nearest material -- here the surfaced
+// prey, nearer than any waste -- and leaves it wounded, its low end now code.
 void test_bite_shield() {
     EcoFix f;
     CHECK(f.init("engulf.bite = true\n"));
@@ -322,12 +348,13 @@ void test_bite_shield() {
     const u32 e = plant(f.s, 100, "ENGULF INC INC INC", 100);
     const u32 prey = plant(f.s, 104, "NOP1 INC INC INC", 100);
     Cpu& c = f.s.cpu_mut(f.s.body(e).cpus);
-    c.cx = 4;
+    c.cx = 4; // a third of 4, rounded up: 2
     f.s.run_cpu(f.s.body(e).cpus, 1);
-    CHECK(c.err == 0 && f.s.body(prey).mem == 4 && f.s.owner_body(108) == e && f.s.tally().bites_waste == 1);
+    CHECK(c.err == 0 && f.s.body(prey).mem == 2 && f.s.owner_body(104) == e && f.s.owner_body(105) == e);
+    CHECK(f.s.owner_body(106) == prey && f.s.tally().bites_body == 1 && f.s.tally().bites_waste == 0);
+    CHECK(f.s.tally().wounds == 1 && f.s.open_end(prey, false));
     CHECK(soup_ok(f.s));
 }
-
 // Dormancy (docs/dormancy-plan.md): a frozen body with a reserve (here, disk)
 // goes dormant instead of dying -- its cores and disk back to the node, its
 // code kept -- and with nowhere to go rests here, waking when a core of its
@@ -496,15 +523,15 @@ void test_dormant_lineage() {
     CHECK(soup_ok(h.s));
 }
 
-// A resting dormant program is easy food: no surface shields it from a blind
-// bite (a live body with the same surface would be), and swallowed whole it
-// is gone.
+// A resting dormant program is easy food: swallowed whole it is gone. (No
+// surface shields a body from a blind bite now, docs/bites-plan.md B1; the
+// eater is big enough that a third of it covers the prey.)
 void test_dormant_bitten() {
     EcoFix f;
     CHECK(f.init("engulf.bite = true\nworld.disk = 4096\nlife.dormancy = true\n"));
     CHECK(plant(f.s, 90, "NOP1 NOP1 NOP1 NOP1 NOP1 NOP1 NOP1 NOP1 NOP1 NOP1", 100) != kNone);
-    const u32 e = plant(f.s, 100, "ENGULF INC INC INC", 100);
     const u32 prey = plant(f.s, 104, "NOP1 ALLOC INC INC", 100);
+    const u32 e = plant(f.s, 108, "ENGULF INC INC INC INC INC INC INC INC INC INC INC", 100);
     Cpu& pc = f.s.cpu_mut(f.s.body(prey).cpus);
     pc.ip = 105;
     pc.bx = 3;
@@ -519,7 +546,6 @@ void test_dormant_bitten() {
     f.s.death_sweep();
     CHECK(soup_ok(f.s));
 }
-
 // Dormancy in a world: frozen bodies go dormant, drift between nodes and wake
 // where there's room; the same world at 1, 4 and 20 threads, under reversed
 // dispatch, and through a snapshot taken with programs drifting and resting.
@@ -597,8 +623,8 @@ void test_bite_action() {
         big.append(" INC");
     const u32 prey = plant(f.s, 200, big.c_str(), 400);
     TextBuf eat;
-    eat.append("ENGULF NOP0");
-    for (int i = 0; i < 18; ++i)
+    eat.append("ENGULF NOP0"); // 60 codons: a third is 20 (docs/bites-plan.md B2)
+    for (int i = 0; i < 58; ++i)
         eat.append(" INC");
     const u32 e = plant(f.s, 100, eat.c_str(), 500);
     Cpu& c = f.s.cpu_mut(f.s.body(e).cpus);

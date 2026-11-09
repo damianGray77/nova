@@ -515,18 +515,20 @@ void test_dormancy() {
     CHECK(g.s.body(g.b).alive && !g.s.dormant(g.b) && g.s.tally().dormant_woke == 1);
     CHECK(g.s.disk_held(g.b) == 16 + 4 && g.s.archive_held(g.b) == 4 && soup_ok(g.s));
 
-    // A bite of a resting dormant program takes its share of both reserves.
+    // A bite of a resting dormant program takes its share of both reserves:
+    // with NOPs as tissue (docs/bites-plan.md B4) the share of its code, its
+    // NOPs not counted. (bite_share 1: a bite up to the eater's size.)
     TierFix h;
-    CHECK(h.init("ENGULF INC INC INC", 256, 64, "life.dormancy = true\nengulf.bite = true\n"));
+    CHECK(h.init("ENGULF INC INC INC", 256, 64, "life.dormancy = true\nengulf.bite = true\nengulf.bite_share = 1\n"));
     CHECK(plant(h.s, 90, "NOP1 NOP1 NOP1 NOP1 NOP1 NOP1 NOP1 NOP1 NOP1 NOP1", 100) != kNone); // no waste behind
     const u32 prey = plant(h.s, 104, "NOP1 ALLOC INC INC INC INC INC INC", 100);
     CHECK(prey != kNone);
     h.op_on(prey, 105, 0, 3, 16);
     h.op_on(prey, 105, 0, 6, 16);
     CHECK(h.s.force_dormant(prey));
-    h.op(100, 0, 0, 4); // a blind bite of 4 of its 8 codons
+    h.op(100, 0, 0, 4); // a blind bite of 4 of its 8 codons: NOP1 ALLOC INC INC, 3 of its 7 of code
     CHECK(h.s.tally().bites_body == 1 && h.s.dormant(prey));
-    CHECK(h.s.dormant_state(prey).disk_reserve == 8 && h.s.dormant_state(prey).archive_reserve == 8);
+    CHECK(h.s.dormant_state(prey).disk_reserve == 9 && h.s.dormant_state(prey).archive_reserve == 9); // 16 - 7
 }
 
 // fail_disk_tier (disasters X5, amended by W4): one tier's codons become
@@ -766,50 +768,31 @@ void test_world() {
     CHECK(h[2] != h[0]);
 }
 
-// A snapshot from before the disk tiers (format v3, its config without
-// world.archive) loads with the archive off, as it ran, and resumes exactly;
-// on the engine's defaults the archive would otherwise be on and the disk
-// section the wrong shape. (A v3 build's world also had the old spark rule,
-// sparks by activity coming with the same v4: a ring has no substrates.)
+// A snapshot from before v8 comes from an incompatible engine (Damian,
+// 2026-11-08: "old run data is incompatible"; docs/bites-plan.md): refused,
+// with the reason, rather than resumed on other rules.
 void test_old_snapshot() {
-    CHECK(Config::set_fallback(nullptr, nullptr));
     const char* w = "world.model = soup\nworld.nodes = 4\nworld.soup_size = 4096\nspark.initial = 40\n"
                     "spark.rate = 0.25\naccel.gpu = cpu\naccel.npu = cpu\nwarp.device = cpu\n";
-    TextBuf with;
-    with.append(w);
-    with.append("world.archive = 0\nspark.activity = 0\ndisaster.enabled = false\n" // (nor the disasters,
-                "mem.fast_share = 0\n"                                             // nor memory tiers: W3,
-                "hazard.rays = false\nlife.gestation = 0\nmem.wipe_warning = 0\n"  // nor life history,
-                "life.sleep = false\nengulf.corpse_cost = 1\n");                                           // 2026-11-08)
     Run a;
-    CHECK(make_run(a, with.c_str(), 2));
+    CHECK(make_run(a, w, 2));
     a.run_until(30);
-    Config old; // the config as a v3 build wrote it: no world.archive (nor spark.activity, nor disasters)
-    Config::ParseError pe;
-    CHECK(old.parse(w, &pe));
     ByteWriter snap;
-    snapshot_write(a.world(), old, snap);
-    a.run_until(60);
+    snapshot_write(a.world(), a.config(), snap);
     Array<u8> bytes;
     bytes.assign(snap.data(), snap.size());
-    bytes[8] = 3; // format v3
+    bytes[8] = static_cast<u8>(kSnapshotVersion - 1); // the format before
     const u64 sum = hash_bytes(bytes.data(), bytes.size() - 8, 0x6E6F76612D736E70ull); // "nova-snp"
     for (u32 i = 0; i < 8; ++i)
         bytes[bytes.size() - 8 + i] = static_cast<u8>(sum >> (8 * i));
     Run b;
     TextBuf err;
-    const bool loaded = b.init_from_snapshot(bytes.data(), bytes.size(), 2, &err);
-    CHECK(loaded);
-    if (!loaded)
-        fprintf(stderr, "  %s\n", err.c_str());
-    if (loaded) {
-        CHECK(b.world().node_params(0).archive == 0 && b.config().get_str("world.archive", "").eq("0"));
-        b.run_until(60);
-        CHECK_EQ_U64(b.world().hash(), a.world().hash());
-    }
-    CHECK(Config::set_fallback(kLegacyDefaults, nullptr));
+    CHECK(!b.init_from_snapshot(bytes.data(), bytes.size(), 2, &err));
+    CHECK(strstr(err.c_str(), "version") != nullptr);
+    Run c; // the file as written loads
+    TextBuf err2;
+    CHECK(c.init_from_snapshot(snap.data(), snap.size(), 2, &err2));
 }
-
 // --- with substrates (docs/world-plan.md W1 with W4; docs/results/integration.md) ---
 
 // The classic costs of an 8-codon DISK store on each tier, run on a quiet

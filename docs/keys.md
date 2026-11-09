@@ -9,7 +9,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 - **Families:** a key with a `<placeholder>` stands for one setting per member listed.
 - **Needs:** the switch the setting depends on; it does nothing while that is off.
 
-380 settings, 83 of them from 14 families; 11 hidden (tests and demos).
+384 settings, 83 of them from 14 families; 11 hidden (tests and demos).
 
 ## Contents
 
@@ -311,9 +311,10 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `contact.range` | whole | 256 | 0 to 16777216 (max computed) | **Contact range**. The farthest from the attacker's IP an ENGULF or INJECT reaches a surface (at most the node's size). |
 | `contact.cost_base` | whole | 8 | 0 to 1000000 | **Contact cost**. Instructions an ENGULF or INJECT attempt costs, success or not. |
 | `contact.cost_per_codon` | number | 1 | 0 to 1000000 | **Contact cost per codon**. ... plus this per codon moved. |
-| `contact.inject_key` | switch | true | true or false | **INJECT needs a key**. INJECT needs a key: a template matching a host surface. |
 | `contact.inject_room` | number | 1 | 0 to 1000000 | **INJECT room**. INJECT fails unless the host block is at least this x the payload (0 = off). |
-| `engulf.bite` | switch | true | true or false | **ENGULF bites**. ENGULF takes a bite of CX codons, of raw material or of a body; else it swallows whole prey (Phase 9). |
+| `engulf.bite` | switch | true | true or false | **ENGULF bites**. ENGULF takes a bite of CX codons, of raw material or of a body; else it swallows whole prey (Phase 9). With bites a NOP surface no longer shields a body, and INJECT lands only through an open end (a wound: an end of the host's code whose outermost codon isn't a NOP), just inside it, starting a parasite thread there (docs/bites-plan.md). |
+| `engulf.bite_share` | number | 0.3333333333333333 | 1e-06 to 1 | **Bite size**. A bite takes at most this share of the biter's own size (rounded up): prey no bigger than that is swallowed whole, a bigger one loses a piece from its nearest end (1 = up to the biter's whole size). Needs `engulf.bite`. |
+| `engulf.tissue` | switch | true | true or false | **NOPs as tissue**. A bitten body loses cores in proportion to the code taken, not counting NOPs: padding is tissue that protects the code and the cores inside (off: in proportion to every codon taken). Needs `engulf.bite`. |
 | `engulf.corpse_cost` | number | 0.9 | 0 to 1 | **Corpse bite cost**. An ENGULF charges each codon of a dead program's fresh remnant (stamped by the salvage rule, not yet decayed to INERT), and each codon of a dormant program, this share of a raw codon's cost, in instructions per codon and, with a timed table, in the bite's time: scavenging pays a little better than vent material, and a sleeper is a little cheaper to eat than a waking program. Nothing is made (1 = the same, as before 2026-11-08: older files keep that, legacy.h). |
 | `salvage.ratio` | number | 4 | 0 to 1000000 | **Salvage ratio**. A program takes another's remnants intact only up to this x its own genome length; bigger code comes through in fragments (0 = off). |
 
@@ -337,6 +338,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `life.frozen_ticks` | whole | 200 | 0 to 1000000000 | **Frozen ticks**. A body none of whose threads ran an instruction for this long dies, or goes dormant (0 = never). |
 | `life.gestation` | whole | 25 | 0 to 1000000000 | **Gestation**. A daughter can be divided off only this many ticks after the ALLOC that made her block; an earlier DIVIDE waits, idle (0 = at once, as before 2026-11-08: older files keep that, legacy.h; docs/lifehistory-plan.md G). |
 | `life.gestation_per_codon` | number | 0 | 0 to 1000000 | **Gestation per codon**. ... plus this many ticks per codon of her block. Needs `life.gestation`. |
+| `life.bleed_every` | whole | 100 | 0 to 1000000000 | **Bleeding**. Each open end of a body's code (an end whose outermost codon isn't a NOP) loses its outermost codon to waste once in this many ticks, until a NOP is outermost: a bite's wound bleeds until the program repairs it by writing a NOP there, and an internal NOP stops it (0 = no bleeding; docs/bites-plan.md B6). |
 
 ## Dormancy
 
@@ -355,19 +357,19 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 |---|---|---|---|---|
 | `disaster.enabled` | switch | true | true or false | **Disasters**. Rare random disasters: power surges, OS crashes, burnouts, disk failures and lightning storms. |
 | `disaster.surge` | switch | true | true or false | **Power surges**. A region collapses: every live node within a few hops of a random one (needs a map world). Needs `disaster.enabled`. |
-| `disaster.surge_every` | whole | 50000 | at least 0 | **Surge interval**. Mean ticks between power surges anywhere in the world (0 = none). Needs `disaster.surge`. |
+| `disaster.surge_every` | whole | 55 | at least 0 | **Surge interval**. Mean ticks between power surges anywhere in the world (0 = none). Needs `disaster.surge`. |
 | `disaster.surge_hops_min` | whole | 1 | 0 to 64 | **Surge reach, least**. A surge's reach in hops along paths, drawn per surge from here ... Needs `disaster.surge`. |
 | `disaster.surge_hops_max` | whole | 2 | 0 to 64 | **Surge reach, most**. ... to here. Needs `disaster.surge`. |
-| `disaster.surge_lead_min` | whole | 1000 | 1 to 1000000000 | **Surge warning, least**. Ticks of brownout before a surge (its symptoms), drawn per surge from here ... Needs `disaster.surge`. |
-| `disaster.surge_lead_max` | whole | 5000 | 1 to 1000000000 | **Surge warning, most**. ... to here. Needs `disaster.surge`. |
+| `disaster.surge_lead_min` | whole | 300 | 1 to 1000000000 | **Surge warning, least**. Ticks of brownout before a surge (its symptoms), drawn per surge from here ... Needs `disaster.surge`. |
+| `disaster.surge_lead_max` | whole | 1500 | 1 to 1000000000 | **Surge warning, most**. ... to here. Needs `disaster.surge`. |
 | `disaster.crash` | switch | true | true or false | **OS crashes**. A node reboots: nothing runs and nothing arrives meanwhile; some of its programs are deleted and the rest restart. Needs `disaster.enabled`. |
-| `disaster.crash_every` | whole | 5000 | at least 0 | **Crash interval**. Mean ticks between OS crashes anywhere in the world (0 = none). Needs `disaster.crash`. |
+| `disaster.crash_every` | whole | 3 | at least 0 | **Crash interval**. Mean ticks between OS crashes anywhere in the world (0 = none). Needs `disaster.crash`. |
 | `disaster.reboot_min` | whole | 20 | 1 to 1000000000 | **Reboot, shortest**. Ticks a crashed node takes to reboot, drawn per crash from here ... Needs `disaster.crash`. |
 | `disaster.reboot_max` | whole | 100 | 1 to 1000000000 | **Reboot, longest**. ... to here. Needs `disaster.crash`. |
-| `disaster.crash_share_min` | number | 0.1 | 0 to 1 | **Crash deletes, least**. The share of a crashed node's running programs deleted (ordinary deaths), drawn per crash from here ... Needs `disaster.crash`. |
-| `disaster.crash_share_max` | number | 0.6 | 0 to 1 | **Crash deletes, most**. ... to here. Needs `disaster.crash`. |
-| `disaster.crash_lead_min` | whole | 200 | 1 to 1000000000 | **Crash warning, least**. Ticks of instability before a crash (its symptoms), drawn per crash from here ... Needs `disaster.crash`. |
-| `disaster.crash_lead_max` | whole | 1000 | 1 to 1000000000 | **Crash warning, most**. ... to here. Needs `disaster.crash`. |
+| `disaster.crash_share_min` | number | 0.3 | 0 to 1 | **Crash deletes, least**. The share of a crashed node's running programs deleted (ordinary deaths), drawn per crash from here ... Needs `disaster.crash`. |
+| `disaster.crash_share_max` | number | 0.8 | 0 to 1 | **Crash deletes, most**. ... to here. Needs `disaster.crash`. |
+| `disaster.crash_lead_min` | whole | 100 | 1 to 1000000000 | **Crash warning, least**. Ticks of instability before a crash (its symptoms), drawn per crash from here ... Needs `disaster.crash`. |
+| `disaster.crash_lead_max` | whole | 400 | 1 to 1000000000 | **Crash warning, most**. ... to here. Needs `disaster.crash`. |
 | `disaster.burnout` | switch | true | true or false | **Burnouts**. Whole programs' cores go offline for repair and the programs go dormant, resting at home first. Needs `disaster.enabled`. |
 | `disaster.burnout_every` | whole | 2000 | at least 0 | **Burnout interval**. Mean ticks between burnouts anywhere in the world (0 = none). Needs `disaster.burnout`. |
 | `disaster.burnout_share_min` | number | 0.1 | 0 to 1 | **Burnout share, least**. Programs are picked until they hold this share of the node's cores (millicores and GPU units), drawn per burnout from here ... Needs `disaster.burnout`. |
@@ -383,16 +385,16 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `disaster.diskfail_lead_min` | whole | 500 | 1 to 1000000000 | **Disk warning, least**. Ticks of faster disk rot before a disk failure (its symptoms), drawn from here ... Needs `disaster.diskfail`. |
 | `disaster.diskfail_lead_max` | whole | 2000 | 1 to 1000000000 | **Disk warning, most**. ... to here. Needs `disaster.diskfail`. |
 | `disaster.storm` | switch | true | true or false | **Lightning storms**. Storms travel over the map with a heading, striking the node they're over: runs of random codons. Needs `disaster.enabled`. |
-| `disaster.storm_every` | whole | 5000 | at least 0 | **Storm interval**. Mean ticks between storms forming anywhere in the world (0 = none). Needs `disaster.storm`. |
+| `disaster.storm_every` | whole | 300 | at least 0 | **Storm interval**. Mean ticks between storms forming anywhere in the world (0 = none). Needs `disaster.storm`. |
 | `disaster.storm_life_min` | whole | 2000 | 1 to 1000000000 | **Storm life, shortest**. A storm's lifetime in ticks, drawn per storm from here ... Needs `disaster.storm`. |
 | `disaster.storm_life_max` | whole | 10000 | 1 to 1000000000 | **Storm life, longest**. ... to here. Needs `disaster.storm`. |
 | `disaster.storm_move_min` | whole | 200 | 1 to 1000000000 | **Storm moves, soonest**. Ticks between a storm's moves along a path, drawn per move from here ... Needs `disaster.storm`. |
 | `disaster.storm_move_max` | whole | 800 | 1 to 1000000000 | **Storm moves, latest**. ... to here. Needs `disaster.storm`. |
 | `disaster.storm_turn` | number | 30 | 0 to 180 | **Storm turn**. The most a storm's heading turns at a move, in degrees, either way. Needs `disaster.storm`. |
-| `disaster.strike_every_min` | whole | 100 | 1 to 1000000000 | **Strikes, most often**. A storm's mean ticks between strikes, drawn per storm from here ... Needs `disaster.storm`. |
-| `disaster.strike_every_max` | whole | 400 | 1 to 1000000000 | **Strikes, least often**. ... to here. Needs `disaster.storm`. |
-| `disaster.strike_min` | whole | 64 | 1 to 16777216 | **Strike size, least**. Codons a strike randomises at a random place in memory, drawn per strike from here ... Needs `disaster.storm`. |
-| `disaster.strike_max` | whole | 512 | 1 to 16777216 | **Strike size, most**. ... to here. Needs `disaster.storm`. |
+| `disaster.strike_every_min` | whole | 30 | 1 to 1000000000 | **Strikes, most often**. A storm's mean ticks between strikes, drawn per storm from here ... Needs `disaster.storm`. |
+| `disaster.strike_every_max` | whole | 120 | 1 to 1000000000 | **Strikes, least often**. ... to here. Needs `disaster.storm`. |
+| `disaster.strike_min` | whole | 512 | 1 to 16777216 | **Strike size, least**. Codons a strike randomises at a random place in memory, drawn per strike from here ... Needs `disaster.storm`. |
+| `disaster.strike_max` | whole | 2048 | 1 to 16777216 | **Strike size, most**. ... to here. Needs `disaster.storm`. |
 | `disaster.symptoms` | switch | true | true or false | **Symptoms**. Every disaster is preceded by symptoms that ramp up over its warning time in quantities programs already read or suffer. Needs `disaster.enabled`. |
 | `disaster.false_alarms` | number | 0.25 | 0 to 0.9 | **False alarms**. The share of symptom episodes (and storms: dry ones) that fade without a disaster. Needs `disaster.symptoms`. |
 | `disaster.brownout` | number | 1 | 0 to 1000000 | **Brownout heat**. A surge's warning: extra heat input on every unit and page in its region, a tick, at its peak. Needs `disaster.symptoms`. |
@@ -431,6 +433,8 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 | `detect.gate_depth` | whole | 2 | 1 to 1000000 | **Gate depth**. The replicator gate: a lineage with a member this many generations deep ... Needs `detect.enabled`. |
 | `detect.gate_alive` | whole | 2 | 1 to 1000000 | **Gate alive**. ... and this many members alive at once. Needs `detect.enabled`. |
 | `detect.defended` | whole | 3 | 1 to 1000000000 | **Defended**. The defended milestone: a gated lineage whose members made this many attacks fail by changing in time. Needs `detect.enabled`. |
+| `detect.parasite` | whole | 3 | 1 to 1000000000 | **Parasite**. The parasite milestone: a gated lineage whose parasite threads made this many inheriting daughters from inside hosts (docs/bites-plan.md). Needs `detect.enabled`. |
+| `detect.repairs` | whole | 3 | 1 to 1000000000 | **Healer**. The healer milestone: a gated lineage whose members closed this many open ends of their own code by writing a NOP there. Needs `detect.enabled`. |
 | `profile.enabled` | switch | true | true or false | **Behaviour profiles**. Follow a few bodies per node now and then and record what they do: profiles.csv and the role columns. Observe-only. |
 | `profile.every` | whole | 1000 | 1 to 1000000000 | **Profile every**. Ticks between sampling rounds. Needs `profile.enabled`. |
 | `profile.per_node` | whole | 4 | 1 to 4096 | **Profiles per node**. Bodies each node picks to follow every round, from the observer's own random stream. Needs `profile.enabled`. |

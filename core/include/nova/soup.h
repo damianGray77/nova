@@ -183,7 +183,6 @@ struct SoupParams {
     u32 contact_base;       // instructions charged per attempt, success or not
     double contact_per_codon; // instructions charged per codon moved
     // INJECT's own criteria (Phase 1b, Damian; design.md 6.6)
-    bool inject_key;        // contact.inject_key: needs a key and a host surface (no 0/0 = 1)
     double inject_room;     // contact.inject_room: host block >= room x payload, else it fails (0 = off)
     // dispersal (Phase 3, design.md 6.9): DIVIDE to a neighbour; SENSE 14
     bool dispersal;
@@ -269,6 +268,10 @@ struct SoupParams {
     u32 vent_rate;        // vent.rate: codons a vent writes a tick
     u32 vent_radius;      // vent.radius: how far from its vent a codon lands, at most
     bool bites;           // engulf.bite: ENGULF bites (else it takes whole prey, as in Phase 9)
+    // Bites as wounds, NOPs as tissue, parasites (docs/bites-plan.md; with bites)
+    double bite_share;    // engulf.bite_share: a bite's most codons, x the biter's size, rounded up (B2)
+    bool tissue;          // engulf.tissue: cores lost in proportion to the code taken, NOPs not counted (B4)
+    u32 bleed_every;      // life.bleed_every: ticks between codons an open end loses (0: no bleeding; B6)
     bool threads_end;     // life.threads_end: a halted thread leaves its body
     u32 frozen_ticks;     // life.frozen_ticks: a body that runs nothing this long dies (0: never)
     u32 gestation;        // life.gestation: ticks from a daughter's ALLOC to the earliest DIVIDE (0: none)
@@ -363,6 +366,8 @@ struct Cpu {
     u8 errs;           // consecutive errors
     u8 halted;
     u8 yielded;        // YIELD: idle for the rest of this tick
+    u8 parasite;       // started by an INJECT in this (host) body (docs/bites-plan.md I3)
+    u8 pad_[7];
 };
 
 // Block, Body and Cpu are hashed and snapshotted as raw bytes (Soup::hash_into,
@@ -372,7 +377,7 @@ struct Cpu {
 // update the number.
 static_assert(sizeof(Block) == 6 * 4, "Block must have no implicit padding");
 static_assert(sizeof(Body) == 8 + 14 * 4, "Body must have no implicit padding");
-static_assert(sizeof(Cpu) == (4 + kMaxStack + 6) * 4 + 8 + 4 + 4, "Cpu must have no implicit padding");
+static_assert(sizeof(Cpu) == (4 + kMaxStack + 6) * 4 + 8 + 4 + 4 + 8, "Cpu must have no implicit padding");
 
 // Warps (Phase 8, design.md 6.14): a body's code run in lockstep on many
 // lanes, each lane a full CPU state. All 32-bit words, because the GPU reads
@@ -668,6 +673,13 @@ struct SoupTally {
     u64 ray_inserts;       // codons a cosmic ray copied in place, growing a block (R7)
     u64 ray_deletes;       // ... it deleted, shrinking a block
     u64 corpse_codons;     // codons of fresh corpses (stamped, not INERT) bitten, at engulf.corpse_cost
+    // --- Bites as wounds, parasites (docs/bites-plan.md)
+    u64 wounds;            // bites of a body that left an end of its code open (B5)
+    u64 bled;              // codons lost to bleeding from open ends (B6)
+    u64 repairs;           // open ends closed by writing a NOP over the outermost codon (B5)
+    u64 parasite_threads;  // threads an INJECT started in its host (I3)
+    u64 parasite_divides;  // daughters divided off by parasite threads (I4)
+    u64 struck_bodies;     // living bodies whose code a lightning strike changed (section 7)
 };
 
 // docs/lifehistory-plan.md W2-W5: a volatility wipe drawn and not yet landed
@@ -841,6 +853,10 @@ class Soup {
     // many. ALLOC's CPU (E) selector.
     u32 claim_p_units(u32 body, u32 k) { return claim_units(body, k); }
     u32 claim_e_units(u32 body, u32 k);
+    // docs/bites-plan.md B6: each body whose turn it is this tick (one tick in
+    // life.bleed_every, by its serial) loses the outermost codon of each open
+    // end of its code to waste, a remnant of it. No random draws.
+    void bleed();
     void death_sweep();
     // Gives body up to k GPU (NPU) units chosen at random from the pool;
     // returns how many (0 without one). Also what ALLOC's selector does.
@@ -877,6 +893,14 @@ class Soup {
     u8 origin(u32 b) const { return b < origin_.size() ? origin_[b] : kOriginUnknown; }
     const Dormant& dormant_state(u32 b) const { return dorm_[b]; }
     u32 resting_count() const; // dormant programs resting here
+    // Bites as wounds (docs/bites-plan.md B5): the outermost codon body b's
+    // code (its first block) still owns at its low (high) end, or kNone; and
+    // whether that codon isn't a NOP: an open end, a wound that bleeds (B6)
+    // and lets INJECT in (I1). A body down to one codon has no open end.
+    u32 outer_codon(u32 b, bool high) const;
+    bool open_end(u32 b, bool high) const;
+    u64 open_ends() const; // open ends of the bodies here now (a stats gauge)
+    u64 infected() const;  // bodies with a parasite thread now (I3; a stats gauge)
     // A varied world (docs/world-plan.md W5): the share of memory held by
     // living bodies, counting neither waste nor resting dormant programs; and
     // the spark rate it gives now, spark.rate x the node's spark weight x

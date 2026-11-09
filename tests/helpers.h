@@ -23,7 +23,6 @@ inline const char* const kBusyWorld = "seed = 42\n"
 // INJECT's 0/0 = 1 contest and truncated payloads. Appended to a config, it
 // reproduces Phase 1a exactly.
 inline const char* const kPhase1aRules = "mem.upkeep = 0\n"
-                                         "contact.inject_key = false\n"
                                          "contact.inject_room = 0\n";
 
 // A busy soup world: random sparks, a seeded sketch replicator on every node,
@@ -45,7 +44,7 @@ inline const char* const kSoupWorld = "seed = 42\n"
                                       "spark.grant = 8\n"
                                       "spark.min_len = 8\n"
                                       "spark.max_len = 48\n"
-                                      "seed.genome = SENSE ALLOC NOP1 COPY DJNZ NOP0 INC DIVIDE\n"
+                                      "seed.genome = NOP0 SENSE ALLOC NOP1 COPY DJNZ NOP0 INC DIVIDE NOP0\n"
                                       "seed.at = 1000\n"
                                       "seed.millicores = 200\n"
                                       "hazard.copy = 0.005\n"
@@ -53,7 +52,10 @@ inline const char* const kSoupWorld = "seed = 42\n"
                                       "hazard.rot = 0.00005\n"
                                       "heat.cpu_gain = 36\n"
                                       "heat.fetch_gain = 0.06\n"
-                                      "heat.write_gain = 0.5\n";
+                                      // (1.5, was 0.5: with INJECT landing only through wounds
+                                      // (docs/bites-plan.md) there are fewer writes, and pages
+                                      // must still get hot enough to let codons go)
+                                      "heat.write_gain = 1.5\n";
 
 // A busy soup world under the Phase 1b rules: memory upkeep (the default), CPU
 // wear, sparks last, the doubled-invasion table, INJECT's key and fit rules,
@@ -77,10 +79,13 @@ inline const char* const kSoupWorld1b = "seed = 42\n"
                                         "spark.grant = 20\n"
                                         "spark.min_len = 8\n"
                                         "spark.max_len = 24\n"
-                                        "seed.genome = NOP0 SENSE ALLOC NOP1 COPY DJNZ NOP0 SENSE "
-                                        "INJECT NOP1 DIVIDE\n"
+                                        // (a COPY replicator sealed by NOPs: open ends bleed, and the keyed
+                                        // INJECT the 1b ancestor re-infected its relatives with is gone,
+                                        // INJECT landing only through wounds now: docs/bites-plan.md)
+                                        "seed.genome = NOP0 ZERO ROTB SENSE ALLOC NOP1 COPY DJNZ NOP0 ZERO INC "
+                                        "ROTB SENSE DIVIDE NOP0\n"
                                         "seed.at = 1000\n"
-                                        "seed.millicores = 20\n"
+                                        "seed.millicores = 200\n"
                                         "hazard.copy = 0.005\n"
                                         "hazard.flaw = 0.001\n"
                                         "hazard.rot = 0.00005\n"
@@ -155,8 +160,8 @@ inline const char* const kSoupWorldAccel = "seed = 42\n"
                                            "spark.grant = 20\n"
                                            "spark.min_len = 8\n"
                                            "spark.max_len = 24\n"
-                                           "seed.genome = SENSE PUSH ALLOC ZERO INC SHL SHL SHL SHL ROTB "
-                                           "POP GPU ZERO ROTB SENSE NOP1 COPY DJNZ NOP0 SENSE DIVIDE\n"
+                                           "seed.genome = NOP0 SENSE PUSH ALLOC ZERO INC SHL SHL SHL SHL ROTB "
+                                           "POP GPU ZERO ROTB SENSE NOP1 COPY DJNZ NOP0 SENSE DIVIDE NOP0\n"
                                            "seed.at = 1000\n"
                                            "seed.millicores = 160\n"
                                            "seed.npus = 100\n"
@@ -189,8 +194,8 @@ inline const char* const kSoupWorldProc = "seed = 42\n"
                                           "spark.grant = 20\n"
                                           "spark.min_len = 8\n"
                                           "spark.max_len = 24\n"
-                                          "seed.genome = ZERO ROTB SENSE ALLOC NOP1 COPY DJNZ NOP0 ZERO INC "
-                                          "ROTB SENSE DIVIDE\n"
+                                          "seed.genome = NOP0 ZERO ROTB SENSE ALLOC NOP1 COPY DJNZ NOP0 ZERO INC "
+                                          "ROTB SENSE DIVIDE NOP0\n" // (NOP caps: open ends bleed, bites plan B6)
                                           "seed.at = 600\n"
                                           "seed.millicores = 200\n"
                                           "hazard.copy = 0.005\n"
@@ -208,7 +213,7 @@ inline const char* const kPhase4All = "heat.ambient = 0.05\n"
                                       "world.disk = 1024\n"
                                       "disk.rot = 0.0001\n"
                                       "mem.volatility = 0.0002\n"
-                                      "salvage.ratio = 4\n"
+                                      "salvage.ratio = 2\n" // (2, was 4: so remnants still garble in 300 ticks)
                                       "signal.channels = 8\n"
                                       "node.endurance = 3000\n"
                                       "node.fallow_min = 20\n"

@@ -24,6 +24,10 @@
 // log or older replays with hazard.rays = false unless it names it (legacy.h).
 // v5 (the same day): cheaper corpses came on by default, so a v4 log or older
 // replays with engulf.corpse_cost = 1 unless it names it.
+// v6 (the same day, docs/bites-plan.md): bites as wounds, bleeding, INJECT
+// only through wounds and parasite threads, deadlier disasters. Older logs
+// are refused (Damian: old run data is incompatible), and the legacy texts
+// above are gone with them.
 //
 // Knob events are what keep a run reproducible once the analysis UI lets people
 // turn knobs mid-run: the change is logged with its tick, and replay reapplies
@@ -36,7 +40,8 @@
 
 namespace nova {
 
-inline constexpr u32 kReplayVersion = 5;
+inline constexpr u32 kReplayVersion = 6;
+inline constexpr u32 kReplayOldest = 6; // older logs come from an incompatible engine
 
 class ReplayWriter {
   public:
@@ -66,9 +71,8 @@ class ReplayLog {
 
     // The config as logged, one "key = value" line per record.
     Str config_text() const { return config_.view(); }
-    // The config to replay with (into *out, replacing it): the logged one,
-    // and for a log before v3 the legacy defaults (legacy.h) for the settings
-    // it doesn't name. False, with the reason, if the logged text won't parse.
+    // The config to replay with (into *out, replacing it): the logged one.
+    // False, with the reason, if the logged text won't parse.
     bool replay_config(Config* out, Config::ParseError* err) const;
 
     u32 version() const { return version_; }

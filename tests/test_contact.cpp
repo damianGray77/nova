@@ -93,30 +93,33 @@ void shared_rights() {
     CHECK(f.s.body_count() == 1 && f.s.body(host).alive && soup_ok(f.s));
 }
 
-// Graded: template 001 against surface 111 matches 2 of 3, so it wins 2/3 of
-// the time. INJECT keeps the victim alive, so it can be retried.
+// docs/bites-plan.md I1: INJECT has no roll. A wound (an open end) lets it in
+// every time, whatever its template matches; a host sealed at both ends never.
+// INJECT keeps the victim alive, so it can be retried.
 void graded() {
     Fix f;
     CHECK(f.init());
     u32 a = plant(f.s, 100, "INJECT NOP0 NOP0 NOP1 INC", 500);
-    u32 v = plant(f.s, 200, "NOP1 NOP1 NOP1 INC", 300);
+    u32 v = plant(f.s, 200, "NOP1 NOP1 NOP1 INC", 300); // its tail is open
     CHECK(a != kNone && v != kNone);
-    const u32 trials = 3000;
+    const u32 trials = 300;
     u64 cost = 0;
     for (u32 i = 0; i < trials; ++i) {
         Cpu& c = f.cpu(a);
         c.ip = 100;
-        c.ax = 3; // land on the victim's INC, leaving its surface alone
         c.cx = 1;
-        c.rh = 104;
-        c.errs = 0; // a losing streak must not reach the K = 8 halt
+        c.rh = 104; // its INC: the host's tail stays INC, so stays open
+        c.errs = 0;
         cost += static_cast<u64>(f.s.run_cpu(f.cpu_of(a), 1));
     }
-    u64 wins = f.s.tally().injects;
-    CHECK(f.s.tally().inject_tries == trials);
-    double rate = static_cast<double>(wins) / trials;
-    CHECK(fabs(rate - 2.0 / 3.0) < 5 * sqrt((2.0 / 9.0) / trials));
-    CHECK(cost == trials * 9 + wins * 1); // every attempt pays; wins pay per codon
+    CHECK(f.s.tally().inject_tries == trials && f.s.tally().injects == trials);
+    CHECK(cost == trials * (9 + 1)); // every attempt pays; wins pay per codon
+    Fix g;
+    CHECK(g.init());
+    u32 b = plant(g.s, 100, "INJECT NOP0 NOP0 NOP1 INC", 500);
+    CHECK(plant(g.s, 200, "NOP1 NOP1 INC NOP0", 300) != kNone); // sealed
+    g.cpu(b).cx = 1;
+    CHECK(g.s.run_cpu(g.cpu_of(b), 1) == 9 && g.s.tally().injects == 0);
 }
 
 // 0/0 counts as a perfect match: a blind attack takes a surfaceless body for
@@ -180,13 +183,15 @@ void inject_overwrites() {
     f.s.run_cpu(f.cpu_of(v), 1);
     CHECK(f.s.cpu(f.cpu_of(v)).cx == 0u - 1u);
 
-    // Landing wraps within the victim's block; zero means nothing.
+    // AX no longer places it (docs/bites-plan.md I2): one codon lands just
+    // inside the wound, the last; zero means nothing.
+    const u8 second = f.s.mem()[301];
     f.cpu(a).ip = 100;
     f.cpu(a).rh = 104;
-    f.cpu(a).ax = 7; // 7 mod 6 = codon 1
+    f.cpu(a).ax = 7;
     f.cpu(a).cx = 1;
     f.s.run_cpu(f.cpu_of(a), 1);
-    CHECK(f.s.mem()[301] == dec);
+    CHECK(f.s.mem()[305] == dec && f.s.mem()[301] == second);
     f.cpu(a).ip = 100;
     f.cpu(a).cx = 0;
     CHECK(f.s.run_cpu(f.cpu_of(a), 1) == 1 && f.cpu(a).err == 1);

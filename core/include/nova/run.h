@@ -170,6 +170,8 @@ class Run {
     const Detection& defended() const { return defended_; } // Phase 9
     // The first gated lineage whose member chose to sleep (docs/lifehistory-plan.md V7).
     const Detection& sleeper() const { return sleeper_; }
+    const Detection& parasite() const { return parasite_; } // docs/bites-plan.md
+    const Detection& healer() const { return healer_; }
     // The first detection's genome as op names ("" if none).
     Str detection_genome() const { return detection_genome_.view(); }
 
@@ -235,6 +237,7 @@ class Run {
     Detection gpu_native_;
     Detection defended_;
     Detection sleeper_; // docs/lifehistory-plan.md V7
+    Detection parasite_, healer_; // docs/bites-plan.md
     TextBuf detection_genome_;
     Array<Event> events_;
     Array<char> event_text_;

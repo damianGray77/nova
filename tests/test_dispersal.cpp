@@ -576,7 +576,8 @@ void outputs() {
                        // behaviour profiles (docs/analysis-plan.md A3), the last integer columns
                        "prof_samples,role_predator,role_parasite,role_repairer,role_signaller,role_wanderer,"
                        "role_copier,role_idle,work_len,action_kinds_x100,novelty,novel_share,novel_success,"
-                         "wipe_warnings,wipe_false_alarms,wipe_flickers,sleeps,sleep_woke,sleep_expired,ray_inserts,ray_deletes,corpse_codons,compress,ambient\n") != nullptr);
+                         "wipe_warnings,wipe_false_alarms,wipe_flickers,sleeps,sleep_woke,sleep_expired,ray_inserts,ray_deletes,corpse_codons,"
+                         "wounds,bled,repairs,parasite_threads,parasite_divides,struck_bodies,open_ends,infected,compress,ambient\n") != nullptr);
     CHECK(read_file(nodes, &bytes));
     bytes.push(0);
     text = reinterpret_cast<const char*>(bytes.data());

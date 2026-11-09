@@ -336,7 +336,8 @@ checked with runs of minutes (design.md 9.1).
   spark knobs (`spark.grant`, `spark.min_len`, `spark.max_len`), and INJECT's
   criteria (a key matching the host's surface, a host the payload fits in).
   `mem.upkeep = 0`, `contact.inject_key = false` and `contact.inject_room = 0`
-  together are exactly Phase 1a.
+  together were exactly Phase 1a, until the bites plan (2026-11-09) replaced the
+  key with wounds (below) and Phase 1a could no longer be reproduced.
 - **Controls:** the `nova_v1_plain` and `nova_v1_inv2` codon tables and the
   shuffled-selector numbering (`isa.selectors = shuffled`).
 - **Detection** (a pure observer; the world hash is identical with it off):
@@ -356,7 +357,8 @@ payload fits in (`contact.inject_key`, `contact.inject_room`); since then
 replication goes through COPY, and in two-minute checks the plain and shuffled
 controls produced no replicators while baseline and inv2 did (design.md 6.6).
 Detection counts DIVIDE copies only for codons the parent wrote, and INJECT
-copies too.
+copies too. (Since 2026-11-09 INJECT lands only through a wound instead of a
+key: design.md 6.26, `docs/bites-plan.md`.)
 
 ### Phase 1a (design.md 9.1)
 

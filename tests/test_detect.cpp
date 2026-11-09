@@ -551,29 +551,28 @@ void inject_links() {
 }
 
 // The replicator the home rig found first (design.md 6.6): it buds blank
-// daughters and blind-injects itself into them. Under the Phase 1a contest it
-// replicates and the detector sees it through INJECT links (and not at all
-// without them: it has no COPY). Under INJECT's key rule its blind INJECT
-// never lands, so it no longer replicates.
+// daughters and blind-injects itself into them, and the detector sees it
+// through INJECT links (and not at all without them: it has no COPY). Under
+// INJECT's key rule (2026-11-05 to 2026-11-08) its blind INJECT never landed.
+// Under the wound rule (docs/bites-plan.md I1) a blank daughter's ends are
+// open -- unwritten code isn't sealed by NOPs -- so it lands, and the
+// replicator works again: the risk the plan named, measured here.
 void bud_and_inject_replicator() {
     const char* genome = "seed.genome = NOP0 POP NOP0 PUSH NOP0 POP SENSE INJECT ALLOC AND SENSE ADD "
                          "PUSH NOP0 POP SENSE INJECT DIVIDE OR SENSE SHL PUSH NOP0 POP EMIT GPU "
                          "DIVIDE OR SENSE DIVIDE OR NOP0\nseed.millicores = 10\n";
-    TextBuf old_rules, old_off, keyed;
-    old_rules.append(genome);
-    old_rules.append("contact.inject_key = false\ncontact.inject_room = 0\n");
-    old_off.append(old_rules.view());
-    old_off.append("detect.inject = false\n");
-    keyed.append(genome);
-    Outcome on = run_for(old_rules.c_str(), 50);
-    Outcome off = run_for(old_off.c_str(), 50);
-    Outcome now = run_for(keyed.c_str(), 50);
-    CHECK(on.detections == 1 && on.max_depth >= 2 && on.first_tick < 20);
+    TextBuf rules, off_cfg;
+    rules.append(genome);
+    rules.append("contact.inject_room = 0\n");
+    off_cfg.append(rules.view());
+    off_cfg.append("detect.inject = false\n");
+    Outcome on = run_for(rules.c_str(), 50);
+    Outcome off = run_for(off_cfg.c_str(), 50);
+    CHECK(on.detections == 1 && on.max_depth >= 2 && on.first_tick < 50);
     CHECK(off.detections == 0 && off.links == 0);
     CHECK_EQ_U64(on.hash, off.hash); // still a pure observer
-    CHECK(now.detections == 0 && now.links == 0);
-    printf("  detect: bud-and-inject replicator: gate met at tick %llu under the Phase 1a "
-           "contest; never under the key rule\n",
+    printf("  detect: bud-and-inject replicator: gate met at tick %llu through its daughters' open ends "
+           "(the wound rule)\n",
            static_cast<unsigned long long>(on.first_tick));
 }
 

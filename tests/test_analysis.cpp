@@ -570,7 +570,7 @@ void test_scores_files() {
     CHECK(!abc.encode("NOP0 NOTANOP", &s));
 
     // replay.log's replicator events add the living lineages lineages.csv lacks.
-    put("nova_test_analysis_run/replay.log", "nova-replay 2\nconfig seed = 1\nhash 0 0000000000000001\n"
+    put("nova_test_analysis_run/replay.log", "nova-replay 6\nconfig seed = 1\nhash 0 0000000000000001\n"
                                              "event 5 gpu_replicator node=2 lineage=7.1 depth=2 alive=2\n"
                                              "event 5 replicator node=2 lineage=2.1 depth=2 alive=2 len=5\n");
     GatedSet g;

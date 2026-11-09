@@ -102,13 +102,15 @@ const char* const kNodeCols[] = {"tick_first", "tick_last", "node",      "x",   
                                  "sub_p_cores", "sub_e_cores", "sub_gpu", "sub_npu", "sub_mem_fast", "sub_mem_slow",
                                  "sub_disk_fast", "sub_disk_slow", "occupancy",
                                  // the disasters' (docs/disasters-plan.md X7, X10)
-                                 "symptom_ticks", "struck", "cores_offline"};
+                                 "symptom_ticks", "struck", "cores_offline",
+                                 // bites as wounds (docs/bites-plan.md section 7)
+                                 "sleeps", "drifts"};
 enum NodeCol : u32 {
     kNcFirst, kNcLast, kNcNode, kNcX, kNcY, kNcDegree, kNcSize, kNcMilli, kNcGpus, kNcNpus, kNcCool, kNcSpark,
     kNcRad, kNcBodies, kNcWaste, kNcFree, kNcBirths, kNcDeaths, kNcSent, kNcArrived, kNcLineages, kNcColonists,
     kNcLive, kNcHealth, kNcLife,
     kNcSub, // ... kSubstrateTypes of them
-    kNcOccupancy = kNcSub + kSubstrateTypes, kNcSymptoms, kNcStruck, kNcOffline, kNcCount
+    kNcOccupancy = kNcSub + kSubstrateTypes, kNcSymptoms, kNcStruck, kNcOffline, kNcSleeps, kNcDrifts, kNcCount
 };
 static_assert(sizeof kNodeCols / sizeof kNodeCols[0] == kNcCount, "node column table");
 
@@ -380,7 +382,7 @@ const char* strip_by_name(u32 s) {
 const char* event_kind_name(u32 k) {
     static const char* const n[kEvCount] = {"replicator", "gpu_replicator", "npu_user",   "colonist",
                                             "disk_user",  "signaller",      "gpu_native", "defended",
-                                            "sleeper",    "collapse",       "recovered",
+                                            "sleeper",    "parasite",       "healer",     "collapse", "recovered",
                                             // the disasters' strikes, as their events begin (X7)
                                             "surge", "crash", "burnout", "diskfail", "lightning", "event"};
     return k < kEvCount ? n[k] : "?";

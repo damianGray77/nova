@@ -12,7 +12,6 @@ add_library(nova_core STATIC
     src/stats.cpp
     src/replay.cpp
     # The settings older snapshots and replay logs ran on (docs/results/integration.md).
-    src/legacy.cpp
     src/run.cpp
     src/genebank.cpp
     src/compress.cpp

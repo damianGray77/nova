@@ -1837,6 +1837,74 @@ image is rebuilt when the known substrates or node positions change (drift,
 recovery), at most every 60 frames. It's a view only: no simulation state,
 format or hash changes.
 
+### 6.26 Bites as wounds, bleeding and parasites [built 2026-11-09]
+
+Built from `docs/bites-plan.md` revision 3, approved by Damian. Everything
+is on by default; snapshot v8 and replay v6, and older files are refused
+("old run data is incompatible", Damian), so the legacy-defaults layer
+(`legacy.h` and its three texts) is gone.
+
+**Bites** (with `engulf.bite`). A NOP surface no longer shields a body: a
+blind bite takes the nearest material, body or waste; an aimed one picks the
+best-matching surface and has no grip roll. A bite is CX codons, at most
+`engulf.bite_share` (1/3) of the biter's size, rounded up. With
+`engulf.tissue` a bitten body loses cores (and a resting program its
+reserves) in proportion to the code taken, NOPs not counted: a bite of
+padding takes nothing else.
+
+**Open ends, bleeding and repairs.** An end of a body's code whose outermost
+codon isn't a NOP is open: a wound. Each open end loses its outermost codon
+to waste (stamped as the body's remnant) once in `life.bleed_every` (100)
+ticks, on the ticks where tick + 1 + serial is a multiple of it (no draws),
+until a NOP is outermost: written there by the program (`Exec::note_write`
+counts a NOP written over an open end's outermost codon as a repair) or
+reached inside (an internal NOP is the new skin). Bleeding leaves a body at
+least one codon. Resting dormant programs bleed; drifting ones don't.
+
+**INJECT** lands only on a body with an open end within contact range (any
+program's wound, decided): blind, the nearest open end; aimed, the
+best-matching surface among bodies with one. The key is gone, the room rule
+stays. The payload overwrites the CX codons just inside the open end in
+reading order (AX no longer places it), so it is part of the host's code and
+its own copying passes it on. Then a thread starts in the host at the
+payload's first codon with the injector's registers (`Cpu::parasite`, none
+while the host holds `cpu.max_threads`); it runs on the host's cores with the
+host's rights, so its DIVIDEs divide off daughters with the host's memory
+and cores. A daughter that descends from the payload joins the injector's
+lineage (a `via parasite` link: the detector keeps a per-CPU copy of the
+injector's tag). A timed INJECT whose wound closed, or whose host moved off
+or shrank, by its end counts as defended.
+
+**Counts.** `stats.csv` gains `wounds`, `bled`, `repairs`,
+`parasite_threads`, `parasite_divides`, `struck_bodies` (living bodies whose
+code a lightning strike changed) and the gauges `open_ends` and `infected`;
+`nodes.csv` gains `sleeps` and `drifts`. Milestones `parasite`
+(`detect.parasite` = 3 daughters from inside hosts) and `healer`
+(`detect.repairs` = 3 wounds closed).
+
+**Disasters at about a tenth of deaths** (plan section 7): storms every 300
+ticks with strikes every 30-120 of 512-2,048 codons, OS crashes every 3
+ticks deleting 30-80% of running programs with 100-400 ticks of warning,
+power surges every 55 with 300-1,500. These are the plan's starting values;
+the calibration sweep hasn't run yet.
+
+**Tests.** Every suite runs the new rules (no fallback for them, Damian).
+The shared test ancestors carry NOP caps; tests that isolate another
+mechanism say so in their config (`life.bleed_every = 0` for the sketch's
+exact copies and for decay, `engulf.bite_share = 1` where corpse timing or
+reserve shares are measured). Phase 1a can't be reproduced any more, so its
+pin now guards that world's determinism. Suite `parasites` tests bleeding,
+repairs and parasite threads, and a busy world with all of it at 1, 4 and 20
+threads and through a snapshot: in 300 ticks 101 body bites (21 wounds),
+11,719 codons bled, 830 repairs, 4,096 injects, 2,161 parasite threads and
+44 parasite divides.
+
+**A finding.** The bud-and-inject replicator of design 6.6 -- it buds blank
+daughters and blind-injects itself into them -- works again: a blank
+daughter's ends are open, so the wound rule lets it in where the surface
+key didn't (suite detect). This is the risk the plan named (I1); the sweep
+watches for INJECT-only lineages.
+
 ## 7. Technical direction [decided via 7.1]
 
 - C++ (or Rust) core; Python only for analysis. *Superseded by 7.1 A and B: C++20, no STL, no third-party, no Python.*

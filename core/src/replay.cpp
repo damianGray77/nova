@@ -1,11 +1,6 @@
 #include "nova/replay.h"
 
-#include "nova/legacy.h"
-
 namespace nova {
-
-static_assert(kReplayLegacyBefore <= kReplayLifeBefore && kReplayLifeBefore <= kReplayCorpseBefore && kReplayCorpseBefore <= kReplayVersion,
-              "replay logs before kReplayLegacyBefore (kReplayLifeBefore) take the legacy defaults (legacy.h)");
 
 namespace {
 
@@ -131,15 +126,10 @@ Str ReplayLog::event_text(usize i) const {
     return Str(arena_.data() + events_[i].off, events_[i].len);
 }
 
-// A log before v3 was written before the varied world's features came on by
-// default, and one before v4 before rays did; each names only the settings it
-// was given: the rest take the values they had then (legacy.h), as a
-// snapshot before v4 (v6) does.
+// (Only this format is read: older logs are refused, so the settings a log
+// doesn't name take today's defaults, as they did when it was written.)
 bool ReplayLog::replay_config(Config* out, Config::ParseError* err) const {
-    if (!out->parse(config_.view(), err))
-        return false;
-    apply_format_defaults(*out, false, version_);
-    return true;
+    return out->parse(config_.view(), err);
 }
 
 bool ReplayLog::parse(Str text, TextBuf* err) {
@@ -174,9 +164,14 @@ bool ReplayLog::parse(Str text, TextBuf* err) {
                 line_error(err, line, "not a Nova replay log (expected 'nova-replay <version>')");
                 return false;
             }
-            if (version < 1 || version > kReplayVersion) {
+            if (version < kReplayOldest || version > kReplayVersion) {
                 line_error(err, line, "unsupported replay version ");
                 err->append_u64(version);
+                if (version < kReplayOldest) {
+                    err->append(" (logs before version ");
+                    err->append_u64(kReplayOldest);
+                    err->append(" were written by an incompatible engine)");
+                }
                 return false;
             }
             version_ = static_cast<u32>(version);

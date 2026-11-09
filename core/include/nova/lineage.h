@@ -98,10 +98,13 @@ struct DetectParams {
     u32 gate_alive = 2;          // detect.gate_alive: members alive at once it needs
     u32 signal_sustained = 100;  // signal.sustained: EMIT ticks for the signaller event (Phase 4)
     u32 defended = 3;            // detect.defended: defences for the defended event (Phase 9)
+    u32 parasite = 3;            // detect.parasite: parasite daughters for the parasite event (bites plan)
+    u32 repairs = 3;             // detect.repairs: wounds closed for the healer event (bites plan)
 };
 
 inline constexpr u32 kViaDivide = 0;
 inline constexpr u32 kViaInject = 1;
+inline constexpr u32 kViaParasite = 2; // a DIVIDE by a parasite thread inside a host (docs/bites-plan.md I5)
 
 // Reads detect.* (marking the keys used); a bad value is reported through cfg.
 bool detect_params_from_config(Config& cfg, DetectParams* p);
@@ -142,6 +145,8 @@ struct LineageInfo {
     u32 defences;         // actions aimed at members that failed because they changed in time, once gated (9)
     u32 founder_origin;   // how its founding body began (kOrigin..., W7)
     u32 sleep_detected;   // ... and then a member chose to sleep (docs/lifehistory-plan.md V7; was padding)
+    u32 parasite_divides; // daughters its parasite threads made from inside hosts, once gated (bites plan I5)
+    u32 repairs;          // open ends its members closed with a NOP, once gated (bites plan B5)
 };
 
 // An origin as a word: spark, daughter, arrival, wake or unknown (W7).
@@ -156,7 +161,9 @@ inline constexpr u32 kEventSignaller = 5;     // a gated lineage's members emitt
 inline constexpr u32 kEventGpuNative = 6;     // a gated lineage's GPU-born member made an inheriting daughter (8)
 inline constexpr u32 kEventDefended = 7;      // a gated lineage's members made detect.defended attacks fail (9)
 inline constexpr u32 kEventSleeper = 8;       // a gated lineage's member chose to sleep (docs/lifehistory-plan.md V7)
-inline constexpr u32 kEventCount = 9;
+inline constexpr u32 kEventParasite = 9;      // a gated lineage's parasites made detect.parasite daughters in hosts
+inline constexpr u32 kEventHealer = 10;       // a gated lineage's members closed detect.repairs wounds
+inline constexpr u32 kEventCount = 11;
 
 // The first time a lineage meets the gate, first makes a GPU link after, first
 // has a member use the NPU, or first arrives on a node it wasn't founded on.
@@ -272,6 +279,17 @@ class Lineages {
     // to sleep (YIELD BX 1 or 2, CX > 0); a gated lineage's first is the
     // sleeper event.
     void on_sleep(const Soup& s, u32 block, u64 tick);
+    // docs/bites-plan.md I3, I5: an INJECT from the CPU running in
+    // injector_block started parasite thread `cpu` in the host whose first
+    // block is host_block, its payload [off, off + len) of that block. The
+    // thread carries the injector's tag; a DIVIDE it runs links a daughter
+    // that descends from the payload to the injector's lineage (via parasite).
+    void on_parasite(const Soup& s, u32 cpu, u32 injector_block, u32 host_block, u32 off, u32 len);
+    void on_divide_parasite(const Soup& s, u32 cpu, u32 daughter_block, u64 tick);
+    // B5: a member (the body whose first block is `block`) closed an open end
+    // of its code with a NOP; a gated lineage's detect.repairs-th is the
+    // healer event.
+    void on_repair(const Soup& s, u32 block, u64 tick);
 
     // --- inspection --------------------------------------------------------
     u32 node() const { return node_; }
@@ -285,6 +303,8 @@ class Lineages {
     u64 signal_detections() const { return signal_detections_; }
     u64 defended_detections() const { return defended_detections_; }
     u64 sleep_detections() const { return sleep_detections_; }
+    u64 parasite_detections() const { return parasite_detections_; }
+    u64 healer_detections() const { return healer_detections_; }
     bool is_written(u32 a) const { return (written_[a >> 6] >> (a & 63)) & 1; }
     bool is_gpu_written(u32 a) const { return (gpu_written_[a >> 6] >> (a & 63)) & 1; }
     u64 founded() const { return founded_; } // lineages founded so far
@@ -314,6 +334,13 @@ class Lineages {
     // top); *by_gpu counts her matching codons a GPU op wrote, at the
     // alignment that passed, and *match all of them.
     bool descends(const Soup& s, u32 p, u32 k, u32* match, u32* by_gpu) const;
+    // ... from the parent code [pstart, pstart + plen) of memory (a parasite's payload).
+    bool descends_from(const Soup& s, u32 pstart, u32 plen, u32 k, u32* match, u32* by_gpu) const;
+    // The rest of a link once the parent's tag is known (a lineage member):
+    // the child in block k joins, and the gate and milestones are checked.
+    // parent_body: for the GPU-native milestone (kNone: none).
+    // (parent by value: joining may grow tags_.)
+    void adopt(const Soup& s, BlockTag parent, u32 parent_body, u32 k, u64 tick, u32 via, bool gpu);
     // Her codons that match the parent at alignment r (cyclic), counting only
     // written ones with detect.written; gives up (returning what it has) once
     // more than `misses` codons fail.
@@ -332,9 +359,19 @@ class Lineages {
     u64 links_ = 0, inject_links_ = 0, gpu_links_ = 0, founded_ = 0, detections_ = 0;
     u64 gpu_detections_ = 0, npu_detections_ = 0, colonisations_ = 0, disk_detections_ = 0;
     u64 signal_detections_ = 0, defended_detections_ = 0, sleep_detections_ = 0;
+    u64 parasite_detections_ = 0, healer_detections_ = 0;
     u64 founded_by_[kOriginCount] = {};
     u32 max_depth_ever_ = 0;
     Array<BlockTag> tags_;   // by block slot
+    // docs/bites-plan.md I5: per CPU slot, a parasite thread's injector tag
+    // and its payload (offset and length in its host's first block). Stale
+    // once the slot is reused by a thread that isn't a parasite (the soup's
+    // Cpu::parasite says which), and overwritten by the next parasite's.
+    struct ParasiteTag {
+        BlockTag tag;
+        u32 off, len;
+    };
+    Array<ParasiteTag> cpu_tags_;
     Array<u64> written_;     // per codon: written by its owner since its block was allocated
     Array<u64> gpu_written_; // ... last by a GPU op
     HashMap<LineageInfo> table_; // living lineages only

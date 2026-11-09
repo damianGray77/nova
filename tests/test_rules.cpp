@@ -11,8 +11,11 @@ using namespace nova;
 
 namespace {
 
-// The busy soup world (helpers.h) at tick 300 under the Phase 1b defaults.
-constexpr u64 kPinnedDefault = 0xa384722ce1cbc5e0ull;
+// The busy soup world (helpers.h) at tick 300 under the defaults, and with
+// Phase 1a's rules (kPhase1aRules). Re-pinned 2026-11-08 for docs/bites-plan.md
+// (INJECT only through wounds, bleeding, bites without immunity).
+constexpr u64 kPinnedDefault = 0xf537de099f13cb24ull;
+constexpr u64 kPinnedPhase1aRules = 0x5245dc23336a58f8ull;
 
 // Heat and hazards off; upkeep left to each test.
 const char* const kCalm = "heat.enabled = false\nhazard.copy = 0\nhazard.flaw = 0\nhazard.rot = 0\n";
@@ -136,10 +139,12 @@ void upkeep_kills() {
     }
 }
 
-// With the Phase 1b rule changes switched off (kPhase1aRules) the engine is
-// exactly Phase 1a: the busy soup world hashes to the value Phase 1a's engine
-// gave (recorded from the unchanged Phase 1a build). The default rules move it,
-// to a value pinned here.
+// The busy soup world at tick 300, pinned with the default rules and with the
+// Phase 1b rule changes switched off (kPhase1aRules). Until 2026-11-08 the
+// second was exactly Phase 1a (decce3c361397145, from the unchanged Phase 1a
+// build); since INJECT lands only through a wound and open ends bleed
+// (docs/bites-plan.md) Phase 1a can't be reproduced, and the pin guards that
+// world's determinism instead.
 void pinned_hashes() {
     TextBuf cfg;
     cfg.append(kSoupWorld);
@@ -147,15 +152,14 @@ void pinned_hashes() {
     Run phase1a;
     CHECK(make_run(phase1a, cfg.c_str(), 4));
     phase1a.run_until(300);
-    CHECK_EQ_U64(phase1a.world().hash(), 0xdecce3c361397145ull);
 
     Run now;
     CHECK(make_run(now, kSoupWorld, 4));
     now.run_until(300);
-    printf("  rules: busy soup world at tick 300: %016llx (Phase 1b defaults), "
-           "decce3c361397145 (Phase 1a rules)\n",
-           static_cast<unsigned long long>(now.world().hash()));
+    printf("  rules: busy soup world at tick 300: %016llx (defaults), %016llx (Phase 1a's rules)\n",
+           static_cast<unsigned long long>(now.world().hash()), static_cast<unsigned long long>(phase1a.world().hash()));
     CHECK_EQ_U64(now.world().hash(), kPinnedDefault);
+    CHECK_EQ_U64(phase1a.world().hash(), kPinnedPhase1aRules);
 }
 
 // CPU wear returns held millicores to the pool at the configured rate.
@@ -270,14 +274,20 @@ void spark_knobs() {
     CHECK(!run.schedule_knob(20, "detect.similarity", "0.5", &err));
 }
 
-// INJECT's criteria (design.md 6.6, Damian): it needs a key (the template
-// after it) complementing the host's surface -- blind injectors and surfaceless
-// hosts get nowhere -- and a host big enough to fit the payload, or it fails
-// leaving the host untouched. Each can be switched back to Phase 1a.
+// INJECT's criteria (docs/bites-plan.md I1-I3, Damian): it lands only through
+// an open end of the host's code (an end whose outermost codon isn't a NOP: a
+// wound), just inside it, and starts a parasite thread there; the host must be
+// big enough to fit the payload (design.md 6.6), or it fails leaving the host
+// untouched.
 struct Injection {
-    bool ok;     // the INJECT succeeded
-    u32 cost;    // instructions charged
-    bool intact; // the host's code is unchanged
+    bool ok;        // the INJECT succeeded
+    u32 cost;       // instructions charged
+    bool intact;    // the host's code is unchanged
+    u8 before[16];  // the host's code before
+    u8 after[16];   // the host's code afterwards
+    u8 inj[16];     // the injector's code
+    u32 threads;    // the host's threads afterwards
+    u32 parasite_ip; // where its parasite thread starts (kNone: none)
 };
 
 Injection inject_once(const char* injector, const char* host, u32 cx, const char* extra = "") {
@@ -304,33 +314,52 @@ Injection inject_once(const char* injector, const char* host, u32 cx, const char
     r.cost = static_cast<u32>(f.s.run_cpu(f.s.body(a).cpus, 1));
     r.ok = f.s.tally().injects == 1;
     r.intact = true;
-    for (u32 i = 0; i < len && i < 16; ++i)
+    for (u32 i = 0; i < 16; ++i)
+        r.inj[i] = f.s.mem()[100 + i];
+    for (u32 i = 0; i < len && i < 16; ++i) {
+        r.before[i] = before[i];
+        r.after[i] = f.s.mem()[200 + i];
         r.intact = r.intact && f.s.mem()[200 + i] == before[i];
+    }
+    r.threads = f.s.body(h).ncpu;
+    r.parasite_ip = kNone;
+    for (u32 c2 = f.s.body(h).cpus; c2 != kNone; c2 = f.s.cpu(c2).next)
+        if (f.s.cpu(c2).parasite)
+            r.parasite_ip = f.s.cpu(c2).ip;
     return r;
 }
 
 void inject_rules() {
-    // A key needs a surface it complements: "0" against "1" lands for sure.
-    Injection keyed = inject_once("INJECT NOP0 INC INC", "NOP1 INC INC INC", 2);
-    CHECK(keyed.ok && !keyed.intact && keyed.cost == 9 + 2);
-    // Blind injectors and surfaceless hosts get nowhere (they did in Phase 1a).
-    CHECK(!inject_once("INJECT INC INC INC", "INC INC INC INC", 2).ok);
-    CHECK(inject_once("INJECT INC INC INC", "INC INC INC INC", 2, "contact.inject_key = false\n").ok);
-    CHECK(!inject_once("INJECT NOP0 INC INC", "INC INC INC INC", 2).ok);
-    CHECK(!inject_once("INJECT INC INC INC", "NOP1 INC INC INC", 2).ok);
-    // Strengths and weaknesses: the key "00" opens a "11" surface and not a "00" one.
-    CHECK(inject_once("INJECT NOP0 NOP0 INC", "NOP1 NOP1 INC INC", 1).ok);
-    CHECK(!inject_once("INJECT NOP0 NOP0 INC", "NOP0 NOP0 INC INC", 1).ok);
+    // A tail wound ("NOP1 INC INC INC": its high end isn't a NOP): the payload
+    // (the injector's first CX codons, from its read head) lands just inside
+    // it, the host's last two codons, and a parasite thread starts there.
+    Injection tail = inject_once("INJECT NOP0 INC INC", "NOP1 INC INC INC", 2);
+    CHECK(tail.ok && !tail.intact && tail.cost == 9 + 2);
+    CHECK(tail.after[0] == tail.before[0] && tail.after[1] == tail.before[1]);
+    CHECK(tail.after[2] == tail.inj[0] && tail.after[3] == tail.inj[1]); // INJECT NOP0: now sealed by its NOP0
+    CHECK(tail.threads == 2 && tail.parasite_ip == 202);
+    // A head wound: its first two codons.
+    Injection head = inject_once("INJECT NOP0 INC INC", "INC INC INC NOP1", 2);
+    CHECK(head.ok && head.after[0] == head.inj[0] && head.after[1] == head.inj[1]);
+    CHECK(head.after[3] == head.before[3] && head.parasite_ip == 200);
+    // Blind or aimed, a host with an open end is open; one sealed by NOPs at
+    // both ends is closed, whatever the key (the surface key is gone).
+    CHECK(inject_once("INJECT INC INC INC", "INC INC INC INC", 2).ok);
+    CHECK(!inject_once("INJECT INC INC INC", "NOP1 INC INC NOP0", 2).ok);
+    CHECK(!inject_once("INJECT NOP0 INC INC", "NOP1 INC INC NOP0", 2).ok);
     // The payload must fit: 5 codons into a 4-codon host fails, leaving it
     // intact, and still costs the attempt; 4 fit.
     Injection big = inject_once("INJECT NOP0 INC INC INC", "NOP1 INC INC INC", 5);
-    CHECK(!big.ok && big.intact && big.cost == 9);
+    CHECK(!big.ok && big.intact && big.cost == 9 && big.threads == 1);
     CHECK(inject_once("INJECT NOP0 INC INC INC", "NOP1 INC INC INC", 4).ok);
-    // contact.inject_room = 0: Phase 1a truncates the payload to the host instead.
+    // contact.inject_room = 0: the payload is truncated to the host instead.
     CHECK(inject_once("INJECT NOP0 INC INC INC", "NOP1 INC INC INC", 5, "contact.inject_room = 0\n").ok);
     // room 2: the host must be twice the payload.
     CHECK(!inject_once("INJECT NOP0 INC INC INC", "NOP1 INC INC INC", 3, "contact.inject_room = 2\n").ok);
     CHECK(inject_once("INJECT NOP0 INC INC INC", "NOP1 INC INC INC", 2, "contact.inject_room = 2\n").ok);
+    // A host already at cpu.max_threads takes the code but starts no thread.
+    Injection full = inject_once("INJECT NOP0 INC INC", "NOP1 INC INC INC", 2, "cpu.max_threads = 1\n");
+    CHECK(full.ok && !full.intact && full.threads == 1 && full.parasite_ip == kNone);
 }
 
 // Bad values for the new structural keys fail loudly.
@@ -341,7 +370,7 @@ void config_errors() {
     CHECK(!make_params(&p, "cpu.wear = 2\n", 1024));
     CHECK(!make_params(&p, "spark.timing = never\n", 1024));
     CHECK(!make_params(&p, "contact.inject_room = -1\n", 1024));
-    CHECK(make_params(&p, "", 1024) && p.inject_key && p.inject_room == 1.0);
+    CHECK(make_params(&p, "", 1024) && p.inject_room == 1.0 && p.bleed_every == 100 && p.tissue);
     CHECK(make_params(&p, "spark.timing = last\ncpu.wear = 0.001\n", 1024));
     CHECK(p.spark_late && p.cpu_wear == 0.001 && p.upkeep == 2.0 && p.upkeep_exp == 4.0 / 3.0);
 }

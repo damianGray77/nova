@@ -210,7 +210,7 @@ void test_crash() {
             CHECK(sp.body_count() == s); // the survivors (no dormancy here)
             if (d + s > 0) {
                 const double share = static_cast<double>(d) / static_cast<double>(d + s);
-                CHECK(share >= 0.1 - 0.5 / (d + s) && share <= 0.6 + 0.5 / (d + s));
+                CHECK(share >= 0.3 - 0.5 / (d + s) && share <= 0.8 + 0.5 / (d + s)); // (the default 30-80%)
             }
             bool fresh = true;
             for (usize k = 0; k < sp.body_count(); ++k) {
@@ -893,8 +893,9 @@ void test_defaults_world() {
            static_cast<unsigned long long>(snap_at), static_cast<unsigned long long>(h[0]));
 }
 
-// The engine defaults: every disaster on, at the plan's intervals, symptoms
-// and sounds too; the test runner's legacy defaults: off.
+// The engine defaults: every disaster on, symptoms and sounds too; the test
+// runner's legacy defaults: off. Storms, crashes and surges at the rates
+// docs/bites-plan.md section 7 set (2026-11-08) for about a tenth of deaths.
 void test_defaults() {
     SoupParams p;
     CHECK(make_params(&p, "", 1024) && !p.disasters); // (the legacy fallback)
@@ -905,13 +906,13 @@ void test_defaults() {
                    1));
     const DisasterParams& d = run.world().disaster_params();
     CHECK(run.world().disasters() && d.symptoms && d.sounds && d.false_alarms == 0.25);
-    CHECK(d.every[kDisSurge] == 50000 && d.every[kDisCrash] == 5000 && d.every[kDisBurnout] == 2000 &&
-          d.every[kDisDiskfail] == 10000 && d.every[kDisStorm] == 5000);
-    CHECK(d.hops_min == 1 && d.hops_max == 2 && d.reboot_min == 20 && d.reboot_max == 100 && d.crash_min == 0.1 &&
-          d.crash_max == 0.6 && d.burn_min == 0.1 && d.burn_max == 0.4 && d.repair_min == 200 &&
+    CHECK(d.every[kDisSurge] == 55 && d.every[kDisCrash] == 3 && d.every[kDisBurnout] == 2000 &&
+          d.every[kDisDiskfail] == 10000 && d.every[kDisStorm] == 300);
+    CHECK(d.hops_min == 1 && d.hops_max == 2 && d.reboot_min == 20 && d.reboot_max == 100 && d.crash_min == 0.3 &&
+          d.crash_max == 0.8 && d.burn_min == 0.1 && d.burn_max == 0.4 && d.repair_min == 200 &&
           d.repair_max == 2000 && d.grace_chance == 0.5 && d.grace == 32);
     CHECK(d.life_min == 2000 && d.life_max == 10000 && d.move_min == 200 && d.move_max == 800 &&
-          d.strike_every_min == 100 && d.strike_every_max == 400 && d.strike_min == 64 && d.strike_max == 512);
+          d.strike_every_min == 30 && d.strike_every_max == 120 && d.strike_min == 512 && d.strike_max == 2048);
     CHECK(Config::set_fallback(kLegacyDefaults, nullptr));
 }
 

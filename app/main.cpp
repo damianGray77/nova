@@ -70,7 +70,6 @@
 #include "nova/hash.h"
 #include "nova/io.h"
 #include "nova/keys.h"
-#include "nova/legacy.h"
 #include "nova/replay.h"
 #include "nova/run.h"
 
@@ -830,11 +829,15 @@ bool write_result(const char* path, const Run& run, const char* stop, double sec
         // Phase 8: with warps, the first replication on the GPU alone too.
         // Phase 9: with a timed cost table, the first lineage to defend itself.
         // docs/lifehistory-plan.md V7: with voluntary sleep, the first gated lineage to sleep.
+        // docs/bites-plan.md: the first gated lineage to breed from inside hosts; to heal its wounds.
         const Detection* const milestones[] = {&run.disk_user(), &run.signaller(), &run.gpu_native(),
-                                               &run.defended(), &run.sleeper()};
-        const char* const names[] = {"disk_user", "signaller", "gpu_native", "defended", "sleeper"};
-        const bool on[] = {true, true, w.soup_params().warps, w.soup_params().cost.timed != 0, w.soup_params().sleep};
-        for (int i = 0; i < 5; ++i) {
+                                               &run.defended(), &run.sleeper(),    &run.parasite(),
+                                               &run.healer()};
+        const char* const names[] = {"disk_user", "signaller", "gpu_native", "defended",
+                                     "sleeper",   "parasite",  "healer"};
+        const bool on[] = {true, true, w.soup_params().warps, w.soup_params().cost.timed != 0, w.soup_params().sleep,
+                           true, w.soup_params().bleed_every > 0};
+        for (int i = 0; i < 7; ++i) {
             if (!on[i])
                 continue;
             const Detection& m = *milestones[i];
@@ -1396,9 +1399,6 @@ int cmd_replay(const Args& a) {
         return 1;
     }
     u32 threads = a.has_threads ? static_cast<u32>(a.threads) : 0;
-    if (log.version() < kReplayCorpseBefore) // (docs/results/integration.md; legacy.h)
-        printf("nova: a version %u log: settings it doesn't name take the defaults it was written with (legacy.h)\n",
-               log.version());
     ReplayResult r;
     double t0 = now_ms();
     bool ok = replay_verify(log, threads, &r);

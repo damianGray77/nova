@@ -342,13 +342,25 @@ struct Exec {
         return s.rng_.unit() < p.mem.speed(h);
     }
 
-    void note_write(u32 a) {
+    // Codon a was written (it held `was`).
+    void note_write(u32 a, u8 was) {
         if (p.heat_on)
             ++s.page_write_[a >> kPageBits];
         if (!s.stamp_.empty()) // written: now the writer's own code
             s.stamp_[a] = 0;
         if (p.endurance > 0) // the node's wear (Phase 4 lifecycle)
             ++s.writes_;
+        // docs/bites-plan.md B5: a NOP written over the outermost codon of an
+        // open end of a body's code closes it: a repair.
+        if (!is_nop(p.table.op[was]) && is_nop(p.table.op[s.mem_[a]])) {
+            const u32 k = s.owner_[a];
+            const u32 b = k == kNone ? kNone : s.blocks_[k].body;
+            if (b != kNone && s.bodies_[b].blocks == k && (a == s.outer_codon(b, false) || a == s.outer_codon(b, true))) {
+                ++s.tally_.repairs;
+                if (s.obs_)
+                    s.obs_->on_repair(s, k, s.tick_);
+            }
+        }
     }
 
     // --- remnants and salvage (Phase 4, Damian) ------------------------------
@@ -390,8 +402,9 @@ struct Exec {
         u32 from = c.rh, to = c.wh;
         if (!readable(from) || !writable(to) || !page_accepts(to))
             return false;
+        const u8 was_ = s.mem_[to];
         s.mem_[to] = copied(take(from));
-        note_write(to);
+        note_write(to, was_);
         if (s.obs_)
             s.obs_->on_write(to);
         c.rh = next_addr(from);
@@ -498,6 +511,20 @@ struct Exec {
         return false;
     }
 
+    // A daughter in block k is divided off (at home or to a neighbour): the
+    // detector's link, and a parasite thread's count (docs/bites-plan.md I4).
+    void note_divide(u32 k) {
+        const bool parasite = !warp && c.parasite;
+        if (parasite)
+            ++s.tally_.parasite_divides;
+        if (!s.obs_)
+            return;
+        if (parasite && ci != kNone)
+            s.obs_->on_divide_parasite(s, ci, k, s.tick_);
+        else
+            s.obs_->on_divide(s, c.block, k, s.tick_);
+    }
+
     bool divide(u32 share) {
         u32 parent = c.body;
         u32 k = s.bodies_[parent].latest;
@@ -506,9 +533,9 @@ struct Exec {
             return false;
         charge_range(costs().move, s.blocks_[k].start, s.blocks_[k].len); // her codons handed over (W3: tiers)
         // The detector compares the daughter with the block this CPU runs in
-        // (read-only; see lineage.h).
-        if (s.obs_)
-            s.obs_->on_divide(s, c.block, k, s.tick_);
+        // (read-only; see lineage.h); a parasite thread's, with its payload,
+        // for the injector's lineage (docs/bites-plan.md I5).
+        note_divide(k);
         u32 d = s.new_body(); // may move bodies_
         s.origin_[d] = kOriginDaughter; // W7 (detector data)
         unlink_block(parent, k);
@@ -578,10 +605,9 @@ struct Exec {
         // The detector sees her birth (and adopts her into the lineage) before
         // she leaves, so her tag can travel with her.
         Departure d = {};
-        if (s.obs_) {
-            s.obs_->on_divide(s, c.block, k, s.tick_);
+        note_divide(k);
+        if (s.obs_)
             d.tag = s.obs_->cargo_tag(k);
-        }
         const Block& B = s.blocks_[k];
         d.nbr = nbr;
         d.len = B.len;
@@ -698,8 +724,9 @@ struct Exec {
             bool into_self = false;
             for (i32 i = 0; i < n; ++i) {
                 const u32 w = c.wh;
+                const u8 was_ = s.mem_[w];
                 s.mem_[w] = take_disk(addr[i]); // fossils are salvage
-                note_write(w);
+                note_write(w, was_);
                 into_self = into_self || (c.block != kNone && s.owner_[w] == c.block);
                 if (s.obs_)
                     s.obs_->on_write(w);
@@ -1067,12 +1094,17 @@ struct Exec {
     }
 
     // Overwrites (never inserts, 6.4 #3) up to CX codons of the victim's first
-    // block, starting AX codons in, from this CPU's read head.
-    u32 inject_into(u32 victim) {
+    // block, from this CPU's read head, just inside the open end it came in by
+    // (docs/bites-plan.md I2): the block's last CX codons for its high end, its
+    // first CX for its low end, in reading order. In the victim's code, its
+    // own copying passes the payload on. Then a parasite thread starts at the
+    // payload's first codon (I3).
+    u32 inject_into(u32 victim, bool high) {
         u32 k = s.bodies_[victim].blocks;
         const Block& bl = s.blocks_[k];
         u32 count = c.cx < bl.len ? c.cx : bl.len;
-        u32 dest = bl.start + c.ax % bl.len;
+        u32 dest = high ? bl.start + bl.len - count : bl.start;
+        const u32 first = dest;
         u32 written = 0;
         moved_fast = 0; // W3: the payload's codons written into fast memory
         // For the detector: written codons equal to the injector's own codon
@@ -1084,8 +1116,9 @@ struct Exec {
             if (!readable(from))
                 break;
             if (s.owner_[dest] == k && page_accepts(dest)) {
+                const u8 was_ = s.mem_[dest];
                 s.mem_[dest] = copied(take(from));
-                note_write(dest);
+                note_write(dest, was_);
                 ++written;
                 moved_fast += fast(dest) ? 1u : 0u;
                 if (own != kNone) {
@@ -1100,7 +1133,30 @@ struct Exec {
         ++s.tally_.injects;
         if (own != kNone)
             s.obs_->on_inject(s, own, k, match, s.tick_);
+        if (written > 0)
+            start_parasite(victim, k, first, count);
         return written;
+    }
+
+    // docs/bites-plan.md I3, I4: a thread of the host's, at the payload's first
+    // codon, with the injector's registers (as BX 21's spawn), running on the
+    // host's cores from its compute share: under "one body, one set of rights"
+    // it may write anywhere in the host and ALLOC, COPY and DIVIDE with what
+    // the host holds. None while the host holds cpu.max_threads (the code then
+    // lies latent, running only if the host runs into it).
+    void start_parasite(u32 host, u32 k, u32 at, u32 len) {
+        if (s.bodies_[host].ncpu >= p.max_threads || s.owner_[at] != k)
+            return;
+        const u32 t = s.new_cpu(host, at);
+        Cpu& T = s.cpus_[t];
+        T.ax = c.ax;
+        T.bx = c.bx;
+        T.cx = c.cx;
+        T.dx = c.dx;
+        T.parasite = 1;
+        ++s.tally_.parasite_threads;
+        if (s.obs_ && c.block != kNone) // its lineage is the injector's (I5)
+            s.obs_->on_parasite(s, t, c.block, k, at - s.blocks_[k].start, len);
     }
 
     // --- ENGULF as a bite (Phase 10, design.md 6.16; engulf.bite) -------------
@@ -1116,12 +1172,96 @@ struct Exec {
     // share of its millicores (at random) and GPU and NPU units, and limps on
     // if it can. Bitten material becomes the eater's latest block, as ALLOC's.
 
+    // docs/bites-plan.md B2: at most engulf.bite_share of the biter's own
+    // size, rounded up (so a 1-codon program can still eat another).
     u32 bite_size() const {
         const i32 cx = static_cast<i32>(c.cx);
         if (cx <= 0)
             return 0;
         const u32 own = s.bodies_[c.body].mem;
-        return static_cast<u32>(cx) < own ? static_cast<u32>(cx) : own;
+        const double want = p.bite_share * static_cast<double>(own);
+        u32 cap = static_cast<u32>(want);
+        if (static_cast<double>(cap) < want - 1e-9)
+            ++cap;
+        cap = cap < 1 ? 1 : (cap > own ? own : cap);
+        return static_cast<u32>(cx) < cap ? static_cast<u32>(cx) : cap;
+    }
+
+    // B1: a blind bite's body: the nearest other body in contact range, NOP
+    // surface or not (a surface no longer shields); kNone if none.
+    u32 nearest_body(u32 ip, u32* pdist) {
+        u32 best = kNone, best_dist = 0;
+        u64 seen = 0, seen_f = 0;
+        for (usize i = 0; i < s.order_.size(); ++i) {
+            const u32 t = s.order_[i];
+            if (t == c.body || !s.bodies_[t].alive || s.bodies_[t].blocks == kNone)
+                continue;
+            const u32 start = s.blocks_[s.bodies_[t].blocks].start;
+            const u32 dist = start > ip ? start - ip : ip - start;
+            if (dist > p.contact_range)
+                continue;
+            ++seen;
+            seen_f += fast(start) ? 1 : 0;
+            if (best == kNone || dist < best_dist) {
+                best = t;
+                best_dist = dist;
+            }
+        }
+        charge2(costs().scan, seen_f, seen - seen_f);
+        *pdist = best_dist;
+        return best;
+    }
+
+    // I1: INJECT's aim: a body with an open end (a wound) whose outermost codon
+    // is within contact range of ip. Blind: the nearest open end; aimed: the
+    // best-matching surface among bodies with one, then the nearest. *high:
+    // which end. A NOP blocks INJECT, and so does unbroken code: only a wound
+    // lets it in. kNone if none.
+    u32 wound_pick(u32 ip, const u8* bits, u32 n, bool* high, u32* pmatch, u32* plen) {
+        u32 best = kNone, best_match = 0, best_len = 0, best_dist = 0;
+        bool best_high = false;
+        u8 sb[64];
+        u64 seen = 0, seen_f = 0;
+        for (usize i = 0; i < s.order_.size(); ++i) {
+            const u32 t = s.order_[i];
+            if (t == c.body || !s.bodies_[t].alive || s.bodies_[t].blocks == kNone)
+                continue;
+            u32 m = kNone; // its surface's length, read once it matters
+            for (u32 side = 0; side < 2; ++side) {
+                const u32 a = s.outer_codon(t, side == 1);
+                if (a == kNone)
+                    continue;
+                const u32 dist = a > ip ? a - ip : ip - a;
+                if (dist > p.contact_range)
+                    continue;
+                ++seen;
+                seen_f += fast(a) ? 1 : 0;
+                if (is_nop(p.table.op[s.mem_[a]]))
+                    continue; // closed: a NOP there
+                u32 match = 0, len = 0;
+                if (n > 0) { // aimed: its surface against the template
+                    if (m == kNone)
+                        m = s.dormant(t) ? 0 : surface(t, sb);
+                    len = n > m ? n : m;
+                    for (u32 j = 0; j < n && j < m; ++j)
+                        match += bits[j] != sb[j];
+                }
+                const u64 num = len ? match : 0, den = len ? len : 1;
+                const u64 bnum = best_len ? best_match : 0, bden = best_len ? best_len : 1;
+                if (best == kNone || num * bden > bnum * den || (num * bden == bnum * den && dist < best_dist)) {
+                    best = t;
+                    best_match = match;
+                    best_len = len;
+                    best_dist = dist;
+                    best_high = side == 1;
+                }
+            }
+        }
+        charge2(costs().scan, seen_f, seen - seen_f);
+        *high = best_high;
+        *pmatch = best_match;
+        *plen = best_len;
+        return best;
     }
 
     // The nearest waste codon within contact range of ip (forward first at
@@ -1170,24 +1310,27 @@ struct Exec {
 
     // The bite's aim: a body (its contest match and length), or a waste codon
     // (*waste; the target is then kNone). Both kNone: nothing in reach.
+    // docs/bites-plan.md B1: no surface shields a body any more. An aimed
+    // bite picks the best-matching surface (it needs some match, or a
+    // surfaceless body); a blind one the nearest material, waste or body. There
+    // is no grip roll: aiming chooses which body, tissue decides the harm.
     u32 bite_aim(u32 ip, const u8* bits, u32 n, u32* waste, u32* pmatch, u32* plen) {
         *waste = kNone;
-        const u32 t = contest_pick(ip, bits, n, true, pmatch, plen);
-        const bool body_ok = t != kNone && (*plen == 0 || *pmatch > 0);
-        if (n > 0) // aimed: living things only
+        if (n > 0) { // aimed: living things only
+            const u32 t = contest_pick(ip, bits, n, true, pmatch, plen);
+            const bool body_ok = t != kNone && (*plen == 0 || *pmatch > 0);
             return body_ok ? t : kNone;
+        }
+        *pmatch = *plen = 0;
+        u32 bd = 0;
+        const u32 t = nearest_body(ip, &bd);
         const u32 w = nearest_waste(ip);
         if (w == kNone)
-            return body_ok ? t : kNone;
-        if (body_ok) {
-            const u32 start = s.blocks_[s.bodies_[t].blocks].start;
-            const u32 bd = start > ip ? start - ip : ip - start;
-            const u32 wd = w > ip ? w - ip : ip - w;
-            if (bd < wd)
-                return t;
-        }
+            return t;
+        const u32 wd = w > ip ? w - ip : ip - w;
+        if (t != kNone && bd < wd)
+            return t;
         *waste = w;
-        *pmatch = *plen = 0;
         return kNone;
     }
 
@@ -1324,6 +1467,20 @@ struct Exec {
         const u32 lo = s.blocks_[order[0]].start;
         const u32 hi = s.blocks_[order.back()].start + s.blocks_[order.back()].len;
         const bool from_low = ip < lo || (ip < hi && ip - lo <= hi - ip);
+        // B4 (NOPs as tissue): its code, NOPs not counted, before and as taken;
+        // B5: its open ends before the bite (a wound is one more after it).
+        auto code_in = [&](u32 k) {
+            u32 n = 0;
+            const Block& B = s.blocks_[k];
+            for (u32 a = B.start; a < B.start + B.len; ++a)
+                n += s.owner_[a] == k && !is_nop(p.table.op[s.mem_[a]]);
+            return n;
+        };
+        u32 code0 = 0, code_taken = 0;
+        if (p.tissue)
+            for (usize j = 0; j < order.size(); ++j)
+                code0 += code_in(order[j]);
+        const u32 open0 = static_cast<u32>(s.open_end(prey, false)) + static_cast<u32>(s.open_end(prey, true));
         u32 left = want, taken = 0;
         for (usize j = 0; j < order.size() && left > 0; ++j) {
             const u32 k = order[from_low ? j : order.size() - 1 - j];
@@ -1345,14 +1502,20 @@ struct Exec {
             }
             const u32 got = s.blocks_[piece].owned;
             moved_fast += tiered ? block_fast_owned(piece) : 0; // W3
+            if (p.tissue)
+                code_taken += code_in(piece);
             s.stamp_block(piece, g);
             give_block(piece, eater);
             left -= got;
             taken += got;
         }
+        if (s.bodies_[prey].blocks != kNone &&
+            static_cast<u32>(s.open_end(prey, false)) + static_cast<u32>(s.open_end(prey, true)) > open0)
+            ++s.tally_.wounds; // B5: the bite left an end of its code open
         // The same share of its holdings: millicores at random, GPU and NPU
-        // units oldest first (as DIVIDE shares them).
-        const u64 share_n = taken, share_d = n0;
+        // units oldest first (as DIVIDE shares them). B4: with tissue, the share
+        // of its code taken, NOPs not counted (a bite of padding takes no cores).
+        const u64 share_n = p.tissue ? code_taken : taken, share_d = p.tissue ? (code0 ? code0 : 1) : n0;
         Body& P = s.bodies_[prey];
         const u32 units = static_cast<u32>((2 * static_cast<u64>(P.units) * share_n + share_d) / (2 * share_d));
         if (units > 0) {
@@ -1427,8 +1590,7 @@ struct Exec {
             const u32 t = bite_aim(ip, bits, n, &waste, &match, &len);
             if (t == kNone && waste == kNone)
                 return cost;
-            if (t != kNone && len > 0 && !(s.rng_.below(len) < match))
-                return cost; // the grip slipped: a failed contest still costs the attempt
+            // (docs/bites-plan.md B1: no grip roll; aiming only chooses the body)
             // (Cheaper corpses: a dead program's remnant, or a dormant program whole.)
             const bool dorm = t != kNone && s.dormant(t);
             const u32 corpse = t == kNone ? corpse_codons(waste, want) : 0;
@@ -1442,7 +1604,14 @@ struct Exec {
             *ok = true;
             return cost;
         }
-        u32 target = contest(ip, bits, n, engulf || !p.inject_key);
+        bool high = false;
+        u32 target = kNone;
+        if (engulf) {
+            target = contest(ip, bits, n, true);
+        } else { // docs/bites-plan.md I1: only through an open end
+            u32 wm = 0, wl = 0;
+            target = wound_pick(ip, bits, n, &high, &wm, &wl);
+        }
         if (target == kNone) {
             *ok = false;
             return cost; // a failed contest still costs the attempt (6.4 #7)
@@ -1462,7 +1631,7 @@ struct Exec {
         if (engulf)
             engulf_body(target);
         else
-            moved = inject_into(target);
+            moved = inject_into(target, high);
         if (dorm)
             s.tally_.corpse_codons += moved;
         cost += static_cast<u32>(p.contact_per_codon * bite_weight(moved, dorm ? moved : 0));
@@ -1533,11 +1702,18 @@ struct Exec {
             deferred = true;
             return 1;
         }
-        const bool blind = engulf || !p.inject_key;
         u32 match = 0, len = 0;
-        const u32 target = contest_pick(ip, bits, n, blind, &match, &len);
-        if (target == kNone || (len == 0 ? !blind : match == 0))
-            return 1; // no chance at all: fails at once, as a lost contest does
+        bool high = false;
+        u32 target = kNone;
+        if (engulf) { // (Phase 9's whole swallow, without bites)
+            target = contest_pick(ip, bits, n, true, &match, &len);
+            if (target == kNone || (len != 0 && match == 0))
+                return 1; // no chance at all: fails at once, as a lost contest does
+        } else { // docs/bites-plan.md I1: only through an open end
+            target = wound_pick(ip, bits, n, &high, &match, &len);
+            if (target == kNone)
+                return 1; // no wound in reach: fails at once
+        }
         const u32 k = s.bodies_[target].blocks;
         if (!engulf && p.inject_room > 0 &&
             static_cast<double>(c.cx) * p.inject_room > static_cast<double>(s.blocks_[k].len))
@@ -1559,6 +1735,7 @@ struct Exec {
         a.n = n;
         a.match = match;
         a.len = len;
+        a.at = high ? 1u : 0u; // INJECT: which end of the host its wound is
         memcpy(a.bits, bits, n);
         s.actions_.push(a);
         ++s.tally_.actions_started;
@@ -1587,43 +1764,59 @@ struct Exec {
         const Body& T = s.bodies_[t];
         if (!T.alive || T.serial != a.target_serial || T.blocks == kNone)
             return 1; // gone: eaten by another, or dead (run_cpu counts it failed)
-        const bool blind = engulf || !p.inject_key;
-        const u32 start = s.blocks_[T.blocks].start;
-        const u32 dist = start > ip ? start - ip : ip - start;
-        u8 sb[64];
-        const u32 m = surface(t, sb);
-        const u32 len = a.n > m ? a.n : m;
-        u32 match = 0;
-        for (u32 j = 0; j < a.n && j < m; ++j)
-            match += a.bits[j] != sb[j];
-        // Its chance now against at the start (0/0 is the blind rule's).
-        const u64 now_num = len ? match : (blind ? 1 : 0), now_den = len ? len : 1;
-        const u64 was_num = a.len ? a.match : (blind ? 1 : 0), was_den = a.len ? a.len : 1;
-        const bool changed = dist > p.contact_range || now_num * was_den < was_num * now_den;
-        bool win = dist <= p.contact_range && (len == 0 ? blind : s.rng_.below(len) < match);
         const u32 k = T.blocks;
-        if (win && !engulf && (static_cast<i32>(c.cx) <= 0 ||
-                               (p.inject_room > 0 && static_cast<double>(c.cx) * p.inject_room >
-                                                         static_cast<double>(s.blocks_[k].len))))
-            win = false; // the host shrank below the payload
-        if (!win) { // (run_cpu counts it failed)
-            const bool shrank = !engulf && p.inject_room > 0 && static_cast<i32>(c.cx) > 0 &&
-                                static_cast<double>(c.cx) * p.inject_room > static_cast<double>(s.blocks_[k].len);
-            if (changed || shrank) {
-                ++s.tally_.actions_defended;
-                if (s.obs_)
-                    s.obs_->on_defended(s, k, s.tick_);
+        // A failure because the target changed in time is a defence (its
+        // place, its surface, its size, a wound it closed).
+        auto defended = [&]() {
+            ++s.tally_.actions_defended;
+            if (s.obs_)
+                s.obs_->on_defended(s, k, s.tick_);
+        };
+        if (!engulf) { // docs/bites-plan.md I1: it lands if its wound is still open and in reach
+            const bool high = a.at != 0;
+            const u32 w = s.outer_codon(t, high);
+            const bool open = w != kNone && !is_nop(p.table.op[s.mem_[w]]);
+            const u32 wd = w == kNone ? 0 : (w > ip ? w - ip : ip - w);
+            const bool fits = static_cast<i32>(c.cx) > 0 &&
+                              !(p.inject_room > 0 && static_cast<double>(c.cx) * p.inject_room >
+                                                         static_cast<double>(s.blocks_[k].len));
+            if (!open || wd > p.contact_range || !fits) { // (run_cpu counts it failed)
+                if (static_cast<i32>(c.cx) > 0)
+                    defended(); // the wound closed, the host moved off or shrank below the payload
+                return 1;
             }
+            const u32 moved = inject_into(t, high);
+            charge2(costs().move, moved_fast, moved - moved_fast); // (W3: at their tiers)
+            *ok = true;
             return 1;
         }
-        u32 moved = engulf ? T.mem : 0;
-        const bool dorm = engulf && s.dormant(t); // (cheaper corpses: counted as they land)
-        if (engulf && p.bites) // Phase 10: whole if it's no bigger than the bite, else a piece
+        const u32 start = s.blocks_[k].start;
+        const u32 dist = start > ip ? start - ip : ip - start;
+        bool win = dist <= p.contact_range;
+        bool changed = !win;
+        if (!p.bites) { // Phase 9's whole swallow: its chance now against at the start (0/0 = 1)
+            u8 sb[64];
+            const u32 m = surface(t, sb);
+            const u32 len = a.n > m ? a.n : m;
+            u32 match = 0;
+            for (u32 j = 0; j < a.n && j < m; ++j)
+                match += a.bits[j] != sb[j];
+            const u64 now_num = len ? match : 1, now_den = len ? len : 1;
+            const u64 was_num = a.len ? a.match : 1, was_den = a.len ? a.len : 1;
+            changed = changed || now_num * was_den < was_num * now_den;
+            win = win && (len == 0 || s.rng_.below(len) < match);
+        } // (B1: a bite has no grip roll; only moving out of reach saves its target)
+        if (!win) { // (run_cpu counts it failed)
+            if (changed)
+                defended();
+            return 1;
+        }
+        u32 moved = T.mem;
+        const bool dorm = s.dormant(t); // (cheaper corpses: counted as they land)
+        if (p.bites) // Phase 10: whole if it's no bigger than the bite, else a piece
             moved = bite_land(t, kNone, a.bite, ip);
-        else if (engulf)
-            engulf_body(t);
         else
-            moved = inject_into(t);
+            engulf_body(t);
         if (dorm)
             s.tally_.corpse_codons += moved;
         charge2(costs().move, moved_fast, moved - moved_fast); // (W3: at their tiers)
@@ -2090,8 +2283,9 @@ struct Exec {
                 v = dst * src;
                 break;
             }
+            const u8 was_ = s.mem_[to];
             s.mem_[to] = static_cast<u8>(v & 63);
-            note_write(to);
+            note_write(to, was_);
             if (s.obs_)
                 s.obs_->on_write_gpu(to);
             if (op == kRcopy) // a reversed copy: the read head runs down
@@ -2141,8 +2335,9 @@ struct Exec {
         }
         a = c.wh;
         for (u32 i = 0; i < n; ++i) {
+            const u8 was_ = s.mem_[a];
             s.mem_[a] = vals[i];
-            note_write(a);
+            note_write(a, was_);
             if (s.obs_)
                 s.obs_->on_write(a);
             a = next_addr(a);
@@ -2572,8 +2767,9 @@ struct Exec {
         case Op::write:
             ok = writable(c.wh) && page_accepts(c.wh);
             if (ok) {
+                const u8 was_ = s.mem_[c.wh];
                 s.mem_[c.wh] = static_cast<u8>(c.cx & 63);
-                note_write(c.wh);
+                note_write(c.wh, was_);
                 if (s.obs_)
                     s.obs_->on_write(c.wh);
                 c.wh = next_addr(c.wh);
@@ -2731,8 +2927,9 @@ struct Exec {
             u32 to = c.ax % p.size, from = c.bx % p.size;
             ok = readable(from) && writable(to) && page_accepts(to);
             if (ok) {
+                const u8 was_ = s.mem_[to];
                 s.mem_[to] = copied(take(from));
-                note_write(to);
+                note_write(to, was_);
                 if (s.obs_)
                     s.obs_->on_write(to);
             }

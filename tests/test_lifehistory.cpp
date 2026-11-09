@@ -494,6 +494,7 @@ u64 corpse_bite(bool corpse, double cost, u64* eaten) {
     TextBuf cfg;
     cfg.append("heat.enabled = false\nhazard.copy = 0\nhazard.flaw = 0\nhazard.rot = 0\nmem.upkeep = 0\n"
                "cost.table = home_v1\nengulf.bite = true\nengulf.codons_per_tick = 8\nsalvage.ratio = 4\n"
+               "engulf.bite_share = 1\n" // (bites up to the eater's size: the cap isn't what this measures)
                "world.millicores = 4000\n");
     char line[64];
     snprintf(line, sizeof line, "engulf.corpse_cost = %g\n", cost);
@@ -536,6 +537,7 @@ u64 dormant_bite(bool dormant, double cost, u64* eaten) {
     TextBuf cfg;
     cfg.append("heat.enabled = false\nhazard.copy = 0\nhazard.flaw = 0\nhazard.rot = 0\nmem.upkeep = 0\n"
                "cost.table = home_v1\nengulf.bite = true\nengulf.codons_per_tick = 8\nsalvage.ratio = 4\n"
+               "engulf.bite_share = 1\n" // (bites up to the eater's size: the cap isn't what this measures)
                "world.millicores = 4000\nlife.dormancy = true\n");
     char line[64];
     snprintf(line, sizeof line, "engulf.corpse_cost = %g\n", cost);
@@ -736,43 +738,11 @@ void test_wipe_world() {
         Run b;
         TextBuf err;
         CHECK(b.init_from_snapshot(snap.data(), snap.size(), 4, &err));
-        CHECK(!b.config().has("hazard.rays")); // (a v6 file: no legacy text)
         b.run_until(ticks);
         CHECK_EQ_U64(b.world().hash(), hashes[0]);
     }
-    // A v4 file: the same world without warnings, written as v4 wrote it
-    // (the version and the checksum: without warnings nothing else differs).
-    {
-        TextBuf cfg;
-        cfg.append(kSoupWorldProc);
-        cfg.append("mem.volatility = 0.0005\nheat.enabled = true\n");
-        Run a;
-        CHECK(make_run(a, cfg.c_str(), 2));
-        a.run_until(100);
-        ByteWriter s4;
-        a.snapshot(s4);
-        a.run_until(200);
-        Array<u8> bytes;
-        bytes.assign(s4.data(), s4.size());
-        bytes[8] = 4; // format v4
-        const u64 sum = hash_bytes(bytes.data(), bytes.size() - 8, 0x6E6F76612D736E70ull); // "nova-snp"
-        for (u32 i = 0; i < 8; ++i)
-            bytes[bytes.size() - 8 + i] = static_cast<u8>(sum >> (8 * i));
-        Run b;
-        TextBuf err;
-        const bool loaded = b.init_from_snapshot(bytes.data(), bytes.size(), 4, &err);
-        CHECK(loaded);
-        if (loaded) {
-            // From before rays came on by default (v6): it resumes with them off.
-            CHECK(b.config().get_str("hazard.rays", "").eq("false") &&
-                  b.config().get_str("life.gestation", "").eq("0") &&
-                  b.config().get_str("mem.wipe_warning", "").eq("0") && b.config().get_str("life.sleep", "").eq("false"));
-            b.run_until(200);
-            CHECK_EQ_U64(b.world().hash(), a.world().hash());
-        }
-    }
     printf("  wipe warnings: %llu in %llu ticks, %llu pending at the snapshot; the same at 1, 4 and 20 threads, "
-           "through the snapshot, and a v4 file resumes\n",
+           "and through the snapshot\n",
            static_cast<unsigned long long>(warnings), static_cast<unsigned long long>(ticks),
            static_cast<unsigned long long>(pending_at_snap));
 }

@@ -9,6 +9,10 @@ namespace {
 
 enum class LinkKind { all, inject, gpu };
 
+// A node row's window sums: births, deaths, sent, arrived, lost, symptom
+// ticks, struck, then voluntary sleeps and dormant departures (bites plan).
+inline constexpr usize kNodeSums = 9;
+
 u64 total_links(const World& w, LinkKind kind) {
     u64 links = 0;
     for (u32 n = 0; n < w.node_count(); ++n)
@@ -60,6 +64,8 @@ const char* const kColumns[kStatsColumns] = {
     // life history (docs/lifehistory-plan.md W, V7, R7) and cheaper corpses: nine sums
     "wipe_warnings", "wipe_false_alarms", "wipe_flickers", "sleeps", "sleep_woke", "sleep_expired", "ray_inserts",
     "ray_deletes", "corpse_codons",
+    // bites as wounds and parasites (docs/bites-plan.md): six sums, then two gauges
+    "wounds", "bled", "repairs", "parasite_threads", "parasite_divides", "struck_bodies", "open_ends", "infected",
     // the two floating-point columns, last as always
     "compress",     "ambient"};
 // The first 39 tally fields fill columns 3-41; Phase 8's five go after
@@ -70,7 +76,8 @@ const char* const kColumns[kStatsColumns] = {
 // and their four gauges, then the memory tiers' gauge and two.
 inline constexpr u32 kTallyEarly = 39, kTallyWarp = 5, kTallyAction = 4, kTallyThread = 2, kTallyLife = 9,
                      kTallyDormant = 5, kTallyArchive = 2, kFoundedColumns = 4, kTallyDisaster = kStatsDisasterSums,
-                     kTallyTier = kStatsTierColumns - 1, kTallyLifeHistory = kStatsLifeColumns;
+                     kTallyTier = kStatsTierColumns - 1, kTallyLifeHistory = kStatsLifeColumns,
+                     kTallyBite = kStatsBiteSums;
 // The origins of those columns, in order (soup.h).
 const u8 kFoundedOrigin[kFoundedColumns] = {kOriginSpark, kOriginDaughter, kOriginArrival, kOriginWake};
 
@@ -83,7 +90,7 @@ u64 total_founded(const World& w, u8 origin) {
 }
 static_assert(sizeof(SoupTally) / sizeof(u64) == kTallyEarly + kTallyWarp + kTallyAction + kTallyThread + kTallyLife +
                                                      kTallyDormant + kTallyArchive + kTallyDisaster + kTallyTier +
-                                                     kTallyLifeHistory,
+                                                     kTallyLifeHistory + kTallyBite,
               "a SoupTally field was added: update kColumns");
 
 } // namespace
@@ -160,7 +167,8 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
     const usize nt = sizeof tail / sizeof tail[0];
     static_assert(3 + kTallyEarly + sizeof tail / sizeof tail[0] + kTallyWarp + 2 + kTallyAction + kTallyThread + 1 +
                           kTallyLife + kTallyDormant + 2 + 1 + kTallyArchive + kFoundedColumns + kStatsDisasterColumns +
-                          kStatsTierColumns + kStatsProfileColumns + kStatsNoveltyColumns + kStatsLifeColumns ==
+                          kStatsTierColumns + kStatsProfileColumns + kStatsNoveltyColumns + kStatsLifeColumns +
+                          kStatsBiteColumns ==
                       kStatsIntColumns,
                   "stats row shape");
     for (usize i = 0; i < nt; ++i)
@@ -232,6 +240,18 @@ void stats_soup_row(const World& w, const SoupTally& sum, u64 first_tick, u32 ti
     for (u32 i = 0; i < kTallyLifeHistory; ++i)
         v[kStatsLifeFirst + i] = t[kTallyEarly + kTallyWarp + kTallyAction + kTallyThread + kTallyLife + kTallyDormant +
                                    kTallyArchive + kTallyDisaster + kTallyTier + i];
+    // Bites as wounds and parasites (docs/bites-plan.md): the sums, then the gauges.
+    for (u32 i = 0; i < kTallyBite; ++i)
+        v[kStatsBiteFirst + i] = t[kTallyEarly + kTallyWarp + kTallyAction + kTallyThread + kTallyLife + kTallyDormant +
+                                   kTallyArchive + kTallyDisaster + kTallyTier + kTallyLifeHistory + i];
+    u64 open_ends = 0, infected = 0;
+    for (u32 n = 0; n < w.node_count(); ++n) {
+        const Soup& s = w.node_soup(n);
+        open_ends += s.open_ends();
+        infected += s.infected();
+    }
+    v[kStatsBiteFirst + kTallyBite] = open_ends;
+    v[kStatsBiteFirst + kTallyBite + 1] = infected;
     marks->links = links;
     marks->inject = inject;
     marks->gpu = gpu;
@@ -314,7 +334,9 @@ bool StatsCsv::open_nodes(const char* path, u32 every) {
                  "sub_p_cores,sub_e_cores,sub_gpu,sub_npu,sub_mem_fast,sub_mem_slow,sub_disk_fast,sub_disk_slow,"
                  "occupancy,"
                  // the disasters' (docs/disasters-plan.md X7, X10)
-                 "symptom_ticks,struck,cores_offline\n");
+                 "symptom_ticks,struck,cores_offline,"
+                 // bites as wounds (docs/bites-plan.md section 7): voluntary sleeps begun, dormant programs leaving
+                 "sleeps,drifts\n");
     node_sum_.clear();
     return true;
 }
@@ -346,10 +368,10 @@ void StatsCsv::record(const World& w) {
         for (usize i = 0; i < sizeof(SoupTally) / sizeof(u64); ++i)
             sum[i] += t[i];
         if (nodes_.is_open()) {
-            node_sum_.resize(static_cast<usize>(w.node_count()) * 7);
+            node_sum_.resize(static_cast<usize>(w.node_count()) * kNodeSums);
             for (u32 n = 0; n < w.node_count(); ++n) {
                 const SoupTally& nt = w.node_soup(n).tally();
-                u64* s = node_sum_.data() + static_cast<usize>(n) * 7;
+                u64* s = node_sum_.data() + static_cast<usize>(n) * kNodeSums;
                 s[0] += nt.births;
                 s[1] += nt.deaths;
                 s[2] += nt.sent;
@@ -357,6 +379,8 @@ void StatsCsv::record(const World& w) {
                 s[4] += nt.lost;
                 s[5] += w.node_symptoms(n) ? 1 : 0; // disasters (X10)
                 s[6] += w.node_struck(n);
+                s[7] += nt.sleeps;       // docs/bites-plan.md section 7
+                s[8] += nt.dormant_hops;
             }
         }
         if (signals_.is_open()) {
@@ -434,7 +458,7 @@ void StatsCsv::write_node_rows(const World& w) {
         u(s.free_units());
         u(s.free_gpus());
         u(s.free_npus());
-        const u64* sum = node_sum_.size() ? node_sum_.data() + static_cast<usize>(n) * 7 : nullptr;
+        const u64* sum = node_sum_.size() ? node_sum_.data() + static_cast<usize>(n) * kNodeSums : nullptr;
         for (u32 i = 0; i < 5; ++i)
             u(sum ? sum[i] : 0);
         LineageSurvey sv = {};
@@ -454,6 +478,8 @@ void StatsCsv::write_node_rows(const World& w) {
         u(sum ? sum[5] : 0); // disasters (X7, X10): symptom ticks, struck, cores offline
         u(sum ? sum[6] : 0);
         u(s.offline_count());
+        u(sum ? sum[7] : 0); // docs/bites-plan.md: voluntary sleeps, dormant departures
+        u(sum ? sum[8] : 0);
         row.append_char('\n');
         nodes_.write(row.view());
     }

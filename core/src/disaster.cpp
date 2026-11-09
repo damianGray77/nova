@@ -313,6 +313,25 @@ u32 Soup::strike(u32 at, u32 len, Rng& r) {
     const u32 n = p_->size;
     if (at >= n || len == 0)
         return 0;
+    // docs/bites-plan.md section 7: the living bodies whose code (first block)
+    // the strike's run [lo, lo + cnt) changes, each once.
+    auto struck = [&](u32 lo, u32 cnt) {
+        Array<u32> seen;
+        for (u32 a = lo; a < lo + cnt && a < n; ++a) {
+            const u32 k = owner_[a];
+            if (k == kNone)
+                continue;
+            const u32 b = blocks_[k].body;
+            if (b == kNone || !bodies_[b].alive || bodies_[b].blocks != k)
+                continue;
+            bool dup = false;
+            for (usize i = 0; i < seen.size() && !dup; ++i)
+                dup = seen[i] == b;
+            if (!dup)
+                seen.push(b);
+        }
+        tally_.struck_bodies += seen.size();
+    };
     if (p_->rays) { // docs/lifehistory-plan.md R2: a ray that randomises what it passes
         const bool fwd = r.below(2) == 0;
         const double e = static_cast<double>(len) * p_->ray_strike * p_->ray_absorb;
@@ -321,10 +340,12 @@ u32 Soup::strike(u32 at, u32 len, Rng& r) {
             obs_->on_wipe(h.lo, h.n);
         ++tally_.strikes;
         tally_.strike_codons += h.n;
+        struck(h.lo, h.n);
         return h.n;
     }
     if (len > n - at)
         len = n - at;
+    struck(at, len);
     for (u32 a = at; a < at + len; ++a) {
         mem_[a] = static_cast<u8>(r.next() & 63);
         if (!stamp_.empty())

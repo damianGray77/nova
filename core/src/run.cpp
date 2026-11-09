@@ -3,7 +3,6 @@
 #include <cstdio> // snprintf
 
 #include "nova/budget.h"
-#include "nova/legacy.h"  // older snapshots' and replay logs' defaults
 #include "nova/novelty.h" // the live novelty meter (docs/analysis-plan.md A2)
 #include "nova/snapshot.h"
 
@@ -25,9 +24,6 @@ void Run::start_novelty() {
         novelty_ = nullptr;
     }
 }
-
-static_assert(kSnapshotLegacyBefore <= kSnapshotLifeBefore && kSnapshotLifeBefore <= kSnapshotCorpseBefore && kSnapshotCorpseBefore <= kSnapshotVersion,
-              "snapshots before kSnapshotLegacyBefore (kSnapshotLifeBefore) take the legacy defaults (legacy.h)");
 
 void genome_names(const CodonTable& t, const u8* codons, u32 len, TextBuf& out) {
     for (u32 i = 0; i < len; ++i) {
@@ -72,13 +68,8 @@ bool Run::init_from_snapshot(const u8* data, usize n, u32 threads, TextBuf* err,
         err->append("snapshot: the config's changes were refused");
         return false;
     }
-    // A snapshot from before v4 comes from a world without the features on by
-    // default since (legacy.h: substrates, sparks by activity, the archive,
-    // whose disk section it lacks), so it resumes with them off, unless its
-    // config (or an edit above) names them. The effective config then carries
-    // them, so later snapshots keep them off.
-    // (And one from before v6, without rays on by default: legacy.h.)
-    apply_format_defaults(config_, true, h.version);
+    // (Only this format is read: older snapshots are refused, Damian 2026-11-08,
+    // "old run data is incompatible", so no older defaults are applied.)
     budget_notes_.clear(); // a snapshot's budgets were resolved when it ran: this only checks the fit
     if (!resolve_budgets(config_, threads ? threads : ThreadPool::hardware_threads(), &budget_notes_, err))
         return false;
@@ -250,7 +241,8 @@ void Run::drain_detection() {
                                                     "npu_user node=",   "colonist node=",
                                                     "disk_user node=",  "signaller node=",
                                                     "gpu_native node=", "defended node=",
-                                                    "sleeper node="};
+                                                    "sleeper node=",    "parasite node=",
+                                                    "healer node="};
             t.append(kinds[g.kind < kEventCount ? g.kind : 0]);
             t.append_u64(n);
             t.append(" lineage=");
@@ -263,7 +255,7 @@ void Run::drain_detection() {
             t.append_u64(g.len);
             t.append(" genotype=");
             t.append_hex64(g.genotype);
-            t.append(g.via == kViaInject ? " via=inject" : " via=divide");
+            t.append(g.via == kViaInject ? " via=inject" : (g.via == kViaParasite ? " via=parasite" : " via=divide"));
             Event ev;
             ev.tick = g.tick;
             ev.off = static_cast<u32>(event_text_.size());
@@ -288,7 +280,11 @@ void Run::drain_detection() {
                                                                : (g.kind == kEventDefended
                                                                       ? defended_
                                                                       : (g.kind == kEventSleeper ? sleeper_
-                                                                                                 : signaller_))))));
+                                                                         : (g.kind == kEventParasite
+                                                                                ? parasite_
+                                                                                : (g.kind == kEventHealer
+                                                                                       ? healer_
+                                                                                       : signaller_))))))));
                 if (!d.found) {
                     d.found = true;
                     d.tick = g.tick;
@@ -583,7 +579,7 @@ bool replay_verify(const ReplayLog& log, u32 threads, ReplayResult* out) {
     *out = ReplayResult{};
     Run run;
     Config::ParseError pe;
-    if (!log.replay_config(&run.config(), &pe)) { // (with the legacy defaults for a log before v3)
+    if (!log.replay_config(&run.config(), &pe)) {
         snprintf(out->msg, sizeof out->msg, "logged config: %s", pe.msg);
         return false;
     }
