@@ -9,7 +9,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 - **Families:** a key with a `<placeholder>` stands for one setting per member listed.
 - **Needs:** the switch the setting depends on; it does nothing while that is off.
 
-384 settings, 83 of them from 14 families; 11 hidden (tests and demos).
+383 settings, 83 of them from 14 families; 11 hidden (tests and demos).
 
 ## Contents
 
@@ -302,7 +302,6 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 |---|---|---|---|---|
 | `cost.table` | choice | home_v1 | classic, home_v1 | **Cost table**. classic: every instruction costs 1; home_v1: measured costs in picoseconds on this machine's cores (a timed table; nova costs prints it). |
 | `engulf.codons_per_tick` | whole | 8 | 1 to 16777216 | **ENGULF codons a tick**. The prey's codons an ENGULF takes a tick, with a timed table. Needs `cost.table=home_v1`. |
-| `inject.codons_per_tick` | whole | 16 | 1 to 16777216 | **INJECT codons a tick**. Codons an INJECT writes a tick, with a timed table. Needs `cost.table=home_v1`. |
 
 ## Contact and eating
 
@@ -310,7 +309,7 @@ Every setting is a `key = value` line in a config file, or `--set key=value` on 
 |---|---|---|---|---|
 | `contact.range` | whole | 256 | 0 to 16777216 (max computed) | **Contact range**. The farthest from the attacker's IP an ENGULF or INJECT reaches a surface (at most the node's size). |
 | `contact.cost_base` | whole | 8 | 0 to 1000000 | **Contact cost**. Instructions an ENGULF or INJECT attempt costs, success or not. |
-| `contact.cost_per_codon` | number | 1 | 0 to 1000000 | **Contact cost per codon**. ... plus this per codon moved. |
+| `contact.cost_per_codon` | number | 1 | 0 to 1000000 | **Contact cost per codon**. ... plus this per codon an ENGULF moves. An INJECT pays each codon it writes what a COPY of it costs (classic: an instruction; a timed table: a load and a store at their tiers, then it waits idle as long as a full core takes, at least a tick; Damian, 2026-11-09). |
 | `contact.inject_room` | number | 1 | 0 to 1000000 | **INJECT room**. INJECT fails unless the host block is at least this x the payload (0 = off). |
 | `engulf.bite` | switch | true | true or false | **ENGULF bites**. ENGULF takes a bite of CX codons, of raw material or of a body; else it swallows whole prey (Phase 9). With bites a NOP surface no longer shields a body, and INJECT lands only through an open end (a wound: an end of the host's code whose outermost codon isn't a NOP), just inside it, starting a parasite thread there (docs/bites-plan.md). |
 | `engulf.bite_share` | number | 0.3333333333333333 | 1e-06 to 1 | **Bite size**. A bite takes at most this share of the biter's own size (rounded up): prey no bigger than that is swallowed whole, a bigger one loses a piece from its nearest end (1 = up to the biter's whole size). Needs `engulf.bite`. |

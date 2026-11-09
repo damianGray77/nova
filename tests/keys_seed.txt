@@ -156,7 +156,6 @@ heat.npu.speed_min	f64	0.25	0.001	1
 heat.npu.warm	f64	40	0	1000000000
 heat.npu_gain	f64	9	0	1000000000
 heat.write_gain	f64	0.01	0	1000000000
-inject.codons_per_tick	u64	16	1	16777216
 isa.max_template	u64	8	1	64
 isa.membrane	str	private	-	-
 isa.search_limit	u64	400	1	1000

@@ -533,8 +533,6 @@ NOVA_CHOICE("cost.table", "home_v1", "classic home_v1", 0, "Costs", "Cost table"
             "(a timed table; nova costs prints it).")
 NOVA_WHOLE("engulf.codons_per_tick", 8, 1, 1u << 24, 0, "Costs", "ENGULF codons a tick", "cost.table=home_v1",
            "The prey's codons an ENGULF takes a tick, with a timed table.")
-NOVA_WHOLE("inject.codons_per_tick", 16, 1, 1u << 24, 0, "Costs", "INJECT codons a tick", "cost.table=home_v1",
-           "Codons an INJECT writes a tick, with a timed table.")
 
 // ---------------------------------------------------------------------------
 // Contact and eating
@@ -544,7 +542,9 @@ NOVA_WHOLE("contact.range", 256, 0, 1u << 24, kKeyMaxComputed, "Contact and eati
 NOVA_WHOLE("contact.cost_base", 8, 0, 1000000, 0, "Contact and eating", "Contact cost", "",
            "Instructions an ENGULF or INJECT attempt costs, success or not.")
 NOVA_NUMBER("contact.cost_per_codon", 1.0, 0, 1000000, 0, "Contact and eating", "Contact cost per codon", "",
-            "... plus this per codon moved.")
+            "... plus this per codon an ENGULF moves. An INJECT pays each codon it writes what a COPY of it costs "
+            "(classic: an instruction; a timed table: a load and a store at their tiers, then it waits idle as long "
+            "as a full core takes, at least a tick; Damian, 2026-11-09).")
 NOVA_NUMBER("contact.inject_room", 1.0, 0, 1000000, 0, "Contact and eating", "INJECT room", "",
             "INJECT fails unless the host block is at least this x the payload (0 = off).")
 NOVA_FLAG("engulf.bite", true, 0, "Contact and eating", "ENGULF bites", "",

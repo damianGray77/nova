@@ -238,6 +238,20 @@ void test_inject_action() {
     f.s.run_cpu(f.cpu_of(inj), 0);
     CHECK(f.s.tally().injects == 1 && f.s.tally().actions_landed == 1);
     CHECK(f.s.mem()[206] == f.s.mem()[100] && f.s.mem()[207] == f.s.mem()[101] && f.s.mem()[206] != before);
+    // Its price (Damian, 2026-11-09: "inject should cost as much as copy"):
+    // what COPYs of its payload would cost -- 2 codons, a load and a store
+    // each -- with the instruction and its kernel call; then it waits idle
+    // instead of spending the rest of the tick.
+    Fix h;
+    CHECK(h.init());
+    const u32 i3 = plant(h.s, 100, "INJECT NOP0 NOP0 NOP1 INC", 500);
+    CHECK(i3 != kNone && plant(h.s, 200, "NOP1 NOP1 NOP0 INC INC INC INC INC", 300) != kNone);
+    h.cpu(i3).cx = 2;
+    h.cpu(i3).rh = 100;
+    const i64 used = h.s.run_cpu(h.cpu_of(i3), 1000000);
+    const i64 copies = 2 * static_cast<i64>(h.p.cost.load + h.p.cost.store);
+    const i64 call = static_cast<i64>(h.p.cost.call);
+    CHECK(used >= copies + call && used < copies + call + 10000 && h.s.cpu_waits(h.cpu_of(i3)));
     // A host that seals its wound meanwhile defends itself.
     Fix g;
     CHECK(g.init());
@@ -305,15 +319,19 @@ const char* const kTimedWorld = "seed = 42\n"
                                 "spark.grant = 20\n"
                                 "spark.min_len = 8\n"
                                 "spark.max_len = 24\n"
-                                "seed.genome = NOP0 SENSE ALLOC NOP1 COPY DJNZ NOP0 SENSE INJECT NOP1 DIVIDE\n"
+                                // (a COPY replicator sealed by NOPs, as kSoupWorld1b's: the INJECT
+                                // the 1b ancestor re-infected its relatives with now costs what COPY
+                                // does and lands only through wounds, docs/bites-plan.md)
+                                "seed.genome = NOP0 ZERO ROTB SENSE ALLOC NOP1 COPY DJNZ NOP0 ZERO INC ROTB "
+                                "SENSE DIVIDE NOP0\n"
                                 "seed.at = 1000\n"
-                                "seed.millicores = 100\n"
+                                "seed.millicores = 200\n"
                                 "hazard.copy = 0.005\n"
                                 "hazard.flaw = 0.001\n"
                                 "hazard.rot = 0.00005\n"
-                                "heat.cpu_gain = 36\n"
-                                "heat.fetch_gain = 0.06\n"
-                                "heat.write_gain = 0.5\n"
+                                // (default heat: at kSoupWorld1b's hot gains the COPY replicator
+                                // can't establish on this table; the INJECT one it replaced did,
+                                // when INJECT was nearly free)
                                 "cost.table = home_v1\n";
 const char* timed_world() { return kTimedWorld; }
 

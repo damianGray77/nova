@@ -262,7 +262,6 @@ bool soup_params_from_config(Config& cfg, u32 soup_size, SoupParams* p) {
     p->tick_units = static_cast<double>(p->instr_per_core) * p->plain;
     p->engulf_cpt = key_u32(cfg, "engulf.codons_per_tick"); // Phase 10: halved, so prey can react
     p->corpse_cost = key_f64(cfg, "engulf.corpse_cost");    // cheaper bites of fresh corpses (2026-11-08)
-    p->inject_cpt = key_u32(cfg, "inject.codons_per_tick");
 
     SelectorMap& m = p->sel;
     m = SelectorMap{};
@@ -2771,7 +2770,7 @@ u32 Soup::action_on(u32 b) const {
 
 bool Soup::cpu_waits(u32 c) const {
     const u32 i = action_of(c);
-    return i != kNone && !contact_action(actions_[i]) && actions_[i].end > tick_;
+    return i != kNone && !busy_action(actions_[i]) && actions_[i].end > tick_;
 }
 
 u32 Soup::action_of(u32 c) const {

@@ -17,9 +17,9 @@
 //
 // Runs never measure: a table is a fixed set of whole numbers, so every run,
 // replay and snapshot uses exactly the same costs. A re-measure is a new
-// table (home_v2), never a silent change. ENGULF's and INJECT's pace are
-// world rules, not measurements (engulf.codons_per_tick and
-// inject.codons_per_tick, SoupParams).
+// table (home_v2), never a silent change. ENGULF's pace is a world rule, not
+// a measurement (engulf.codons_per_tick, SoupParams); an INJECT costs what
+// COPYs of its payload would (docs/bites-plan.md, 2026-11-09).
 #include "nova/isa.h"
 #include "nova/str.h"
 #include "nova/types.h"

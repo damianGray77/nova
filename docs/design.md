@@ -1875,6 +1875,20 @@ lineage (a `via parasite` link: the detector keeps a per-CPU copy of the
 injector's tag). A timed INJECT whose wound closed, or whose host moved off
 or shrank, by its end counts as defended.
 
+**INJECT costs as much as COPY** (Damian, 2026-11-09, after the
+bud-and-inject finding below). Each codon it writes costs what a COPY of it
+would: on the classic table an instruction, on a timed table a load from
+the read head and a store at the host, each at its codon's tier. On a timed
+table the CPU pays that, with the instruction and its kernel call, as the
+INJECT starts, then waits idle (as a long instruction does) for as long as
+a full core takes to copy the payload, at least a tick, so the host gets a
+turn to seal its wound. Before, it kept the CPU busy for whole ticks at
+`inject.codons_per_tick` (16) a tick, which is gone. The attempt's base
+cost (`contact.cost_base`) stays, as ENGULF's does. The 1b ancestor that
+re-infected its relatives with INJECT can't establish in the hot timed
+test world any more; that world's ancestor is now a COPY replicator with
+NOP caps.
+
 **Counts.** `stats.csv` gains `wounds`, `bled`, `repairs`,
 `parasite_threads`, `parasite_divides`, `struck_bodies` (living bodies whose
 code a lightning strike changed) and the gauges `open_ends` and `infected`;

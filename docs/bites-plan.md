@@ -1,6 +1,6 @@
 # Plan: bites as wounds, NOPs as tissue, parasites inside their hosts
 
-> **Built 2026-11-09** (steps 1-7; design.md 6.26 says what the build settled: bleeding's schedule, how repairs are counted, the detector's per-CPU parasite tag). Step 8, the calibration sweep, is still to run. A finding: the bud-and-inject replicator works again through its daughters' open ends (the I1 risk).
+> **Built 2026-11-09** (steps 1-7; design.md 6.26 says what the build settled: bleeding's schedule, how repairs are counted, the detector's per-CPU parasite tag). Step 8, the calibration sweep, is still to run. A finding: the bud-and-inject replicator works again through its daughters' open ends (the I1 risk). Damian's answer, the same day: **INJECT costs as much as COPY** (each codon it writes, a COPY's price; design.md 6.26), so infecting is no cheaper a way to copy than copying.
 >
 > **Revision 3 (2026-11-08), APPROVED by Damian ("approved").** Changed from revision 2 (Damian):
 > - An internal NOP that bleeding reaches becomes the new outer skin: the end is closed there (B6).

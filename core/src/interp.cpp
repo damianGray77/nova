@@ -35,6 +35,7 @@ struct Exec {
     mutable u64 t_ps = 0; // (searches and template reads are const)
     const Action* resolving = nullptr;
     bool deferred = false;
+    bool pay_at_start = false; // the action it started is paid for now, not by waiting (an INJECT)
     u32 wslot = kNone; // Phase 9b: the warp, for its host instruction
     // Gestation (docs/lifehistory-plan.md G1): a DIVIDE before the daughter is
     // ripe waits at itself, idle; ripe_at is the tick she will be.
@@ -1628,10 +1629,15 @@ struct Exec {
         }
         u32 moved = engulf ? s.bodies_[target].mem : 0;
         const bool dorm = engulf && s.dormant(target); // (cheaper corpses: a dormant program too)
-        if (engulf)
-            engulf_body(target);
-        else
+        if (!engulf) { // docs/bites-plan.md (Damian): each codon as a COPY of it costs
+            const u32 from = c.rh, dest = inject_dest(target, high);
             moved = inject_into(target, high);
+            cost += moved * static_cast<u32>(costs().op[static_cast<u32>(Op::copy)]);
+            copy_time(from, dest, moved);
+            *ok = true;
+            return cost;
+        }
+        engulf_body(target);
         if (dorm)
             s.tally_.corpse_codons += moved;
         cost += static_cast<u32>(p.contact_per_codon * bite_weight(moved, dorm ? moved : 0));
@@ -1640,15 +1646,47 @@ struct Exec {
         return cost;
     }
 
+    // Where an INJECT through the victim's open end (high or low) writes its
+    // first codon: just inside it (docs/bites-plan.md I2; as inject_into).
+    u32 inject_dest(u32 victim, bool high) const {
+        const Block& bl = s.blocks_[s.bodies_[victim].blocks];
+        const u32 count = c.cx < bl.len ? c.cx : bl.len;
+        return high ? bl.start + bl.len - count : bl.start;
+    }
+
+    // Damian, 2026-11-09: "inject should cost as much as copy". The picoseconds
+    // n COPYs from the read head at `from` into [dest, dest + n) would take --
+    // a load and a store a codon, each at its codon's tier (W3) -- charged to
+    // this instruction; returns them (0 without a timed table: there a COPY is
+    // one instruction, charged by the caller).
+    double copy_time(u32 from, u32 dest, u32 n) {
+        if (!p.cost.timed)
+            return 0;
+        const CostTable& t = costs();
+        double sum = 0;
+        for (u32 i = 0; i < n; ++i) {
+            const u32 a = (from + i) % p.size, b = (dest + i) % p.size;
+            sum += tiered ? static_cast<double>(t.load) * tf[fast(a) ? 0 : 1] + static_cast<double>(t.store) * tf[fast(b) ? 0 : 1]
+                          : static_cast<double>(t.load + t.store);
+        }
+        if (tiered)
+            t_mem += sum;
+        else
+            t_ps += static_cast<u64>(sum + 0.5);
+        return sum;
+    }
+
     // --- contact as an action (Phase 9, design.md 6.15) ----------------------
     //
     // With a timed cost table a CPU's ENGULF or INJECT takes ticks. At its
     // start the contest picks its target, as above, but does not roll: if it
     // has any chance (a target, a surface match above 0 or a blind ENGULF, an
     // INJECT payload that fits), the action starts and its target is marked.
-    // It lasts the prey's codons (ENGULF) or the codons to write (INJECT) at
-    // engulf.codons_per_tick (inject.codons_per_tick), and at least one tick,
-    // so every body gets a turn in between. Its CPU waits meanwhile.
+    // An ENGULF lasts the prey's codons at engulf.codons_per_tick, its CPU at
+    // work meanwhile; an INJECT pays its payload's COPY time when it starts
+    // and waits idle as long as a full core takes to copy it (docs/bites-plan.md,
+    // 2026-11-09). Either lasts at least a tick, so every body gets a turn in
+    // between.
     //
     // At its end (contact_end) it lands only if the target is still there and
     // in range, rolling its chance against the target's surface as it is
@@ -1719,11 +1757,22 @@ struct Exec {
             static_cast<double>(c.cx) * p.inject_room > static_cast<double>(s.blocks_[k].len))
             return 1; // the payload doesn't fit: fails at once
         const u64 size = engulf ? s.bodies_[target].mem : (c.cx < s.blocks_[k].len ? c.cx : s.blocks_[k].len);
-        const u64 pace = engulf ? p.engulf_cpt : p.inject_cpt;
-        u64 ticks = max_of<u64>(1, (size + pace - 1) / pace);
-        if (engulf && s.dormant(target)) // (cheaper corpses: a dormant program, swallowed whole)
-            ticks = max_of<u64>(1, static_cast<u64>(ceil(bite_weight(static_cast<u32>(size), static_cast<u32>(size)) /
-                                                         static_cast<double>(pace))));
+        u64 ticks = 1;
+        if (engulf) {
+            const u64 pace = p.engulf_cpt;
+            ticks = max_of<u64>(1, (size + pace - 1) / pace);
+            if (s.dormant(target)) // (cheaper corpses: a dormant program, swallowed whole)
+                ticks = max_of<u64>(1, static_cast<u64>(ceil(bite_weight(static_cast<u32>(size), static_cast<u32>(size)) /
+                                                             static_cast<double>(pace))));
+        } else {
+            // Damian, 2026-11-09: INJECT costs as much as COPY. The CPU pays its
+            // payload's COPY time now, then waits idle (as a long instruction
+            // does) for as long as a full core takes to copy it, at least a
+            // tick, so the host has a turn to seal its wound.
+            const double t = copy_time(c.rh, inject_dest(target, high), static_cast<u32>(size));
+            ticks = max_of<u64>(1, static_cast<u64>(ceil(t / p.tick_units)));
+            pay_at_start = true;
+        }
         Action a = {};
         a.end = s.tick_ + ticks;
         a.actor_serial = s.bodies_[c.body].serial;
@@ -2528,8 +2577,16 @@ struct Exec {
         bool ok = exec_op(op, ip, &next, &cost);
         if constexpr (kProf) // (A3) what it did, before anything below can change ok
             profile_step(*prof, probe, s.tally_, op, ip, ok, next, c.cx, resolving != nullptr, self_load);
-        if (deferred) // Phase 9: it started an action; the CPU waits here, at it, until its end
-            return 0;
+        if (deferred) { // Phase 9: it started an action; the CPU waits here, at it, until its end
+            if (!pay_at_start)
+                return 0;
+            // docs/bites-plan.md (Damian, 2026-11-09): an INJECT pays its own
+            // part, its kernel call and its payload's COPY time as it starts,
+            // then waits idle.
+            pay_at_start = false;
+            const u64 t = own + extra_ps();
+            return t > 0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<u32>(t);
+        }
         if (stalled) { // gestation (G1): it waits at the DIVIDE, idle, for the rest of the tick
             stalled = false;
             c.yielded = 1;
@@ -3050,8 +3107,8 @@ i64 Soup::run_cpu(u32 ci, i64 quota, u8 kind) {
             const Action& a = actions_[ai];
             const bool gone = a.target != kNone &&
                               (!bodies_[a.target].alive || bodies_[a.target].serial != a.target_serial);
-            if (a.end > tick_ && !gone) // contact is the CPU at work; a wait leaves it idle (9c)
-                return contact_action(a) ? quota : 0;
+            if (a.end > tick_ && !gone) // an ENGULF is the CPU at work; a wait leaves it idle (9c, bites plan)
+                return busy_action(a) ? quota : 0;
             const Action act = a;
             for (usize j = ai; j + 1 < actions_.size(); ++j) // in start order, still
                 actions_[j] = actions_[j + 1];
@@ -3074,8 +3131,8 @@ i64 Soup::run_cpu(u32 ci, i64 quota, u8 kind) {
     else
         while (used < quota && !e.c.halted && !e.c.yielded && !e.deferred)
             used += e.step();
-    if (e.deferred && used < quota && contact_action(actions_.back()))
-        used = quota; // the rest of the tick goes on the contact; a wait is idle (9c)
+    if (e.deferred && used < quota && busy_action(actions_.back()))
+        used = quota; // the rest of the tick goes on the ENGULF; a wait is idle (9c, bites plan)
     if (e.c.executed != ran_before && e.c.body < last_ran_.size())
         last_ran_[e.c.body] = tick_;
     // ENGULF may have appended the prey's CPUs after this one: keep the link.

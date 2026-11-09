@@ -252,7 +252,6 @@ struct SoupParams {
     double tick_units;    // what 1,000 millicores give a tick: instr_per_core plain instructions
     u32 engulf_cpt;       // engulf.codons_per_tick: the prey's codons an ENGULF takes a tick (timed)
     double corpse_cost;   // engulf.corpse_cost: a bite's charge per fresh corpse codon, x a raw codon's (2026-11-08)
-    u32 inject_cpt;       // inject.codons_per_tick: codons an INJECT writes a tick (timed)
     // threads and cores (Phase 9c, design.md 6.15); off = exactly as before
     bool threads;         // cpu.threads: a thread runs on one core at a time; programs start threads
     u32 slices;           // cpu.slices: a body's threads take turns this many times a tick
@@ -432,6 +431,10 @@ static_assert(sizeof(Action) == 3 * 8 + 10 * 4 + 64, "Action must have no implic
 inline bool contact_action(const Action& a) {
     return a.op == static_cast<u32>(Op::engulf) || a.op == static_cast<u32>(Op::inject);
 }
+// Whether its CPU is at work until it ends (an ENGULF, its codons' time), rather
+// than waiting idle: a long instruction, or (since 2026-11-09, docs/bites-plan.md)
+// an INJECT, which paid its payload's COPY time when it began.
+inline bool busy_action(const Action& a) { return a.op == static_cast<u32>(Op::engulf); }
 inline constexpr u32 kActEngulf = 1; // SENSE 23's codes for what is acting on me
 inline constexpr u32 kActInject = 2;
 
