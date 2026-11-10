@@ -258,6 +258,110 @@ void test_phylo() {
     CHECK(out.empty());
 }
 
+// The pairwise layout phylo_layout replaced (quadratic: long7's 14,301-genotype
+// lineage took most of a second a frame), kept as the reference it must match.
+void phylo_reference(const GenomeEntry* e, usize n, u64 lineage, Array<PhyloNode>* out) {
+    out->clear();
+    for (usize i = 0; i < n; ++i) {
+        if (e[i].lineage != lineage)
+            continue;
+        bool seen = false;
+        for (usize j = 0; j < out->size() && !seen; ++j)
+            seen = e[(*out)[j].entry].genotype == e[i].genotype;
+        if (seen)
+            continue;
+        PhyloNode p = {};
+        p.entry = static_cast<u32>(i);
+        p.parent = kNone;
+        p.tick = e[i].tick;
+        out->push(p);
+    }
+    const usize m = out->size();
+    for (usize i = 0; i < m; ++i) {
+        const u64 parent = e[(*out)[i].entry].parent;
+        if (!parent)
+            continue;
+        for (usize j = 0; j < m; ++j)
+            if (j != i && e[(*out)[j].entry].genotype == parent) {
+                (*out)[i].parent = static_cast<u32>(j);
+                break;
+            }
+    }
+    Array<u8> done;
+    done.resize(m);
+    Array<u32> stack;
+    u32 row = 0;
+    for (u32 pass = 0; pass < 2; ++pass)
+        for (usize r = 0; r < m; ++r) {
+            if (done[r] || (pass == 0 && (*out)[r].parent != kNone))
+                continue;
+            if (pass == 1)
+                (*out)[r].parent = kNone;
+            stack.clear();
+            stack.push(static_cast<u32>(r));
+            while (!stack.empty()) {
+                const u32 v = stack.back();
+                stack.pop();
+                if (done[v])
+                    continue;
+                done[v] = 1;
+                PhyloNode& pv = (*out)[v];
+                pv.row = row++;
+                pv.depth = pv.parent == kNone ? 0 : (*out)[pv.parent].depth + 1;
+                for (usize c = m; c-- > 0;)
+                    if (!done[c] && (*out)[c].parent == v)
+                        stack.push(static_cast<u32>(c));
+            }
+        }
+}
+
+// The hashed layout gives exactly the pairwise one's tree on a messy log:
+// three lineages interleaved, genotypes saved again, parents unsaved, saved
+// later, the genotype itself, and cycles. Then a 60,000-genotype lineage (a
+// long run's) lays out as a single chain, its deepest row last.
+void test_phylo_big() {
+    const usize n = 6000;
+    Array<GenomeEntry> e;
+    e.resize(n);
+    u64 x = 0x9E3779B97F4A7C15ull;
+    auto next = [&x]() {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        return x;
+    };
+    const u64 L = (5ull << 32) | 3;
+    for (usize i = 0; i < n; ++i) {
+        e[i].tick = 100 + i;
+        e[i].lineage = L + next() % 3;
+        e[i].genotype = 1 + next() % 2500; // (repeats: saved again on other nodes)
+        const u64 r = next() % 10;
+        e[i].parent = r == 0 ? 0 : (r == 1 ? e[i].genotype : 1 + next() % 2600); // none, itself, any (some unsaved)
+    }
+    Array<PhyloNode> got, want;
+    for (u64 lin = L; lin < L + 4; ++lin) { // (L + 3: no saves)
+        phylo_layout(e.data(), n, lin, &got);
+        phylo_reference(e.data(), n, lin, &want);
+        bool same = got.size() == want.size();
+        for (usize i = 0; same && i < got.size(); ++i)
+            same = got[i].entry == want[i].entry && got[i].parent == want[i].parent && got[i].tick == want[i].tick &&
+                   got[i].row == want[i].row && got[i].depth == want[i].depth;
+        CHECK(same && (lin == L + 3) == got.empty());
+    }
+    // A long chain: each genotype the last one's child.
+    const usize big = 60000;
+    Array<GenomeEntry> c;
+    c.resize(big);
+    for (usize i = 0; i < big; ++i) {
+        c[i].tick = i;
+        c[i].lineage = L;
+        c[i].genotype = 1000 + i;
+        c[i].parent = i ? 999 + i : 0;
+    }
+    phylo_layout(c.data(), big, L, &got);
+    CHECK(got.size() == big && got[big - 1].row == big - 1 && got[big - 1].depth == big - 1 && got[0].parent == kNone);
+}
+
 // --- the live session ------------------------------------------------------------------
 
 // The busiest node: a good inspector target.
@@ -920,6 +1024,7 @@ void suite_view() {
     test_chart_log();
     test_stats_header();
     test_phylo();
+    test_phylo_big();
     test_frame_matches_world();
     test_watching_changes_nothing();
     test_live_knobs();

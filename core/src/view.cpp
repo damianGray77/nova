@@ -7,6 +7,7 @@
 #include "nova/analysis.h" // a finished run's novelty list and map of life, streamed (A2, A5)
 #include "nova/genebank.h"
 #include "nova/hash.h"
+#include "nova/hashmap.h"
 #include "nova/novelty.h" // the live novelty meter (A2)
 #include "nova/profile.h" // behaviour profiles' roles, for the map of life (A3, A5)
 
@@ -573,16 +574,19 @@ void ChartLog::add(u64 tick, const double* row) {
 
 void phylo_layout(const GenomeEntry* e, usize n, u64 lineage, Array<PhyloNode>* out) {
     out->clear();
-    // The lineage's genotypes, first save only, in save order (= tick order).
-    Array<u64> key; // genotype, then its layout index, for lookup by sorting
+    // The lineage's genotypes, first save only, in save order (= tick order),
+    // each found again by its hash: a long run's big lineage has tens of
+    // thousands, and this runs on the viewer's window thread (long7: 14,301
+    // genotypes laid out pairwise took most of a second a frame).
+    HashMap<u32> index; // genotype -> its layout index
     for (usize i = 0; i < n; ++i) {
         if (e[i].lineage != lineage)
             continue;
-        bool seen = false;
-        for (usize j = 0; j < out->size() && !seen; ++j)
-            seen = e[(*out)[j].entry].genotype == e[i].genotype;
-        if (seen)
+        bool fresh = false;
+        u32& slot = index.get_or_insert(e[i].genotype, &fresh);
+        if (!fresh)
             continue;
+        slot = static_cast<u32>(out->size());
         PhyloNode p = {};
         p.entry = static_cast<u32>(i);
         p.parent = kNone;
@@ -596,16 +600,29 @@ void phylo_layout(const GenomeEntry* e, usize n, u64 lineage, Array<PhyloNode>* 
         const u64 parent = e[(*out)[i].entry].parent;
         if (!parent)
             continue;
-        for (usize j = 0; j < m; ++j) {
-            if (j != i && e[(*out)[j].entry].genotype == parent) {
-                (*out)[i].parent = static_cast<u32>(j);
-                break;
-            }
-        }
+        const u32* j = index.find(parent);
+        if (j && *j != i)
+            (*out)[i].parent = *j;
     }
+    // Each node's children in save order: kids[first[v], first[v + 1]).
+    Array<u32> first, at, kids;
+    first.resize(m + 1);
+    for (usize i = 0; i < m; ++i)
+        if ((*out)[i].parent != kNone)
+            ++first[(*out)[i].parent + 1];
+    for (usize v = 0; v < m; ++v)
+        first[v + 1] += first[v];
+    at.resize(m);
+    for (usize v = 0; v < m; ++v)
+        at[v] = first[v];
+    kids.resize(first[m]);
+    for (usize i = 0; i < m; ++i)
+        if ((*out)[i].parent != kNone)
+            kids[at[(*out)[i].parent]++] = static_cast<u32>(i);
     // Depth-first, children in save order. A cycle (a genotype forgotten and
     // seen again with a later parent) can't be reached from a true root; its
-    // first member becomes a root itself.
+    // first member becomes a root itself. (Its old parent still lists it as a
+    // child, but it is done by the time that parent is reached.)
     Array<u8> done;
     done.resize(m);
     Array<u32> stack;
@@ -628,9 +645,9 @@ void phylo_layout(const GenomeEntry* e, usize n, u64 lineage, Array<PhyloNode>* 
                 pv.row = row++;
                 pv.depth = pv.parent == kNone ? 0 : (*out)[pv.parent].depth + 1;
                 // Children pushed in reverse save order, so they pop in order.
-                for (usize c = m; c-- > 0;)
-                    if (!done[c] && (*out)[c].parent == v)
-                        stack.push(static_cast<u32>(c));
+                for (u32 k = first[v + 1]; k-- > first[v];)
+                    if (!done[kids[k]])
+                        stack.push(kids[k]);
             }
         }
     }

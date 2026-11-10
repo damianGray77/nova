@@ -1697,11 +1697,16 @@ void Viewer::charts_panel(const UiInput& in, Canvas& c) {
 void Viewer::phylogeny(const UiInput& in, Canvas& c) {
     char title[128], lin[32];
     lineage_text(sel_lineage_, lin, sizeof lin);
-    if (phylo_lineage_ != sel_lineage_ || phylo_saves_ != saves_.size()) {
+    // Laid out again for another lineage, after a trim (~0: the entries moved),
+    // or when a save appended since is this lineage's; others' saves (most of
+    // a running world's every frame) leave it as it is.
+    bool relayout = phylo_lineage_ != sel_lineage_ || phylo_saves_ > saves_.size();
+    for (usize i = relayout ? saves_.size() : phylo_saves_; i < saves_.size() && !relayout; ++i)
+        relayout = saves_[i].lineage == sel_lineage_;
+    if (relayout)
         phylo_layout(saves_.data(), saves_.size(), sel_lineage_, &phylo_);
-        phylo_lineage_ = sel_lineage_;
-        phylo_saves_ = saves_.size();
-    }
+    phylo_lineage_ = sel_lineage_;
+    phylo_saves_ = saves_.size();
     if (kinds_) {
         char a[32];
         commas(novelty_window_ ? novelty_window_ : kNoveltyListWindow, a);
