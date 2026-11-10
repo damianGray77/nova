@@ -330,6 +330,40 @@ void test_parasite_host_digested() {
     CHECK(f.s.cpu(pc).block != hk && (f.s.cpu(pc).block == kNone || f.s.block(f.s.cpu(pc).block).body == e));
 }
 
+// A resting dormant program can't be infected (Damian, 2026-11-09: refuse
+// dormant hosts). It could drift away holding a parasite that runs in its
+// code: in long7 (ticks 105,982-106,000) one outlived its host's slot, which
+// a newborn took, and the count of guests broke.
+void test_no_dormant_host() {
+    PFix f;
+    CHECK(f.init("life.bleed_every = 0\nworld.millicores = 2000\nlife.dormancy = true\n"));
+    const u32 inj = plant(f.s, 100, "INJECT ENGULF INJECT", 300);
+    TextBuf host_code;
+    host_code.append("NOP1 ALLOC");
+    for (int i = 0; i < 8; ++i)
+        host_code.append(" INC");
+    const u32 host = plant(f.s, 200, host_code.c_str(), 300); // [200, 210), its tail open
+    CHECK(inj != kNone && host != kNone);
+    Cpu& hc = f.s.cpu_mut(f.s.body(host).cpus);
+    hc.ip = 201;
+    hc.bx = 0; // (memory)
+    hc.cx = 16;
+    f.s.run_cpu(f.s.body(host).cpus, 1); // (a reserve to rest on)
+    CHECK(hc.err == 0 && f.s.body(host).mem == 26);
+    CHECK(f.s.force_dormant(host) && f.s.dormant(host) && f.s.open_end(host, true));
+    const u32 pc = f.s.body(inj).cpus;
+    f.s.run_cpu(pc, 1);
+    CHECK(f.s.cpu(pc).err == 1 && f.s.tally().injects == 0 && !f.s.is_parasite(inj) && f.s.infected() == 0);
+    CHECK(soup_ok(f.s));
+    // Awake, it can be.
+    PFix g;
+    CHECK(g.init("life.bleed_every = 0\nworld.millicores = 2000\nlife.dormancy = true\n"));
+    const u32 inj2 = plant(g.s, 100, "INJECT ENGULF INJECT", 300);
+    const u32 host2 = plant(g.s, 200, host_code.c_str(), 300);
+    g.s.run_cpu(g.s.body(inj2).cpus, 1);
+    CHECK(g.s.tally().injects == 1 && g.s.is_parasite(inj2) && g.s.host_of(inj2) == host2 && soup_ok(g.s));
+}
+
 // A busy procedural world with bites on, digestion and fast bleeding:
 // wounds, bleeding, repairs-or-not, programs moving into hosts, swallows and
 // digestion all happen, and the world is the same at 1, 4 and 20 threads and
@@ -395,5 +429,6 @@ void suite_parasites() {
     test_swallowed();
     test_handover();
     test_parasite_host_digested();
+    test_no_dormant_host();
     test_world();
 }

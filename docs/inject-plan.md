@@ -67,6 +67,7 @@
 - Warp records then overlap (host and guest). Each record still reads the round's starting memory, and records are written back in body order, so the result stays deterministic and the same on CPU and GPU.
 - The detector keeps a guest's lineage alive while it has no block of its own (a guest count per lineage). A parasite's threads carry the injector's tag (`cpu_tags_`), so its daughters join its lineage via the parasite link, as now.
 - A host with guests doesn't go dormant (frozen too long, it dies instead and frees them). A guest can't go dormant or disperse. A collapse kills guests with everything else.
+- Nothing INJECTs into a resting dormant program either (Damian, 2026-11-09: "refuse dormant hosts"), so no dormant body ever holds guests (`Soup::check` holds it to that). Allowed before, a parasite could sit in a dormant host that then drifted to another node without it; its host's slot was reused, and the guest count broke (long7, tick 106,000). Letting guests and holdings travel with a program is an open question.
 
 ## 2. Swallowed prey are digested (S)
 

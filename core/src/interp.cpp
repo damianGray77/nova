@@ -1187,12 +1187,13 @@ struct Exec {
     // Whether this body may move into `host` now: it has a genome of its own
     // (a parasite moves no further: M8) and no guests in it (Claude's call:
     // its code is theirs too, so an infected program can't leave it), the
-    // host owns at least contact.inject_ratio x its memory (M6), and the
-    // host's code has room for its genome x contact.inject_room.
+    // host isn't resting dormant (Damian, 2026-11-09), the host owns at least
+    // contact.inject_ratio x its memory (M6), and the host's code has room
+    // for its genome x contact.inject_room.
     bool inject_allowed(u32 host) const {
         const Body& I = s.bodies_[c.body];
         const u32 hk = s.bodies_[host].blocks;
-        if (I.blocks == kNone || s.is_parasite(c.body) || s.has_guests(c.body) || hk == kNone)
+        if (I.blocks == kNone || s.is_parasite(c.body) || s.has_guests(c.body) || hk == kNone || s.dormant(host))
             return false;
         if (p.inject_ratio > 0 &&
             static_cast<double>(s.bodies_[host].mem) < p.inject_ratio * static_cast<double>(I.mem))
@@ -1350,7 +1351,9 @@ struct Exec {
     // is within contact range of ip. Blind: the nearest open end; aimed: the
     // best-matching surface among bodies with one, then the nearest. *high:
     // which end. A NOP blocks INJECT, and so does unbroken code: only a wound
-    // lets it in. kNone if none.
+    // lets it in. kNone if none. Never a resting dormant program (Damian,
+    // 2026-11-09: refuse dormant hosts): it may drift away, and no host goes
+    // dormant or travels with guests in it (go_dormant).
     u32 wound_pick(u32 ip, const u8* bits, u32 n, bool* high, u32* pmatch, u32* plen) {
         u32 best = kNone, best_match = 0, best_len = 0, best_dist = 0;
         bool best_high = false;
@@ -1358,7 +1361,8 @@ struct Exec {
         u64 seen = 0, seen_f = 0;
         for (usize i = 0; i < s.order_.size(); ++i) {
             const u32 t = s.order_[i];
-            if (t == c.body || !s.bodies_[t].alive || s.bodies_[t].blocks == kNone || s.host_of(t) != kNone)
+            if (t == c.body || !s.bodies_[t].alive || s.bodies_[t].blocks == kNone || s.host_of(t) != kNone ||
+                s.dormant(t))
                 continue;
             u32 m = kNone; // its surface's length, read once it matters
             for (u32 side = 0; side < 2; ++side) {
@@ -1375,7 +1379,7 @@ struct Exec {
                 u32 match = 0, len = 0;
                 if (n > 0) { // aimed: its surface against the template
                     if (m == kNone)
-                        m = s.dormant(t) ? 0 : surface(t, sb);
+                        m = surface(t, sb);
                     len = n > m ? n : m;
                     for (u32 j = 0; j < n && j < m; ++j)
                         match += bits[j] != sb[j];

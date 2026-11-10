@@ -4959,9 +4959,13 @@ bool Soup::check(TextBuf* why) const {
         for (usize i = 0; i < bodies_.size(); ++i)
             if (bodies_[i].alive && guest_kind_[i] != kGuestNone && guest_host_[i] < bodies_.size())
                 ++count[guest_host_[i]];
-        for (usize i = 0; i < bodies_.size(); ++i)
+        for (usize i = 0; i < bodies_.size(); ++i) {
             if (bodies_[i].alive && count[i] != guests_[i])
                 return fail("guest count wrong at body", static_cast<u32>(i));
+            // (no host rests or drifts with guests in it: go_dormant, wound_pick)
+            if (bodies_[i].alive && count[i] && dormant(static_cast<u32>(i)))
+                return fail("dormant body with guests, body", static_cast<u32>(i));
+        }
     }
     if (mem_total + waste_ != n)
         return fail("memory not conserved: owned", mem_total);
