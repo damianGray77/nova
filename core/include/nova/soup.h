@@ -189,7 +189,7 @@ struct SoupParams {
     double contact_per_codon; // instructions charged per codon moved
     // INJECT's own criteria (Phase 1b, Damian; design.md 6.6)
     double inject_room;     // contact.inject_room: host block >= room x payload, else it fails (0 = off)
-    double inject_ratio;    // contact.inject_ratio: host's memory >= ratio x injector's, else it fails (0 = off; inject-plan M6)
+    double inject_ratio;    // contact.inject_ratio: host's memory > ratio x injector's, else it fails (0 = off; inject-plan M6)
     u32 digest;             // engulf.digest: codons a swallowed body loses to its eater a tick (0: swallowed at once; S2)
     // dispersal (Phase 3, design.md 6.9): DIVIDE to a neighbour; SENSE 14
     bool dispersal;

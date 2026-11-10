@@ -179,7 +179,9 @@ void test_crash() {
     Array<u64> kept;
     until.resize(w.node_count());
     kept.resize(w.node_count());
-    for (u64 t = 0; t < 500; ++t) {
+    // (1,000 ticks, was 500: since INJECT needs a host only just bigger (M6,
+    // 2026-11-10), no daughter happened to reach a rebooting node in 500.)
+    for (u64 t = 0; t < 1000; ++t) {
         run.step();
         const u64 ran = w.tick() - 1; // the tick just run
         for (u32 n = 0; n < w.node_count(); ++n) {
@@ -207,7 +209,17 @@ void test_crash() {
             deleted += d;
             restarted += s;
             const Soup& sp = w.node_soup(n);
-            CHECK(sp.body_count() == s); // the survivors (no dormancy here)
+            // The survivors (no dormancy here), but for a body left with no
+            // code at all: a parasite whose host the crash deleted, none of
+            // its code left (docs/inject-plan.md M5). It has nothing to
+            // restart at, and its threads fault.
+            auto codeless = [&](u32 b) {
+                return sp.is_parasite(b) ? sp.body(sp.host_of(b)).blocks == kNone : sp.body(b).blocks == kNone;
+            };
+            u64 none = 0;
+            for (usize k = 0; k < sp.body_count(); ++k)
+                none += codeless(sp.body_at(k)) ? 1 : 0;
+            CHECK(sp.body_count() == s + none);
             if (d + s > 0) {
                 const double share = static_cast<double>(d) / static_cast<double>(d + s);
                 CHECK(share >= 0.3 - 0.5 / (d + s) && share <= 0.8 + 0.5 / (d + s)); // (the default 30-80%)
@@ -215,6 +227,8 @@ void test_crash() {
             bool fresh = true;
             for (usize k = 0; k < sp.body_count(); ++k) {
                 const u32 b = sp.body_at(k);
+                if (codeless(b))
+                    continue;
                 u32 start = 0, hi = 0; // (a parasite's: its code in its host, docs/inject-plan.md M2)
                 if (sp.is_parasite(b)) {
                     sp.parasite_span(b, &start, &hi);
@@ -231,13 +245,13 @@ void test_crash() {
             CHECK(fresh);
             CHECK(w.rebooting(n) && w.reboot_until(n) == run.event_tick(seen) + 1 + r && r >= 10 && r <= 30);
             until[n] = w.reboot_until(n);
-            kept[n] = s;
+            kept[n] = s + none;
         }
     }
     CHECK(crashes > 0 && deleted > 0 && restarted > 0 && idle_ok > 0 && idle_bad == 0 && ran_after > 0);
     CHECK(refused > 0); // daughters sent to a rebooting node are lost
     CHECK(all_ok(w));
-    printf("  crash: %u crashes in 500 ticks, %llu programs deleted, %llu restarted; %u node-ticks down and quiet, "
+    printf("  crash: %u crashes in 1,000 ticks, %llu programs deleted, %llu restarted; %u node-ticks down and quiet, "
            "%llu arrivals refused\n",
            crashes, static_cast<unsigned long long>(deleted), static_cast<unsigned long long>(restarted), idle_ok,
            static_cast<unsigned long long>(refused));

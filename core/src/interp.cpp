@@ -1187,16 +1187,17 @@ struct Exec {
     // Whether this body may move into `host` now: it has a genome of its own
     // (a parasite moves no further: M8) and no guests in it (Claude's call:
     // its code is theirs too, so an infected program can't leave it), the
-    // host isn't resting dormant (Damian, 2026-11-09), the host owns at least
-    // contact.inject_ratio x its memory (M6), and the host's code has room
-    // for its genome x contact.inject_room.
+    // host isn't resting dormant (Damian, 2026-11-09), the host owns more than
+    // contact.inject_ratio x its memory (M6; at 1, just bigger: Damian,
+    // 2026-11-10), and the host's code has room for its genome x
+    // contact.inject_room.
     bool inject_allowed(u32 host) const {
         const Body& I = s.bodies_[c.body];
         const u32 hk = s.bodies_[host].blocks;
         if (I.blocks == kNone || s.is_parasite(c.body) || s.has_guests(c.body) || hk == kNone || s.dormant(host))
             return false;
         if (p.inject_ratio > 0 &&
-            static_cast<double>(s.bodies_[host].mem) < p.inject_ratio * static_cast<double>(I.mem))
+            static_cast<double>(s.bodies_[host].mem) <= p.inject_ratio * static_cast<double>(I.mem))
             return false;
         const u32 g = s.blocks_[I.blocks].len;
         return !(p.inject_room > 0 && static_cast<double>(g) * p.inject_room > static_cast<double>(s.blocks_[hk].len));

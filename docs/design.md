@@ -1965,9 +1965,13 @@ it is free, becomes its own first block (the longest free run of it), its
 threads inside it. With none left it owns nothing and its threads fault. A
 host with guests never goes dormant.
 
-**Size and price.** An INJECT lands only if the host owns at least
-`contact.inject_ratio` (2) times the injector's memory, so a bud can't be
-infected by its parent; the room rule stays. It is priced as a bite's mirror
+**Size and price.** An INJECT lands only if the host owns more than
+`contact.inject_ratio` (1) times the injector's memory, so a bud can't be
+infected by its parent; the room rule stays. (It was twice, until long7
+showed that no replicator could find a host twice its size: lineage members
+landed 2 of about 17,800 attempts in a night. Damian, 2026-11-10: "just
+larger rather than 2x", so a parasite can all but overwrite a host only a
+little bigger than itself, as a parasitoid wasp's larva eats its host.) It is priced as a bite's mirror
 image: `contact.cost_per_codon` per codon moved on the classic table, and on
 a timed table the codons moved at `engulf.codons_per_tick` (8), its thread
 busy meanwhile. 6.26's COPY price is gone (Damian: inject "is already a

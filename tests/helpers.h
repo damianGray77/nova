@@ -208,7 +208,7 @@ inline const char* const kSoupWorldProc = "seed = 42\n"
 // signals, and the lifecycle with drifting land (appended to kSoupWorldProc).
 inline const char* const kPhase4All = "heat.ambient = 0.05\n"
                                       "edge.corruption = 0.01\n"
-                                      "edge.failure = 0.005\n"
+                                      "edge.failure = 0.01\n" // (0.01, was 0.005: so cargo is still lost in 300 ticks)
                                       "edge.downtime = 20\n"
                                       "world.disk = 1024\n"
                                       "disk.rot = 0.0001\n"

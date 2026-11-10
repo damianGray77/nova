@@ -44,8 +44,9 @@ The viewer also offers new kinds of life, substrate maps and disaster marks.
 - It multiplies by carving copies out of its host's code; its daughters take
   the host's cores. When the host dies the parasite gets what is left of its
   own code back as a free body.
-- INJECT needs a host at least twice the injector's memory
-  (`contact.inject_ratio`) and is priced like a bite, not like COPY.
+- INJECT needs a host that owns more memory than the injector
+  (`contact.inject_ratio`, 1) and is priced like a bite, not like COPY. A
+  host only a little bigger is all but overwritten.
 - A bite that would swallow its prey whole now digests it, `engulf.digest`
   (2) codons a tick. The prey keeps running and can INJECT itself into its
   eater to escape. Its cores go to its eater with its codons, the same share

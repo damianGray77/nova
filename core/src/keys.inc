@@ -553,9 +553,10 @@ NOVA_NUMBER("contact.cost_per_codon", 1.0, 0, 1000000, 0, "Contact and eating", 
             "engulf.codons_per_tick, its thread busy (docs/inject-plan.md M7: INJECT priced like a bite).")
 NOVA_NUMBER("contact.inject_room", 1.0, 0, 1000000, 0, "Contact and eating", "INJECT room", "",
             "INJECT fails unless the host's code (its first block) is at least this x the injector's genome (0 = off).")
-NOVA_NUMBER("contact.inject_ratio", 2.0, 0, 1000000, 0, "Contact and eating", "INJECT size ratio", "",
-            "INJECT fails unless the host owns at least this x the memory the injector owns: a program moves only "
-            "into a much bigger one, so injecting its own bud fails (docs/inject-plan.md M6, Damian; 0 = off).")
+NOVA_NUMBER("contact.inject_ratio", 1.0, 0, 1000000, 0, "Contact and eating", "INJECT size ratio", "",
+            "INJECT fails unless the host owns more than this x the memory the injector owns. At 1 a program moves "
+            "only into a bigger one, so injecting its own bud fails, and a host barely bigger is all but "
+            "overwritten (docs/inject-plan.md M6, Damian; 0 = off).")
 NOVA_FLAG("engulf.bite", true, 0, "Contact and eating", "ENGULF bites", "",
           "ENGULF takes a bite of CX codons, of raw material or of a body; else it swallows whole prey (Phase 9). "
           "With bites a NOP surface no longer shields a body, and INJECT lands only through an open end (a wound: "

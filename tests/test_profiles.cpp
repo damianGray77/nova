@@ -221,7 +221,7 @@ bool role_soup(RoleSoup& f, Array<ProfileSample>* out) {
     }
     for (u32 g = 0; g < 3; ++g) {
         const u32 at = 4000 + 1000 * g;
-        // (5 codons: its hosts must be twice its size, docs/inject-plan.md M6)
+        // (5 codons: its hosts must be bigger, docs/inject-plan.md M6)
         const u32 b = plant(f.s, at, "INJECT NOP0 NOP0 NOP0 NOP0", 40);
         if (b == kNone)
             return false;

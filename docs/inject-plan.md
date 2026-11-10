@@ -7,7 +7,7 @@
 > - The memory it leaves is **zeros: free space, but not information** (M1).
 > - It may overwrite its host's code; the host may overwrite it (M2). It runs only on its own machinery, never the host's cores or NPU (M3).
 > - To propagate it **copies itself inside the host**; its daughters take over the host's resources; the host eventually dies, "just like viruses in a cell" (M4). When the host dies the parasite lives on (M5).
-> - **INJECT fails unless the victim is at least twice the injector's size** (M6). Meant to stop daughter infection as a way to propagate, and more realistic.
+> - **INJECT fails unless the victim is at least twice the injector's size** (M6). Meant to stop daughter infection as a way to propagate, and more realistic. *Lowered to "just larger" (Damian, 2026-11-10; see M6).*
 > - INJECT no longer costs what COPY does: priced like a bite instead, its mirror image (M7).
 > - **A whole swallow doesn't kill at once**: the prey is digested over time, long enough to INJECT itself into its eater and stop the digestion (S).
 > - **Each node's GPUs have their own warp width, 16 to 256 lanes** (W).
@@ -48,7 +48,8 @@
 - a swallowed body (S) simply stops being swallowed.
 - The rest of the host goes to waste as today.
 
-**M6. Size** (Damian). An INJECT lands only if the victim owns at least `contact.inject_ratio` (2) times the memory the injector owns. A bud is the same size as its parent, so injecting one's own daughter fails. The room rule stays: the host's first block must be at least the injector's genome (`contact.inject_room`, 1).
+**M6. Size** (Damian). An INJECT lands only if the victim owns more than `contact.inject_ratio` (1) times the memory the injector owns. A bud is the same size as its parent, so injecting one's own daughter fails. The room rule stays: the host's first block must be at least the injector's genome (`contact.inject_room`, 1).
+- *Was "at least 2 times" until 2026-11-10.* long7 showed it shut replicators out: with nearly every program 32-48 codons, lineage members landed 2 of about 17,800 INJECT attempts in a night, and 99.8% of parasites were sparks (5-25 codons) with no lineage. Damian: "lower the barrier of entry to just larger rather than 2x. This should allow parasites to almost completely overwrite their hosts if the hosts are small enough while still making physical sense, and I think this is a viable strategy (eg. parasitic wasps)."
 
 **M7. Price** (Damian: not COPY's price). Priced like a bite, its mirror image:
 - `contact.cost_per_codon` per codon moved, as ENGULF pays;

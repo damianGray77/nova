@@ -483,7 +483,9 @@ void founders_in_the_csv() {
     CHECK(make_run(run, cfg.c_str(), 4));
     TextBuf err;
     CHECK(run.open_stats(csv, 50, &err));
-    run.run_until(400);
+    // (1,000 ticks: since INJECT needs a host only just bigger (M6, 2026-11-10)
+    // this world founds its first unseeded lineage between ticks 400 and 600.)
+    run.run_until(1000);
     run.finish();
     u64 by[kOriginCount] = {}, founded = 0;
     for (u32 n = 0; n < run.world().node_count(); ++n) {
@@ -505,7 +507,7 @@ void founders_in_the_csv() {
           wake == by[kOriginWake]);
     CHECK(spark + daughter + arrival + wake + by[kOriginUnknown] == founded);
     CHECK(by[kOriginUnknown] >= 1 && founded > by[kOriginUnknown]); // the seeds, and life since
-    printf("  detect: founders by origin, 24-node dispersal world, 400 ticks: %llu spark, %llu daughter, "
+    printf("  detect: founders by origin, 24-node dispersal world, 1,000 ticks: %llu spark, %llu daughter, "
            "%llu arrival, %llu wake, %llu unknown (seeded)\n",
            static_cast<unsigned long long>(spark), static_cast<unsigned long long>(daughter),
            static_cast<unsigned long long>(arrival), static_cast<unsigned long long>(wake),
@@ -556,9 +558,10 @@ void parasite_links() {
 // The replicator the home rig found first (design.md 6.6) buds blank
 // daughters and blind-injects itself into them. Under the wound rule
 // (docs/bites-plan.md I1) that worked again, and long5 was full of it.
-// INJECT moves the program now (docs/inject-plan.md M1) and needs a host at
-// least twice its size (M6, Damian: "That should stop daughter infection as
-// a means of propagation"), so its buds can't take it: no lineage at all.
+// INJECT moves the program now (docs/inject-plan.md M1) and needs a host
+// bigger than itself (M6, Damian: "That should stop daughter infection as a
+// means of propagation"; just bigger since 2026-11-10), so its buds can't
+// take it: no lineage at all.
 void bud_and_inject_replicator() {
     const char* genome = "seed.genome = NOP0 POP NOP0 PUSH NOP0 POP SENSE INJECT ALLOC AND SENSE ADD "
                          "PUSH NOP0 POP SENSE INJECT DIVIDE OR SENSE SHL PUSH NOP0 POP EMIT GPU "

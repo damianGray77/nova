@@ -14,9 +14,11 @@ namespace {
 // The busy soup world (helpers.h) at tick 300 under the defaults, and with
 // Phase 1a's rules (kPhase1aRules). Re-pinned 2026-11-08 for docs/bites-plan.md
 // (INJECT only through wounds, bleeding, bites without immunity); the second
-// again 2026-11-09 for docs/inject-plan.md (INJECT moves the program).
+// again 2026-11-09 for docs/inject-plan.md (INJECT moves the program) and
+// 2026-11-10 for its size rule (a host just bigger, not twice: M6). The
+// defaults' world didn't change with that: its sparks can't pay their upkeep.
 constexpr u64 kPinnedDefault = 0xf537de099f13cb24ull;
-constexpr u64 kPinnedPhase1aRules = 0xff50968554057dcbull;
+constexpr u64 kPinnedPhase1aRules = 0xdc04ae762f7b12b4ull;
 
 // Heat and hazards off; upkeep left to each test.
 const char* const kCalm = "heat.enabled = false\nhazard.copy = 0\nhazard.flaw = 0\nhazard.rot = 0\n";
@@ -277,8 +279,8 @@ void spark_knobs() {
 
 // INJECT's criteria (docs/inject-plan.md M1, M2, M6, M7; docs/bites-plan.md
 // I1): it lands only through an open end of the host's code (an end whose
-// outermost codon isn't a NOP: a wound), only on a host owning at least
-// contact.inject_ratio (2) x the injector's memory, whose code has room for
+// outermost codon isn't a NOP: a wound), only on a host owning more than
+// contact.inject_ratio (1) x the injector's memory, whose code has room for
 // the injector's genome. The whole injector moves in: its genome overwrites
 // the host's codons just inside the wound, its thread carries on there as a
 // parasite, and the memory it leaves is zeros. A failure leaves both as they
@@ -354,13 +356,21 @@ void inject_rules() {
     // both ends is closed.
     CHECK(inject_once("INJECT INC INC", "INC INC INC INC INC INC").ok);
     CHECK(!inject_once("INJECT INC INC", "NOP1 INC INC INC INC NOP0").ok);
-    // M6 (Damian): the host must own twice the injector's memory. 5 codons
-    // against 3 fails, leaving both as they were, and costs the attempt.
-    Injection small = inject_once("INJECT NOP0 INC", "NOP1 INC INC INC INC");
-    CHECK(!small.ok && small.intact && small.cost == 9 && !small.parasite && small.ip == 102 && small.sound);
-    CHECK(inject_once("INJECT NOP0 INC", "NOP1 INC INC INC INC", "contact.inject_ratio = 1.5\n").ok);
-    // An equal-sized host (a bud) never qualifies, nor a smaller one.
-    CHECK(!inject_once("INJECT NOP0 INC", "NOP1 INC INC").ok);
+    // M6 (Damian, 2026-11-10: "just larger rather than 2x"): the host must own
+    // more memory than the injector. An equal-sized host (a bud) fails,
+    // leaving both as they were, and costs the attempt; so does a smaller one.
+    Injection same = inject_once("INJECT NOP0 INC", "NOP1 INC INC");
+    CHECK(!same.ok && same.intact && same.cost == 9 && !same.parasite && same.ip == 102 && same.sound);
+    CHECK(!inject_once("INJECT NOP0 INC", "NOP1 INC").ok);
+    // One codon bigger is enough, and the injector overwrites all of the host
+    // but its first codon: a parasitoid's way, eating its host from within.
+    Injection snug = inject_once("INJECT NOP0 INC", "NOP1 INC INC INC");
+    CHECK(snug.ok && snug.after[0] == snug.before[0] && snug.parasite && snug.sound);
+    CHECK(snug.after[1] == snug.inj[0] && snug.after[2] == snug.inj[1] && snug.after[3] == snug.inj[2]);
+    // contact.inject_ratio scales it: at 2 the host must own more than twice
+    // the injector's memory, so 6 codons against 3 fail and 7 land.
+    CHECK(!inject_once("INJECT NOP0 INC", "NOP1 INC INC INC INC INC", "contact.inject_ratio = 2\n").ok);
+    CHECK(inject_once("INJECT NOP0 INC", "NOP1 INC INC INC INC INC INC", "contact.inject_ratio = 2\n").ok);
     // With the ratio off, the room rule: the host's code must hold the genome,
     // 3 codons into 2 fails; contact.inject_room = 0 truncates it to the host.
     CHECK(!inject_once("INJECT NOP0 INC", "NOP1 INC", "contact.inject_ratio = 0\n").ok);
