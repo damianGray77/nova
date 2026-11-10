@@ -497,7 +497,8 @@ bool Run::open_lineages(const char* path, TextBuf* err) {
 }
 
 void Run::run_until(u64 tick) {
-    while (world_.tick() < tick)
+    // (A failed GPU stops the world: its step returns without a tick.)
+    while (world_.tick() < tick && !world_.warp_failed())
         step();
 }
 

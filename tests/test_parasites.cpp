@@ -292,6 +292,44 @@ void test_handover() {
     CHECK(soup_ok(f.s));
 }
 
+// A parasite whose host is swallowed and digested away moves into the eater
+// (absorb's rehost), and its thread, which ran in its host's code, lets go of
+// the host's emptied block before that block is freed for reuse (long7, tick
+// 104,301: the slot went to an unrelated body and the parasite's wrap range
+// with it).
+void test_parasite_host_digested() {
+    PFix f;
+    CHECK(f.init("life.bleed_every = 0\nworld.millicores = 2000\nengulf.bite = true\nengulf.digest = 2\n"));
+    TextBuf eater_code; // (aimed: its NOP0 template finds the host's NOP1 surface)
+    eater_code.append("ENGULF NOP0");
+    for (int i = 0; i < 27; ++i)
+        eater_code.append(" INC");
+    eater_code.append(" NOP0");
+    const u32 e = plant(f.s, 100, eater_code.c_str(), 500); // [100, 130)
+    const u32 inj = plant(f.s, 300, "INJECT INC INC", 300);
+    TextBuf host_code;
+    host_code.append("NOP1");
+    for (int i = 0; i < 9; ++i)
+        host_code.append(" INC");
+    const u32 host = plant(f.s, 200, host_code.c_str(), 300); // [200, 210), its tail open
+    CHECK(e != kNone && inj != kNone && host != kNone);
+    const u32 pc = f.s.body(inj).cpus;
+    f.s.run_cpu(pc, 1);
+    CHECK(f.s.is_parasite(inj) && f.s.host_of(inj) == host && f.s.cpu(pc).block == f.s.body(host).blocks);
+    const u32 hk = f.s.body(host).blocks;
+    f.s.cpu_mut(f.s.body(e).cpus).cx = 10; // a third of 30: the whole host
+    f.s.run_cpu(f.s.body(e).cpus, 1);
+    CHECK(f.s.is_swallowed(host) && f.s.host_of(host) == e && soup_ok(f.s));
+    for (u32 i = 0; i < 5 && f.s.body(host).alive; ++i) {
+        f.s.digest();
+        f.s.death_sweep(); // (the absorbed host's slot leaves the schedule, as at a tick's end)
+        CHECK(soup_ok(f.s));
+    }
+    CHECK(!f.s.body(host).alive && f.s.is_parasite(inj) && f.s.host_of(inj) == e);
+    // Its thread's wrap block: not the host's old one (free now, and anyone's next).
+    CHECK(f.s.cpu(pc).block != hk && (f.s.cpu(pc).block == kNone || f.s.block(f.s.cpu(pc).block).body == e));
+}
+
 // A busy procedural world with bites on, digestion and fast bleeding:
 // wounds, bleeding, repairs-or-not, programs moving into hosts, swallows and
 // digestion all happen, and the world is the same at 1, 4 and 20 threads and
@@ -356,5 +394,6 @@ void suite_parasites() {
     test_parasite_limits();
     test_swallowed();
     test_handover();
+    test_parasite_host_digested();
     test_world();
 }

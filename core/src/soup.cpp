@@ -1701,7 +1701,6 @@ void Soup::free_guest(u32 g, u32 host_first, u32 host_lo, u32 host_hi) {
 void Soup::absorb(u32 prey, u32 eater) {
     Body& P = bodies_[prey];
     Body& E = bodies_[eater];
-    rehost_guests(prey, eater); // its own guests: inside the eater now
     if (!stamp_.empty()) { // its code stays its (salvage)
         const u32 g = genome_len(prey);
         for (u32 k = P.blocks; k != kNone; k = blocks_[k].next)
@@ -1728,6 +1727,10 @@ void Soup::absorb(u32 prey, u32 eater) {
         }
         k = nk;
     }
+    // Its own guests: inside the eater now. (After its emptied blocks are
+    // forgotten: forget_block clears its parasites' threads off them only
+    // while they are still its guests. long7, tick 104,301.)
+    rehost_guests(prey, eater);
     E.mem += P.mem;
     for (u32 c = P.cpus; c != kNone;) {
         const u32 next = cpus_[c].next;
